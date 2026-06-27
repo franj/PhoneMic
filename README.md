@@ -58,14 +58,14 @@ git clone https://gitee.com/franj/PhoneMic.git
 
 cd phonemic
 
-# 安装 Poetry（如未安装）
-pip install poetry
+# 安装 uv（如未安装）
+pip install uv
 
 # 安装依赖
-poetry install
+uv sync
 
 # 运行程序
-poetry run python -m phonemic.PhoneMic
+uv run python -m phonemic.PhoneMic
 ```
 
 ## 🛠 语音命令（扩展功能）
