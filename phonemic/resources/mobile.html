@@ -2,11 +2,11 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>📱🎙️PhoneMic💬💻</title>
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
     <style>
-        /* ========== 基础样式 (保持不变) ========== */
+        /* ========== 基础样式 ========== */
         :root {
             --bg-color: #f3f4f6;
             --bubble-bg: #95ec69;
@@ -19,17 +19,22 @@
         body, html {
             margin: 0;
             padding: 0;
-            height: 100dvh;
+            height: 100%;       /* 降级方案 */
+            height: 100dvh;     /* 优先使用 dvh，不支持的自动忽略 */
+            width: 100%;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background-color: var(--bg-color);
             overflow: hidden;
+            overscroll-behavior: none; /* 禁用系统级下拉刷新 */
             -webkit-tap-highlight-color: transparent;
         }
         #app {
             display: flex;
             flex-direction: column;
             height: 100%;
-            min-height: 0; 
+            width: 100%;
+            overflow: hidden; 
+            position: relative;
         }
         #status-bar {
             display: none;
@@ -44,13 +49,19 @@
         #chat-list {
             flex: 1;
             overflow-y: auto;
+            -webkit-overflow-scrolling: touch; /* 保证 iOS 滚动顺畅 */
+            overscroll-behavior-y: contain; /* 阻止滚动链穿透 */
             padding: 15px;
             padding-bottom: 20px;
             display: flex;
             flex-direction: column;
             gap: 12px;
-            scroll-behavior: smooth;
-            justify-content: flex-end; 
+            box-sizing: border-box;
+        }
+        /* 关键：消息较少时，通过 spacer 将消息推向底部 */
+        .chat-spacer {
+            flex: 1 1 auto;
+            pointer-events: none;
         }
         .message {
             align-self: flex-end;
@@ -189,7 +200,10 @@
 <body>
 <div id="app">
     <div id="status-bar"></div>
-    <div id="chat-list"></div>
+    <div id="chat-list">
+        <!-- Spacer 占位符置于顶部 -->
+        <div id="chat-spacer" class="chat-spacer"></div>
+    </div>
     <div id="bottom-bar">
         <button id="btn-clear" aria-label="清空输入框">🗑️</button>
         <div class="input-wrapper">
@@ -240,6 +254,35 @@
 </script>
 
 <script>
+    // ========== 0. 视口大小全局监听器 (解决移动端虚拟键盘遮挡与滚动问题) ==========
+    (function() {
+        const app = document.getElementById('app');
+        function adjustViewport() {
+            if (window.visualViewport) {
+                const height = window.visualViewport.height;
+                app.style.height = `${height}px`;
+                // 强制重置窗口滚动偏移，防止 iOS 全局页面向上偏移并卡死
+                window.scrollTo(0, 0);
+                if (window.chatManagerInstance) {
+                    window.chatManagerInstance.scrollToBottom();
+                }
+            }
+        }
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', adjustViewport);
+            window.visualViewport.addEventListener('scroll', adjustViewport);
+        } else {
+            window.addEventListener('resize', () => {
+                app.style.height = `${window.innerHeight}px`;
+                if (window.chatManagerInstance) {
+                    window.chatManagerInstance.scrollToBottom();
+                }
+            });
+        }
+        window.addEventListener('DOMContentLoaded', adjustViewport);
+        window.addEventListener('load', adjustViewport);
+    })();
+
     // ========== 1. 配置管理器 (支持动态更新) ==========
     class ConfigManager {
         constructor(defaults) {
@@ -289,19 +332,26 @@
             return msgDiv;
         }
         trimToLimit() {
-            const children = this.container.children;
-            const excess = children.length - this.maxHistory;
+            const messages = Array.from(this.container.querySelectorAll('.message'));
+            const excess = messages.length - this.maxHistory;
             if (excess > 0) {
                 for (let i = 0; i < excess; i++) {
-                    this.container.removeChild(children[0]);
+                    messages[i].remove();
                 }
             }
         }
         scrollToBottom() {
-            setTimeout(() => { this.container.scrollTop = this.container.scrollHeight; }, 50);
+            // 通过多阶段强制滚动，保证在键盘弹起和DOM重新绘制时准确定位底部
+            const doScroll = () => {
+                this.container.scrollTop = this.container.scrollHeight;
+            };
+            doScroll();
+            requestAnimationFrame(doScroll);
+            setTimeout(doScroll, 30);
+            setTimeout(doScroll, 150);
         }
         getAllMessages() {
-            return Array.from(this.container.children);
+            return Array.from(this.container.querySelectorAll('.message'));
         }
     }
 
@@ -409,7 +459,6 @@
                     this.ui.adjustHeight();
                     this.ui.wsClient.send('preview', newValue);
                     this.ui.updateModeToggleVisibility();
-                    this.ui.inputBox.focus();
                     if (navigator.vibrate) navigator.vibrate(30);
                     this.longPressTriggered = true;
                 }
@@ -419,8 +468,12 @@
         _onEnd(e) {
             if (this.pressTimer) clearTimeout(this.pressTimer);
             this._clearHighlight();
-            if (this.longPressTriggered && e.cancelable) e.preventDefault();
-            this.longPressTriggered = false;
+            if (this.longPressTriggered) {
+                if (e.cancelable) e.preventDefault();
+                // 在 touchend 这个原生用户手势信任链内执行 focus()，保证 100% 能够拉起虚拟键盘
+                this.ui.inputBox.focus();
+                this.longPressTriggered = false;
+            }
             this.currentMsg = null;
         }
         _onCancel() {
@@ -446,7 +499,7 @@
             this.config = configManager;
             this.autoMode = true;
             this.isComposing = false;
-            // 设置清空按钮的 aria-label
+            
             this.btnClear.setAttribute('aria-label', window.i18n.btn_clear_aria);
             this.initEventListeners();
             this.updateSendButtonUI();
@@ -501,6 +554,15 @@
                 this.updateModeToggleVisibility();
                 this.inputBox.focus();
             });
+            
+            // 当输入框获取焦点时，连续执行几次滚动置底，防范键盘弹出动画延迟
+            this.inputBox.addEventListener('focus', () => {
+                this.chatManager.scrollToBottom();
+                setTimeout(() => this.chatManager.scrollToBottom(), 50);
+                setTimeout(() => this.chatManager.scrollToBottom(), 150);
+                setTimeout(() => this.chatManager.scrollToBottom(), 300);
+            });
+
             document.addEventListener('ws-status', (e) => this.onConnectionChange(e.detail.connected));
             this.setupScrollFix();
         }
@@ -522,6 +584,7 @@
         adjustHeight() {
             this.inputBox.style.height = 'auto';
             this.inputBox.style.height = this.inputBox.scrollHeight + 'px';
+            this.chatManager.scrollToBottom();
         }
         updateSendButtonUI() {
             if (this.autoMode) {
@@ -566,22 +629,22 @@
             }
         }
         setupScrollFix() {
-            const chatList = document.getElementById('chat-list');
-            const forceVisible = () => {
-                setTimeout(() => {
-                    window.scrollTo(0, 0);
-                    if (chatList) chatList.scrollTop = chatList.scrollHeight;
-                    if (this.inputBox) this.inputBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-                }, 100);
+            const resetViewport = () => {
+                window.scrollTo(0, 0);
+                this.chatManager.scrollToBottom();
             };
-            this.inputBox.addEventListener('blur', forceVisible);
+            this.inputBox.addEventListener('blur', resetViewport);
             document.addEventListener('focusout', (e) => {
-                if (!this.inputBox.contains(e.relatedTarget)) forceVisible();
+                if (!this.inputBox.contains(e.relatedTarget)) {
+                    resetViewport();
+                }
             });
             document.addEventListener('visibilitychange', () => {
-                if (!document.hidden) forceVisible();
+                if (!document.hidden) {
+                    resetViewport();
+                }
             });
-            window.addEventListener('popstate', forceVisible);
+            window.addEventListener('popstate', resetViewport);
         }
     }
 
@@ -594,6 +657,9 @@
         const modeToggle = document.getElementById('mode-toggle');
 
         const chatManager = new ChatListManager(chatContainer, appConfig);
+        // 注册到全局以便 0. 中的 viewport 适配器能够调用它
+        window.chatManagerInstance = chatManager;
+
         const wsClient = new WSClient(`ws://${window.location.host}/ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
         
