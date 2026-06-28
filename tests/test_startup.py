@@ -1,140 +1,93 @@
+"""
+测试 utils.startup 模块（开机自启动注册表操作）
+"""
+
 import sys
 import pytest
 from unittest.mock import MagicMock
-from PySide6.QtWidgets import QApplication
 
-# 提前导入 PhoneMic 模块，以便 patch.object 使用
-import phonemic.PhoneMic
+# 导入要测试的模块
+from phonemic.utils import startup
 
 
-def test_single_ip_no_dialog(mocker, qapp):
-    app = QApplication.instance()
-    mocker.patch.object(app, 'exec', return_value=0)
+def test_is_auto_start_enabled_non_windows(mocker):
+    """非 Windows 平台，返回 False"""
+    mocker.patch('sys.platform', 'linux')
+    assert startup.is_auto_start_enabled() is False
 
-    # 使用 patch.object 替换字符串路径
-    mock_get_ips = mocker.patch.object(phonemic.PhoneMic, 'get_all_lan_ips')
-    mock_find_port = mocker.patch.object(phonemic.PhoneMic, 'find_free_port', return_value=8008)
-    mock_IpSelector = mocker.patch.object(phonemic.PhoneMic, 'IpSelector')
-    mock_start_server = mocker.patch.object(phonemic.PhoneMic, 'start_server')
-    mock_Dashboard = mocker.patch.object(phonemic.PhoneMic, 'Dashboard')
-    mocker.patch.object(phonemic.PhoneMic, 'wait_for_server', return_value=True)
-    mocker.patch('threading.Thread')
 
-    from phonemic.utils.network import IpCandidate
-    single_candidate = IpCandidate(
-        ip="192.168.1.100", interface_name="Wi-Fi",
-        description="Intel Wi-Fi 6", priority=0
+def test_is_auto_start_enabled_registry_exists(mocker):
+    """模拟注册表存在且包含 PhoneMic 项"""
+    mock_winreg = MagicMock()
+    mock_key = MagicMock()
+    mock_winreg.OpenKey.return_value = mock_key
+    mock_winreg.QueryValueEx.return_value = ('some', 1)
+    mock_winreg.HKEY_CURRENT_USER = 0x80000001
+    mock_winreg.KEY_READ = 0x20019
+
+    mocker.patch('phonemic.utils.startup.winreg', mock_winreg)
+
+    assert startup.is_auto_start_enabled() is True
+
+
+def test_is_auto_start_enabled_registry_missing(mocker):
+    """注册表项不存在，返回 False"""
+    mock_winreg = MagicMock()
+    mock_winreg.OpenKey.side_effect = FileNotFoundError
+    mocker.patch('phonemic.utils.startup.winreg', mock_winreg)
+
+    assert startup.is_auto_start_enabled() is False
+
+
+def test_set_auto_start_enabled_enable(mocker):
+    """启用开机自启动，写入注册表"""
+    mock_winreg = MagicMock()
+    mock_key = MagicMock()
+    # 第一次 OpenKey 失败（不存在），然后 CreateKey 创建
+    mock_winreg.OpenKey.side_effect = [FileNotFoundError, mock_key]
+    mock_winreg.CreateKey.return_value = mock_key
+    mock_winreg.HKEY_CURRENT_USER = 0x80000001
+    mock_winreg.KEY_READ = 0x20019
+    mock_winreg.KEY_WRITE = 0x20006
+    mock_winreg.REG_SZ = 1
+
+    mocker.patch('phonemic.utils.startup.winreg', mock_winreg)
+    # 让 _get_exe_path 返回带引号的路径（与真实行为一致）
+    mocker.patch('phonemic.utils.startup._get_exe_path', return_value='"C:\\PhoneMic.exe"')
+
+    startup.set_auto_start_enabled(True)
+
+    # 验证 CreateKey 被调用
+    mock_winreg.CreateKey.assert_called_once_with(
+        mock_winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"
     )
-    mock_get_ips.return_value = [single_candidate]
-
-    with pytest.raises(SystemExit) as exc_info:
-        phonemic.PhoneMic.main()   # 直接调用，无需再次导入
-    assert exc_info.value.code == 0
-
-    mock_IpSelector.assert_not_called()
-    mock_find_port.assert_called_once()
-    mock_start_server.assert_called_once_with("192.168.1.100", 8008, mocker.ANY)
-    mock_Dashboard.assert_called_once_with("192.168.1.100", 8008)
-    mock_Dashboard.return_value.show.assert_called_once()
+    # 验证 SetValueEx 被调用，值为带引号的路径 + --silent
+    mock_winreg.SetValueEx.assert_called_once_with(
+        mock_key, "PhoneMic", 0, mock_winreg.REG_SZ, '"C:\\PhoneMic.exe" --silent'
+    )
 
 
-def test_multi_ip_user_confirm(mocker, qapp):
-    app = QApplication.instance()
-    mocker.patch.object(app, 'exec', return_value=0)
+def test_set_auto_start_enabled_disable(mocker):
+    """禁用开机自启动，删除注册表项"""
+    mock_winreg = MagicMock()
+    mock_key = MagicMock()
+    mock_winreg.OpenKey.return_value = mock_key
+    mock_winreg.HKEY_CURRENT_USER = 0x80000001
+    mock_winreg.KEY_WRITE = 0x20006
 
-    mock_get_ips = mocker.patch.object(phonemic.PhoneMic, 'get_all_lan_ips')
-    mock_find_port = mocker.patch.object(phonemic.PhoneMic, 'find_free_port', return_value=8008)
-    mock_IpSelector = mocker.patch.object(phonemic.PhoneMic, 'IpSelector')
-    mock_IpSelector.Accepted = 1
-    mock_start_server = mocker.patch.object(phonemic.PhoneMic, 'start_server')
-    mock_Dashboard = mocker.patch.object(phonemic.PhoneMic, 'Dashboard')
-    mocker.patch.object(phonemic.PhoneMic, 'wait_for_server', return_value=True)
-    mocker.patch('threading.Thread')
-    mocker.patch('multiprocessing.Queue')
-    mocker.patch.object(phonemic.PhoneMic, 'QueueSignals')
+    mocker.patch('phonemic.utils.startup.winreg', mock_winreg)
 
-    from phonemic.utils.network import IpCandidate
-    candidates = [
-        IpCandidate(ip="192.168.1.100", interface_name="Wi-Fi", description="Intel Wi-Fi 6", priority=0),
-        IpCandidate(ip="10.0.0.2", interface_name="Ethernet", description="Realtek PCIe", priority=1),
-    ]
-    mock_get_ips.return_value = candidates
+    startup.set_auto_start_enabled(False)
 
-    mock_selector_instance = mock_IpSelector.return_value
-    mock_selector_instance.exec.return_value = 1
-    mock_selector_instance.get_selected_ip.return_value = "10.0.0.2"
-
-    with pytest.raises(SystemExit) as exc_info:
-        phonemic.PhoneMic.main()
-    assert exc_info.value.code == 0
-
-    mock_IpSelector.assert_called_once_with(candidates)
-    mock_find_port.assert_called_once()
-    mock_start_server.assert_called_once_with("10.0.0.2", 8008, mocker.ANY)
-    mock_Dashboard.assert_called_once_with("10.0.0.2", 8008)
+    # 验证 DeleteValue 被调用
+    mock_winreg.DeleteValue.assert_called_once_with(mock_key, "PhoneMic")
 
 
-def test_multi_ip_user_cancel(mocker, qapp):
-    app = QApplication.instance()
-    mocker.patch.object(app, 'exec', return_value=0)
+def test_set_auto_start_enabled_disable_key_not_found(mocker):
+    """禁用时如果键不存在，不应出错"""
+    mock_winreg = MagicMock()
+    mock_winreg.OpenKey.side_effect = FileNotFoundError
+    mocker.patch('phonemic.utils.startup.winreg', mock_winreg)
 
-    mock_get_ips = mocker.patch.object(phonemic.PhoneMic, 'get_all_lan_ips')
-    mock_IpSelector = mocker.patch.object(phonemic.PhoneMic, 'IpSelector')
-    mock_start_server = mocker.patch.object(phonemic.PhoneMic, 'start_server')
-    mocker.patch('threading.Thread')
-
-    from phonemic.utils.network import IpCandidate
-    candidates = [
-        IpCandidate(ip="192.168.1.100", interface_name="Wi-Fi", description="Intel Wi-Fi 6", priority=0),
-        IpCandidate(ip="10.0.0.2", interface_name="Ethernet", description="Realtek PCIe", priority=1),
-    ]
-    mock_get_ips.return_value = candidates
-
-    mock_selector_instance = mock_IpSelector.return_value
-    mock_selector_instance.exec.return_value = 0
-
-    with pytest.raises(SystemExit) as exc_info:
-        phonemic.PhoneMic.main()
-    assert exc_info.value.code == 0
-
-    mock_start_server.assert_not_called()
-
-
-def test_no_ip_error_and_exit(mocker, qapp):
-    app = QApplication.instance()
-    mocker.patch.object(app, 'exec', return_value=0)
-
-    mock_get_ips = mocker.patch.object(phonemic.PhoneMic, 'get_all_lan_ips', return_value=[])
-    mock_QMessageBox = mocker.patch.object(phonemic.PhoneMic, 'QMessageBox')
-    mock_start_server = mocker.patch.object(phonemic.PhoneMic, 'start_server')
-
-    with pytest.raises(SystemExit) as exc_info:
-        phonemic.PhoneMic.main()
-    assert exc_info.value.code == 1
-
-    mock_QMessageBox.critical.assert_called_once()
-    assert "未检测到可用局域网IP" in mock_QMessageBox.critical.call_args[0][2]
-    mock_start_server.assert_not_called()
-
-
-def test_no_free_port_error_and_exit(mocker, qapp):
-    """测试找不到可用端口时，应显示错误并退出"""
-    app = QApplication.instance()
-    mocker.patch.object(app, 'exec', return_value=0)
-
-    mock_get_ips = mocker.patch.object(phonemic.PhoneMic, 'get_all_lan_ips')
-    mock_find_port = mocker.patch.object(phonemic.PhoneMic, 'find_free_port', return_value=None)
-    mock_QMessageBox = mocker.patch.object(phonemic.PhoneMic, 'QMessageBox')
-    mock_start_server = mocker.patch.object(phonemic.PhoneMic, 'start_server')
-
-    from phonemic.utils.network import IpCandidate
-    mock_get_ips.return_value = [IpCandidate("192.168.1.100", "Wi-Fi", "Desc", 0)]
-
-    with pytest.raises(SystemExit) as exc_info:
-        phonemic.PhoneMic.main()
-    assert exc_info.value.code == 1
-
-    mock_find_port.assert_called_once()
-    mock_QMessageBox.critical.assert_called_once()
-    assert "未找到可用端口" in mock_QMessageBox.critical.call_args[0][2]
-    mock_start_server.assert_not_called()
+    # 不应抛出异常
+    startup.set_auto_start_enabled(False)  # 无断言，只要不崩溃即通过

@@ -1,3 +1,5 @@
+# settings_dialog.py (完整文件)
+
 """
 设置对话框 - 通用配置
 支持窗口水平拉伸，便于后续扩展复杂配置（如动作映射表）
@@ -13,8 +15,10 @@ from PySide6.QtWidgets import (
 )
 
 from phonemic.utils.settings_manager import SettingsManager
-from phonemic.utils.i18n import I18n  # 国际化单例
-from phonemic.utils import i18n  # 国际化单例
+from phonemic.utils.i18n import I18n
+from phonemic.utils import i18n
+# 暂时导入 startup 桩（后续实现）
+from phonemic.utils import startup
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +33,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(self.i18n.tr("settings.title"))
         self.setModal(True)
 
-        # 允许窗口自由调整大小，但限制最小尺寸
         self.setMinimumWidth(400)
-        self.resize(500, 700)
+        self.resize(500, 750)  # 增加高度以适应新分组
 
         self._setup_ui()
         self._load_settings()
@@ -56,6 +59,7 @@ class SettingsDialog(QDialog):
         content_layout.addWidget(self._create_hud_group())
         content_layout.addWidget(self._create_chat_group())
         content_layout.addWidget(self._create_close_action_group())
+        content_layout.addWidget(self._create_startup_group())   # 新增
         content_layout.addWidget(self._create_other_group())
         content_layout.addStretch()
 
@@ -114,21 +118,40 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(12, 16, 12, 12)
 
         self.close_combo = QComboBox()
-        # 1. 添加占位项（索引0），不可选
+        # 占位项
         self.close_combo.addItem(self.i18n.tr("settings.close_placeholder"), None)
-        # 设置占位项为不可选
         model = self.close_combo.model()
         if model:
             item = model.item(0, 0)
             if item:
                 item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
-
-        # 2. 添加有效选项
+        # 有效选项
         self.close_combo.addItem(self.i18n.tr("settings.close_quit"), "quit")
         self.close_combo.addItem(self.i18n.tr("settings.close_tray"), "tray")
 
         self.close_combo.setToolTip(self.i18n.tr("settings.close_tooltip"))
         layout.addRow(self.i18n.tr("settings.close_behavior") + ":", self.close_combo)
+
+        return group
+
+    def _create_startup_group(self):
+        group = QGroupBox(self.i18n.tr("settings.startup_group"))
+        layout = QFormLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 16, 12, 12)
+
+        # 开机自启动复选框
+        self.auto_start_check = QCheckBox(self.i18n.tr("settings.auto_start"))
+        self.auto_start_check.setToolTip(self.i18n.tr("settings.auto_start_tooltip"))
+        layout.addRow(self.auto_start_check)
+
+        # 网络选择策略下拉框
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem(self.i18n.tr("settings.mode_auto"), "auto")
+        self.mode_combo.addItem(self.i18n.tr("settings.mode_last"), "last")
+        self.mode_combo.addItem(self.i18n.tr("settings.mode_ask"), "ask")
+        self.mode_combo.setToolTip(self.i18n.tr("settings.mode_tooltip"))
+        layout.addRow(self.i18n.tr("settings.mode_label") + ":", self.mode_combo)
 
         return group
 
@@ -155,21 +178,26 @@ class SettingsDialog(QDialog):
 
         self.max_records_spin.setValue(self.sm.get("mobile_max_records", 10))
 
-        # 加载关闭行为配置
+        # 关闭行为
         close_action = self.sm.get("close_action", None)
         if close_action == "quit":
-            self.close_combo.setCurrentIndex(1)   # 索引1是"退出程序"
+            self.close_combo.setCurrentIndex(1)
         elif close_action == "tray":
-            self.close_combo.setCurrentIndex(2)   # 索引2是"最小化到托盘"
+            self.close_combo.setCurrentIndex(2)
         else:
-            # 未设置，显示占位项（索引0）
             self.close_combo.setCurrentIndex(0)
+
+        # 启动选项
+        # 开机自启动状态从注册表读取
+        self.auto_start_check.setChecked(startup.is_auto_start_enabled())
+        # 网络选择策略
+        mode = self.sm.get("network_selection_mode", "ask")
+        self.set_combo_index(self.mode_combo, mode)
 
         lang = self.sm.get("language", "zh_CN")
         self.set_combo_index(self.lang_combo, lang)
 
     def _save_settings(self):
-
         self.sm.set("hud_timeout_sec", self.timeout_spin.value())
 
         selected_data = self.font_combo.currentData()
@@ -180,11 +208,16 @@ class SettingsDialog(QDialog):
 
         self.sm.set("mobile_max_records", self.max_records_spin.value())
 
-        # 保存关闭行为：如果当前选中的是占位项（索引0），则不保存（保持原值）
+        # 关闭行为
         current_index = self.close_combo.currentIndex()
         if current_index != 0:
             self.sm.set("close_action", self.close_combo.currentData())
-        # 否则不修改配置（即如果之前未设置，保持None；如果之前有值，也不应被清空，但这里占位项不可选，用户无法主动选它，所以不会进入此分支）
+
+        # 启动选项
+        # 开机自启动
+        startup.set_auto_start_enabled(self.auto_start_check.isChecked())
+        # 网络选择策略
+        self.sm.set("network_selection_mode", self.mode_combo.currentData())
 
         old_lang = self.sm.get("language", "zh_CN")
         new_lang = self.lang_combo.currentData()

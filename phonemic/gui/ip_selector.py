@@ -1,21 +1,13 @@
-from typing import List
+from typing import List, Optional, Tuple
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QDialogButtonBox, QWidget, QMessageBox
 )
-from phonemic.utils.network import get_all_lan_ips
+from phonemic.utils.network import get_all_lan_ips, IpCandidate
 from phonemic.utils.i18n import I18n
 
-# IpCandidate 类型定义（实际应来自 utils.network，此处保留原导入逻辑）
-try:
-    from phonemic.utils.network import IpCandidate
-except ImportError:
-    from typing import NamedTuple
-    class IpCandidate(NamedTuple):
-        ip: str
-        description: str
-        priority: int
+# IpCandidate 已在 network 中定义，无需再定义
 
 
 class IpSelector(QDialog):
@@ -24,6 +16,8 @@ class IpSelector(QDialog):
     def __init__(self, candidates: List[IpCandidate], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.i18n = I18n.instance()
+        self._candidates = candidates  # 保存原始候选列表
+        self._selected_index = -1      # 默认为未选择
 
         self.setWindowTitle(self.i18n.tr("ip_selector.title"))
         self.setModal(True)
@@ -31,67 +25,64 @@ class IpSelector(QDialog):
 
         # 按 priority 升序排序
         sorted_candidates = sorted(candidates, key=lambda c: c.priority)
-
-        # 保存排序后的列表（用于 get_selected_ip）
         self._candidates = sorted_candidates
 
-        # 布局
         layout = QVBoxLayout(self)
 
-        # 提示标签（国际化）
         info_label = QLabel(self.i18n.tr("ip_selector.info"))
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
-        # 列表控件
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         layout.addWidget(self.list_widget)
 
-        # 填充列表
-        for cand in sorted_candidates:
-            # 显示文本：描述 - IP，也可以完全国际化，但 IP 和描述本身无需翻译
+        # 填充列表：显示描述 - IP，存储索引
+        for idx, cand in enumerate(sorted_candidates):
             item = QListWidgetItem(f"{cand.description} - {cand.ip}")
-            item.setData(Qt.UserRole, cand.ip)
+            item.setData(Qt.UserRole, idx)   # 存储索引
             self.list_widget.addItem(item)
 
-        # 默认选中第一项
         if self.list_widget.count() > 0:
             self.list_widget.setCurrentRow(0)
 
-        # 按钮（Ok/Cancel 使用标准按钮，Qt 会自动处理翻译，无需手动 tr）
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-        # 双击列表项等同于确定
         self.list_widget.itemDoubleClicked.connect(self.accept)
 
-    def get_selected_ip(self) -> str | None:
-        """获取用户选中的 IP 地址，仅在 exec() 返回后调用有效"""
+    def get_selected_candidate(self) -> Optional[IpCandidate]:
+        """获取用户选中的候选对象，若未选中或取消则返回 None"""
         if self.result() != QDialog.Accepted:
             return None
-
-        current_item = self.list_widget.currentItem()
-        if current_item is None:
+        current_row = self.list_widget.currentRow()
+        if current_row < 0 or current_row >= len(self._candidates):
             return None
+        return self._candidates[current_row]
 
-        ip = current_item.data(Qt.UserRole)
-        return ip if isinstance(ip, str) else None
+    # 为了兼容性，保留旧方法（但会废弃）
+    def get_selected_ip(self) -> Optional[str]:
+        cand = self.get_selected_candidate()
+        return cand.ip if cand else None
 
-def select_lan_ip(parent: QWidget | None = None) -> str | None:
+
+def select_lan_ip(parent: QWidget | None = None) -> Tuple[Optional[str], Optional[str]]:
     """
-    弹出 IP 选择对话框，返回用户选择的 IP 地址。
-    若取消或没有可用 IP，返回 None。
+    弹出 IP 选择对话框，返回用户选择的 (ip, mac)。
+    若取消或没有可用 IP，返回 (None, None)。
     """
     candidates = get_all_lan_ips()
     if not candidates:
         QMessageBox.critical(parent, "错误", "未检测到可用局域网IP，请检查网络连接。")
-        return None
+        return None, None
     if len(candidates) == 1:
-        return candidates[0].ip
+        return candidates[0].ip, candidates[0].mac
     selector = IpSelector(candidates, parent)
     if selector.exec() != QDialog.Accepted:
-        return None
-    return selector.get_selected_ip()
+        return None, None
+    selected = selector.get_selected_candidate()
+    if selected is None:
+        return None, None
+    return selected.ip, selected.mac

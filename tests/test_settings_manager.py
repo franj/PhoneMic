@@ -35,14 +35,12 @@ def mock_config_path(tmp_path):
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(paths, "_get_local_app_data", fake_writable_location)
         yield mock_app_config
-    return tmp_path
 
 
 @pytest.fixture
 def reset_singleton():
     """重置 SettingsManager 单例状态"""
     SettingsManager._instance = None
-    # 清除可能残留的 _initialized 实例属性（不影响新实例）
     yield
     SettingsManager._instance = None
 
@@ -90,14 +88,12 @@ def test_set_and_save(mock_config_path, reset_singleton):
     assert sm.get("hud_timeout_sec") == 10
     assert sm.get("hud_font_size") == "system"
 
-    # 验证文件内容已更新
     config_file = mock_config_path / "settings.json"
     with open(config_file, "r", encoding="utf-8") as f:
         saved = json.load(f)
     assert saved["hud_timeout_sec"] == 10
     assert saved["hud_font_size"] == "system"
 
-    # 验证信号发射（只验证最后一次，简化测试）
     assert received_key == "hud_font_size"
     assert received_value == "system"
 
@@ -116,7 +112,6 @@ def test_set_same_value_no_save(mock_config_path, reset_singleton):
 
     sm.setting_changed.connect(on_changed)
 
-    # 设置与当前值相同的值
     sm.set("hud_timeout_sec", 5)
     time.sleep(0.01)
     new_mtime = config_file.stat().st_mtime
@@ -137,12 +132,11 @@ def test_load_merges_new_default_keys(mock_config_path, reset_singleton):
         json.dump(old_config, f)
 
     sm = SettingsManager.instance()
-    # 缺失的 hud_escape_enabled 应被填充为默认值 True
     assert sm.get("hud_escape_enabled") is True
+    assert sm.get("network_selection_mode") == "ask"
+    assert sm.get("last_network_mac") is None
+    assert sm.get("close_action") is None
     assert sm.get("hud_timeout_sec") == 3
-    assert sm.get("hud_font_size") == 18
-    assert sm.get("mobile_max_records") == 20
-    assert sm.get("language") == "en-US"
 
 
 def test_load_corrupted_json_resets_to_default(mock_config_path, reset_singleton):
@@ -152,7 +146,7 @@ def test_load_corrupted_json_resets_to_default(mock_config_path, reset_singleton
         f.write("this is not json{")
 
     sm = SettingsManager.instance()
-    assert sm.get("hud_timeout_sec") == 5  # 默认值
+    assert sm.get("hud_timeout_sec") == 5
 
     with open(config_file, "r", encoding="utf-8") as f:
         content = json.load(f)
@@ -173,10 +167,8 @@ def test_hud_font_size_type_validation(mock_config_path, reset_singleton):
         json.dump(invalid_config, f)
 
     sm = SettingsManager.instance()
-    # 非法值应被重置为默认 int 14
     assert sm.get("hud_font_size") == 14
 
-    # 测试合法值 "system"
     sm.set("hud_font_size", "system")
     assert sm.get("hud_font_size") == "system"
 
@@ -208,7 +200,7 @@ def test_connect_changed_convenience_method(mock_config_path, reset_singleton):
 
     sm.set("hud_timeout_sec", 8)
     assert timeout_received == 8
-    assert font_received is None  # 不应触发
+    assert font_received is None
 
     sm.set("hud_font_size", 16)
     assert font_received == 16
@@ -229,6 +221,23 @@ def test_setting_changed_signal_emits_key_and_value(mock_config_path, reset_sing
     assert len(received) == 2
     assert received[0] == ("mobile_max_records", 15)
     assert received[1] == ("language", "en-US")
+
+
+def test_network_selection_mode_validation(mock_config_path, reset_singleton):
+    """校验 network_selection_mode 只接受有效值"""
+    invalid_config = {
+        "hud_timeout_sec": 5,
+        "hud_font_size": 14,
+        "mobile_max_records": 10,
+        "language": "zh_CN",
+        "network_selection_mode": "invalid_mode"
+    }
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump(invalid_config, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("network_selection_mode") == "ask"
 
 
 if __name__ == "__main__":

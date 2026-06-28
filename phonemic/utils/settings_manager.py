@@ -1,3 +1,5 @@
+# settings_manager.py (完整文件)
+
 """
 配置管理模块 - 单例模式，支持持久化存储和精准变更通知
 """
@@ -49,7 +51,9 @@ class SettingsManager(QObject):
             "hud_escape_enabled": True,
             "mobile_max_records": 10,
             "language": system_lang.detect_system_language(),
-            "close_action": None  # None=未设置, "quit"=退出, "tray"=最小化到托盘
+            "close_action": None,                # None, "quit", "tray"
+            "network_selection_mode": "ask",      # "auto", "last", "ask"
+            "last_network_mac": None,             # 上次使用的网卡MAC
         }
         print(f"default lan is {default['language']}")
         
@@ -67,6 +71,10 @@ class SettingsManager(QObject):
                     val = loaded["hud_font_size"]
                     if not (isinstance(val, int) or val == "system"):
                         loaded["hud_font_size"] = default["hud_font_size"]
+                # 校验 network_selection_mode
+                if "network_selection_mode" in loaded:
+                    if loaded["network_selection_mode"] not in ("auto", "last", "ask"):
+                        loaded["network_selection_mode"] = default["network_selection_mode"]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置

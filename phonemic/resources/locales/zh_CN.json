@@ -57,7 +57,16 @@
     "lang_en": "English",
     "restart_title": "提示",
     "restart_message": "语言已更改，请重启 PhoneMic 以使新语言完全生效。",
-    "close_placeholder": "请选择关闭行为..."
+    "close_placeholder": "请选择关闭行为...",
+    "startup_group": "启动选项",
+    "auto_start": "开机自启动",
+    "auto_start_tooltip": "在系统启动时自动运行 PhoneMic",
+    "mode_label": "网络选择策略",
+    "mode_auto": "自动选择最佳网络",
+    "mode_last": "使用上次选择的网络",
+    "mode_ask": "每次启动询问",
+    "mode_tooltip": "选择程序启动时如何确定网络地址"
+    
   },
   "ip_selector": {
     "title": "选择局域网IP地址",

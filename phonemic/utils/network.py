@@ -4,7 +4,6 @@ import psutil
 from ipaddress import ip_address, ip_network
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
-from typing import List, Optional
 import socket
 
 @dataclass
@@ -17,6 +16,7 @@ class IpCandidate:
     is_default_gateway_match: bool = False
     interface_type: str = "unknown"  # "wifi", "ethernet", "virtual", "other"
     metric: int = 0        # 跃点数
+    mac: str = ""          # MAC 地址（如 "00-11-22-33-44-55"）
 
 
 # ---------- 内部辅助函数 ----------
@@ -104,6 +104,7 @@ def get_network_interface_name_by_ip(ip_address: str) -> Optional[str]:
             if addr.address == ip_address:
                 return interface_name
     return None
+
 def get_all_lan_ips() -> List[IpCandidate]:
     candidates = []
     default_gateway = _get_default_gateway_ip()
@@ -124,6 +125,17 @@ def get_all_lan_ips() -> List[IpCandidate]:
         # 判断接口类型和是否虚拟
         iface_type = _guess_interface_type(iface_name, description)
         is_virtual = _is_virtual_interface(description)
+        
+        # 获取 MAC 地址
+        mac = ""
+        try:
+            addrs_mac = psutil.net_if_addrs().get(iface_name, [])
+            for addr in addrs_mac:
+                if addr.family == psutil.AF_LINK:
+                    mac = addr.address
+                    break
+        except Exception:
+            pass  # 保持为空
         
         for addr in addrs[netifaces.AF_INET]:
             ip = addr['addr']
@@ -152,12 +164,14 @@ def get_all_lan_ips() -> List[IpCandidate]:
                 is_virtual=is_virtual,
                 is_default_gateway_match=(default_gateway and netmask and _is_same_subnet(ip, default_gateway, netmask)),
                 interface_type=iface_type,
-                metric=0
+                metric=0,
+                mac=mac   # 传入 MAC
             ))
     
     # 按 priority 升序排序
     candidates.sort(key=lambda c: c.priority)
     return candidates
+
 def get_best_ip(candidates: Optional[List[IpCandidate]] = None) -> Optional[str]:
     if candidates is None:
         candidates = get_all_lan_ips()
@@ -181,4 +195,15 @@ def find_free_port(start_port: int = 12000, max_tries: int = 100) -> Optional[in
                 return port
             except OSError:
                 continue
+    return None
+
+def find_candidate_by_mac(mac: str, candidates: List[IpCandidate]) -> Optional[IpCandidate]:
+    """
+    根据 MAC 地址（不区分大小写）查找匹配的候选。
+    若未找到返回 None。
+    """
+    mac_lower = mac.lower()
+    for c in candidates:
+        if c.mac.lower() == mac_lower:
+            return c
     return None

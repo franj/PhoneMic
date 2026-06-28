@@ -56,7 +56,15 @@
     "lang_en": "English",
     "restart_title": "Notice",
     "restart_message": "Language changed. Please restart PhoneMic for the new language to take full effect.",
-    "close_placeholder": "Please select close action..."
+    "close_placeholder": "Please select close action...",
+    "startup_group": "Startup Options",
+    "auto_start": "Auto-start on system boot",
+    "auto_start_tooltip": "Run PhoneMic automatically when the system starts",
+    "mode_label": "Network selection mode",
+    "mode_auto": "Auto-select best network",
+    "mode_last": "Use last selected network",
+    "mode_ask": "Ask every startup",
+    "mode_tooltip": "How to determine the network address on program startup"
   },
   "ip_selector": {
     "title": "Select LAN IP Address",
