@@ -34,6 +34,10 @@ class Dashboard(QMainWindow):
         self._setup_ui(ip, port)
         self._setup_menu()
 
+    def set_restart_network_callback(self, callback):
+        """设置切换网络的回调函数"""
+        self._restart_network_callback = callback
+
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -82,6 +86,9 @@ class Dashboard(QMainWindow):
         layout.addWidget(self.status_label)
         layout.addStretch()
 
+        self.qr_label = qr_label
+        self.ip_label = ip_label
+
     def _setup_menu(self):
         menubar = self.menuBar()
         menubar.setNativeMenuBar(False)
@@ -98,6 +105,11 @@ class Dashboard(QMainWindow):
         commands_action = QAction(self.i18n.tr("dashboard.menu_command"), self)
         commands_action.triggered.connect(self._open_commands_dialog)
         program_menu.addAction(commands_action)
+        # 切换网络地址
+
+        switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
+        switch_network_action.triggered.connect(self._on_switch_network)
+        program_menu.addAction(switch_network_action)
 
         # 分隔线 + 退出
         program_menu.addSeparator()
@@ -121,6 +133,24 @@ class Dashboard(QMainWindow):
     def _open_commands_dialog(self):
         dlg = CommandsDialog(self)
         dlg.exec_()
+
+    def _on_switch_network(self):
+        """触发切换网络回调"""
+        if self._restart_network_callback:
+            self._restart_network_callback()
+
+    def update_network(self, ip: str, port: int):
+        """更新主界面的 IP 和二维码显示"""
+        # 更新二维码
+        qr_url = f"http://{ip}:{port}"
+        pil_img = qrcode.make(qr_url)
+        pil_img = pil_img.resize((250, 250))
+        qimage = ImageQt(pil_img)
+        pixmap = QPixmap.fromImage(qimage)
+        self.qr_label.setPixmap(pixmap)
+
+        # 更新 IP 标签
+        self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
 
     def show_about(self):
         version, commit, _ = get_build_info()

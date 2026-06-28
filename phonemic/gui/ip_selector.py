@@ -2,9 +2,9 @@ from typing import List
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QDialogButtonBox, QWidget
+    QDialogButtonBox, QWidget, QMessageBox
 )
-
+from phonemic.utils.network import get_all_lan_ips
 from phonemic.utils.i18n import I18n
 
 # IpCandidate 类型定义（实际应来自 utils.network，此处保留原导入逻辑）
@@ -79,3 +79,19 @@ class IpSelector(QDialog):
 
         ip = current_item.data(Qt.UserRole)
         return ip if isinstance(ip, str) else None
+
+def select_lan_ip(parent: QWidget | None = None) -> str | None:
+    """
+    弹出 IP 选择对话框，返回用户选择的 IP 地址。
+    若取消或没有可用 IP，返回 None。
+    """
+    candidates = get_all_lan_ips()
+    if not candidates:
+        QMessageBox.critical(parent, "错误", "未检测到可用局域网IP，请检查网络连接。")
+        return None
+    if len(candidates) == 1:
+        return candidates[0].ip
+    selector = IpSelector(candidates, parent)
+    if selector.exec() != QDialog.Accepted:
+        return None
+    return selector.get_selected_ip()

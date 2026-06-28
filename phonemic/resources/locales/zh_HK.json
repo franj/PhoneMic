@@ -9,6 +9,7 @@
     "menu_program": "程式",
     "menu_action": "偏好設定",
     "menu_command": "命令設定",
+    "menu_switch_network": "切換網絡地址",
     "menu_exit": "結束",
     "menu_help": "說明",
     "menu_help_guide": "使用指南",

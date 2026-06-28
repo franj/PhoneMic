@@ -10,6 +10,7 @@
     "menu_action": "Preferences",
     "menu_command": "Commands",
     "menu_exit": "Exit",
+    "menu_switch_network": "Switch Network",
     "menu_help": "Help",
     "menu_help_guide": "User Guide",
     "menu_about": "About PhoneMic"

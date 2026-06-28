@@ -16,7 +16,7 @@ from phonemic.bridge_qt import QtEventBridge
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.hud import HudWindow, get_hud_signals
-from phonemic.gui.ip_selector import IpSelector
+from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server  # 待确认函数名
@@ -77,19 +77,9 @@ def main():
     i18n = I18n.instance()
 
     # 1. 获取IP候选
-    candidates = get_all_lan_ips()
-    if not candidates:
-        QMessageBox.critical(None, "错误", "未检测到可用局域网IP，程序将退出。")
-        sys.exit(1)
-    elif len(candidates) == 1:
-        selected_ip = candidates[0].ip
-    else:
-        selector = IpSelector(candidates)
-        if selector.exec() != IpSelector.Accepted:
-            sys.exit(0)
-        selected_ip = selector.get_selected_ip()
-        if not selected_ip:
-            sys.exit(0)
+    selected_ip = select_lan_ip()
+    if selected_ip is None:
+        sys.exit(0)   # 用户取消或无网络
 
     logger.info(f"Selected IP: {selected_ip}")
 
@@ -115,16 +105,57 @@ def main():
         QMessageBox.critical(None, "错误", f"服务器启动超时，请检查端口 {actual_port} 是否可用。")
         sys.exit(1)
 
-    # 4. 创建主界面并连接信号
+    # 4. 创建 Dashboard 和 Tray
     dashboard = Dashboard(selected_ip, actual_port)
-    
     hud = HudWindow()
     dashboard.show()
-
-    # 5. 初始化系统托盘
-    tray = SystemTray(dashboard, get_res_path("favicon.ico"))   # 确保路径正确
+    tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     # 把 tray 回传给 dashboard（用于显示气泡通知）
     dashboard.tray = tray
+
+    # 5. 定义重启网络的回调函数
+    def restart_network():        # 检查当前可用IP数量
+        candidates = get_all_lan_ips()
+        if len(candidates) <= 1:
+            QMessageBox.information(
+                dashboard,
+                "提示",
+                "只有一个网络地址，无需切换。"
+            )
+            return
+        nonlocal selected_ip, actual_port
+        # 停止当前服务器
+        stop_server()
+        # 重新选择 IP
+        new_ip = select_lan_ip(dashboard)  # 传入父窗口
+        if new_ip is None:
+            # 用户取消，重新启动旧服务
+            start_server(selected_ip, actual_port, bridge)
+            if not wait_for_server(selected_ip, actual_port):
+                QMessageBox.critical(dashboard, "错误", "服务器恢复失败。")
+            return
+        if new_ip == selected_ip:
+            # 相同 IP，直接启动
+            start_server(selected_ip, actual_port, bridge)
+            wait_for_server(selected_ip, actual_port)
+            return
+
+        # 使用新 IP
+        old_ip = selected_ip
+        selected_ip = new_ip
+        start_server(selected_ip, actual_port, bridge)
+        if not wait_for_server(selected_ip, actual_port):
+            QMessageBox.critical(dashboard, "错误", f"新服务器启动失败，尝试恢复旧 IP {old_ip}。")
+            # 恢复旧 IP
+            selected_ip = old_ip
+            start_server(selected_ip, actual_port, bridge)
+            wait_for_server(selected_ip, actual_port)   # 忽略结果
+        else:
+            # 成功，更新界面
+            dashboard.update_network(selected_ip, actual_port)
+
+    # 注册回调
+    dashboard.set_restart_network_callback(restart_network)
 
     command_interceptor = CommandInterceptor()
     # 6. 启动队列监控
