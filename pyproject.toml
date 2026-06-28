@@ -1,6 +1,6 @@
 [project]
 name = "phonemic"
-version = "0.1.1"
+version = "0.2.0"
 description = "PhoneMic: 手机语音桥接输入法"
 authors = [
     {name = "deekseek and francis"}
