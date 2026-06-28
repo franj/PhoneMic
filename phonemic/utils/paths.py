@@ -10,11 +10,16 @@ def is_frozen() -> bool:
 
     兼容 PyInstaller 和 Nuitka：
     - PyInstaller 设置 sys.frozen = True
-    - Nuitka 不设置 sys.frozen，而是注入 __compiled__ 到 builtins 命名空间
+    - Nuitka 不设置 sys.frozen，而是注入 __compiled__ 到每个模块的 globals() 或 builtins
 
     参考: https://github.com/Nuitka/Nuitka/issues/216
     """
-    return getattr(sys, 'frozen', False) or hasattr(builtins, '__compiled__')
+    if getattr(sys, 'frozen', False):
+        return True
+    # Nuitka 将 __compiled__ 注入到 builtins 或各模块的 globals()
+    if hasattr(builtins, '__compiled__'):
+        return True
+    return '__compiled__' in globals()
 
 
 def get_app_root() -> Path:
