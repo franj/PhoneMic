@@ -5,6 +5,7 @@
 """
 import logging
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout,
     QGroupBox, QSpinBox, QComboBox, QCheckBox,
@@ -30,7 +31,7 @@ class SettingsDialog(QDialog):
 
         # 允许窗口自由调整大小，但限制最小尺寸
         self.setMinimumWidth(400)
-        self.resize(500, 600)
+        self.resize(500, 700)
 
         self._setup_ui()
         self._load_settings()
@@ -54,6 +55,7 @@ class SettingsDialog(QDialog):
 
         content_layout.addWidget(self._create_hud_group())
         content_layout.addWidget(self._create_chat_group())
+        content_layout.addWidget(self._create_close_action_group())
         content_layout.addWidget(self._create_other_group())
         content_layout.addStretch()
 
@@ -105,6 +107,31 @@ class SettingsDialog(QDialog):
 
         return group
 
+    def _create_close_action_group(self):
+        group = QGroupBox(self.i18n.tr("settings.close_group"))
+        layout = QFormLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 16, 12, 12)
+
+        self.close_combo = QComboBox()
+        # 1. 添加占位项（索引0），不可选
+        self.close_combo.addItem(self.i18n.tr("settings.close_placeholder"), None)
+        # 设置占位项为不可选
+        model = self.close_combo.model()
+        if model:
+            item = model.item(0, 0)
+            if item:
+                item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+
+        # 2. 添加有效选项
+        self.close_combo.addItem(self.i18n.tr("settings.close_quit"), "quit")
+        self.close_combo.addItem(self.i18n.tr("settings.close_tray"), "tray")
+
+        self.close_combo.setToolTip(self.i18n.tr("settings.close_tooltip"))
+        layout.addRow(self.i18n.tr("settings.close_behavior") + ":", self.close_combo)
+
+        return group
+
     def _create_other_group(self):
         group = QGroupBox(self.i18n.tr("settings.other_group"))
         layout = QFormLayout(group)
@@ -128,6 +155,16 @@ class SettingsDialog(QDialog):
 
         self.max_records_spin.setValue(self.sm.get("mobile_max_records", 10))
 
+        # 加载关闭行为配置
+        close_action = self.sm.get("close_action", None)
+        if close_action == "quit":
+            self.close_combo.setCurrentIndex(1)   # 索引1是"退出程序"
+        elif close_action == "tray":
+            self.close_combo.setCurrentIndex(2)   # 索引2是"最小化到托盘"
+        else:
+            # 未设置，显示占位项（索引0）
+            self.close_combo.setCurrentIndex(0)
+
         lang = self.sm.get("language", "zh_CN")
         self.set_combo_index(self.lang_combo, lang)
 
@@ -142,6 +179,12 @@ class SettingsDialog(QDialog):
             self.sm.set("hud_font_size", selected_data)
 
         self.sm.set("mobile_max_records", self.max_records_spin.value())
+
+        # 保存关闭行为：如果当前选中的是占位项（索引0），则不保存（保持原值）
+        current_index = self.close_combo.currentIndex()
+        if current_index != 0:
+            self.sm.set("close_action", self.close_combo.currentData())
+        # 否则不修改配置（即如果之前未设置，保持None；如果之前有值，也不应被清空，但这里占位项不可选，用户无法主动选它，所以不会进入此分支）
 
         old_lang = self.sm.get("language", "zh_CN")
         new_lang = self.lang_combo.currentData()

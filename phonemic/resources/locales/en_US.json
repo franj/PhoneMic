@@ -6,11 +6,12 @@
     "info": "Phone and computer must be on the same Wi-Fi.\nScan QR code or enter address to connect.\nOnly use in trusted networks.",
     "status_connected": "Connected",
     "status_disconnected": "Disconnected",
-    "menu_settings": "Settings",
-    "menu_help": "Help",
+    "menu_program": "Program",
     "menu_action": "Preferences",
-    "menu_command" : "Commands",
-    "menu_help_guide" : "User Guide",
+    "menu_command": "Commands",
+    "menu_exit": "Exit",
+    "menu_help": "Help",
+    "menu_help_guide": "User Guide",
     "menu_about": "About PhoneMic"
   },
   "help": {
@@ -25,7 +26,9 @@
     "menu_show": "Show Main Window",
     "menu_settings": "Settings",
     "menu_about": "About",
-    "menu_quit": "Quit"
+    "menu_quit": "Quit",
+    "minimized_title": "PhoneMic",
+    "minimized_message": "Program minimized to system tray. Click the tray icon to restore."
   },
   "settings": {
     "title": "Settings",
@@ -40,13 +43,19 @@
     "max_records": "Max records",
     "records_suffix": " records",
     "max_records_tooltip": "Maximum number of messages kept in the mobile chat interface",
+    "close_group": "Close Behavior",
+    "close_quit": "Quit Program",
+    "close_tray": "Minimize to System Tray",
+    "close_tooltip": "Choose what happens when clicking the window close button",
+    "close_behavior": "Close button action",
     "other_group": "Other",
     "language": "Language",
     "language_tooltip": "Interface language, restart required to take full effect",
     "lang_zh": "Simplified Chinese",
     "lang_en": "English",
     "restart_title": "Notice",
-    "restart_message": "Language changed. Please restart PhoneMic for the new language to take full effect."
+    "restart_message": "Language changed. Please restart PhoneMic for the new language to take full effect.",
+    "close_placeholder": "Please select close action..."
   },
   "ip_selector": {
     "title": "Select LAN IP Address",
@@ -55,6 +64,13 @@
   "about": {
     "title": "About PhoneMic",
     "content": "<h3>PhoneMic</h3><p>Version {version} commit: {commit}</p><p>Seamlessly transfer text from your phone to your computer via voice input.</p><p>Tech stack: PySide6, FastAPI, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+  },
+  "close_choice": {
+    "title": "Choose Close Action",
+    "prompt": "What would you like to do when clicking the close button?",
+    "quit": "Quit Program (fully close)",
+    "tray": "Minimize to System Tray (continue running in background)",
+    "remember": "Remember my choice (can be changed in Preferences)"
   },
   "mobile": {
     "input_placeholder_auto": "Recognition auto-send",

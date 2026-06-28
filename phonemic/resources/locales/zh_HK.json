@@ -6,11 +6,12 @@
     "info": "請注意，手機和電腦必須處於同一區域網絡中。\n手機掃碼或在瀏覽器中輸入服務地址以連接。\n為保障數據安全，請務必在信任網絡環境中使用，切勿在公共網絡使用。",
     "status_connected": "已連接",
     "status_disconnected": "未連接",
-    "menu_settings": "設定",
+    "menu_program": "程式",
     "menu_action": "偏好設定",
     "menu_command": "命令設定",
+    "menu_exit": "結束",
     "menu_help": "說明",
-    "menu_help_guide" : "使用指南",
+    "menu_help_guide": "使用指南",
     "menu_about": "關於 PhoneMic"
   },
   "help": {
@@ -25,7 +26,9 @@
     "menu_show": "顯示主視窗",
     "menu_settings": "設定",
     "menu_about": "關於",
-    "menu_quit": "結束"
+    "menu_quit": "結束",
+    "minimized_title": "PhoneMic",
+    "minimized_message": "程式已最小化到系統托盤，按一下托盤圖示可恢復"
   },
   "hud": {},
   "settings": {
@@ -41,6 +44,12 @@
     "max_records": "最大記錄條數",
     "records_suffix": " 條",
     "max_records_tooltip": "手機端聊天界面最多儲存的資訊數量",
+    "close_group": "關閉行為",
+    "close_quit": "結束程式",
+    "close_tray": "最小化到系統托盤",
+    "close_tooltip": "選擇點擊視窗關閉按鈕時的行為",
+    "close_behavior": "關閉按鈕行為",
+    "close_placeholder": "請選擇關閉行為...",
     "other_group": "其他",
     "language": "語言",
     "language_tooltip": "界面語言，修改後需重新啟動程式生效",
@@ -56,6 +65,13 @@
   "about": {
     "title": "關於 PhoneMic",
     "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>透過手機語音輸入，將文字無縫傳輸到電腦。</p><p>技術棧: PySide6, FastAPI, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+  },
+  "close_choice": {
+    "title": "關閉行為選擇",
+    "prompt": "您希望點擊關閉按鈕時執行什麼操作？",
+    "quit": "結束程式（完全關閉）",
+    "tray": "最小化到系統托盤（程式繼續背景執行）",
+    "remember": "記住我的選擇（可在偏好設定中修改）"
   },
   "mobile": {
     "input_placeholder_auto": "語音識別後自動傳送...",

@@ -9,20 +9,27 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QAction
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel,
-    QFrame, QMenuBar, QMessageBox
+    QFrame, QMenuBar, QMessageBox, QApplication,
+    QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
+from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
+from phonemic.utils.settings_manager import SettingsManager
+
 
 class Dashboard(QMainWindow):
-    def __init__(self, ip: str, port: int, parent=None):
+    # ===== 改动：构造函数增加 tray 参数（可选）=====
+    def __init__(self, ip: str, port: int, tray=None, parent=None):
         super().__init__(parent)
         self.i18n = I18n.instance()
+        self.sm = SettingsManager.instance()
+        self.tray = tray  # 保存托盘对象引用
         self.setWindowTitle(self.i18n.tr("dashboard.title"))
-        self.setFixedSize(400, 450)
+        self.setFixedSize(400, 480)
         self.setWindowFlags(self.windowFlags() & (~Qt.WindowMaximizeButtonHint) | Qt.WindowCloseButtonHint)
         self._setup_ui(ip, port)
         self._setup_menu()
@@ -77,26 +84,32 @@ class Dashboard(QMainWindow):
 
     def _setup_menu(self):
         menubar = self.menuBar()
-        # 使用原生菜单栏，避免占用额外空间
-        menubar.setNativeMenuBar(False)  # 确保在 Windows 上显示在窗口内
+        menubar.setNativeMenuBar(False)
 
-        settings_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_settings"))
+        program_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_program"))
         help_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_help"))
 
-        # 设置动作
+        # 偏好设置
         settings_action = QAction(self.i18n.tr("dashboard.menu_action"), self)
         settings_action.triggered.connect(self._open_settings)
-        settings_menu.addAction(settings_action)
-        # 添加“工具”菜单
+        program_menu.addAction(settings_action)
+
+        # 命令配置
         commands_action = QAction(self.i18n.tr("dashboard.menu_command"), self)
         commands_action.triggered.connect(self._open_commands_dialog)
-        settings_menu.addAction(commands_action)
+        program_menu.addAction(commands_action)
 
+        # 分隔线 + 退出
+        program_menu.addSeparator()
+        exit_action = QAction(self.i18n.tr("dashboard.menu_exit"), self)
+        exit_action.triggered.connect(self._quit_app)
+        program_menu.addAction(exit_action)
+
+        # 帮助菜单
         help_action = QAction(self.i18n.tr("dashboard.menu_help_guide"), self)
         help_action.triggered.connect(self.open_user_guide)
         help_menu.addAction(help_action)
 
-        # 关于动作
         about_action = QAction(self.i18n.tr("dashboard.menu_about"), self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
@@ -104,33 +117,28 @@ class Dashboard(QMainWindow):
     def _open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
-        
+
     def _open_commands_dialog(self):
         dlg = CommandsDialog(self)
         dlg.exec_()
-        
+
     def show_about(self):
         version, commit, _ = get_build_info()
         content = self.i18n.tr("about.content", version=version, commit=commit)
         QMessageBox.about(self, self.i18n.tr("about.title"), content)
 
-    # ====================== 新增：打开帮助文档函数 ======================
-    def open_user_guide(self):        
+    def open_user_guide(self):
         guide_path = get_app_root() / "USER_GUIDE.md"
-        
         if guide_path.exists():
-            # 用系统默认程序打开md文件
             if sys.platform == "win32":
-                subprocess.Popen(["notepad.exe", str(guide_path)], 
-                                 shell=False, 
+                subprocess.Popen(["notepad.exe", str(guide_path)],
+                                 shell=False,
                                  creationflags=subprocess.CREATE_NO_WINDOW)
-                #os.startfile(str(guide_path))
             else:
                 subprocess.run(["open", str(guide_path)] if sys.platform == "darwin" else ["xdg-open", str(guide_path)])
         else:
-            QMessageBox.warning(self, self.i18n.tr("help.warning"), 
-                              self.i18n.tr("help.file_not_found"))
-    # ==================================================================
+            QMessageBox.warning(self, self.i18n.tr("help.warning"),
+                                self.i18n.tr("help.file_not_found"))
 
     def update_connection_status(self, connected: bool) -> None:
         self.connected = connected
@@ -138,3 +146,74 @@ class Dashboard(QMainWindow):
             self.status_label.setText('<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected"))
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))
+
+    def show_hide_on_tray_message(self):
+        if getattr(self, '_already_show_hide_on_tray_message', False):
+            return
+        self._already_show_hide_on_tray_message = True
+        self.tray.show_message(
+            self.i18n.tr("tray.minimized_title"),
+            self.i18n.tr("tray.minimized_message"),
+            timeout=3000
+        )
+
+    def _quit_app(self):
+        """从菜单点击退出，直接终止程序"""
+        self._is_force_quitting = True
+        QApplication.quit()
+
+    def closeEvent(self, event):
+        """重写关闭事件：根据配置决定行为。若为菜单强制退出则直接放行。"""
+        # 如果是菜单触发的强制退出，直接放行，不做任何花活
+        if getattr(self, '_is_force_quitting', False):
+            event.accept()
+            return
+
+        close_action = self.sm.get("close_action", None)
+
+        if close_action == "quit":
+            event.accept()
+            return
+        event.ignore()
+        if close_action == "tray":
+            self.hide()
+            self.show_hide_on_tray_message()
+        else:
+            self._show_close_choice_dialog()
+
+    def _show_close_choice_dialog(self):
+        """显示关闭行为选择对话框（首次使用）"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.tr("close_choice.title"))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(350)
+
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(self.i18n.tr("close_choice.prompt"))
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        quit_radio = QRadioButton(self.i18n.tr("close_choice.quit"))
+        tray_radio = QRadioButton(self.i18n.tr("close_choice.tray"))
+        quit_radio.setChecked(True)
+        layout.addWidget(quit_radio)
+        layout.addWidget(tray_radio)
+
+        remember_check = QCheckBox(self.i18n.tr("close_choice.remember"))
+        layout.addWidget(remember_check)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() == QDialog.Accepted:
+            action = "quit" if quit_radio.isChecked() else "tray"
+            if remember_check.isChecked():
+                self.sm.set("close_action", action)
+            if action == "quit":
+                QApplication.quit()
+            else:
+                self.hide()
+                self.show_hide_on_tray_message()

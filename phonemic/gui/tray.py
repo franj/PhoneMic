@@ -133,3 +133,7 @@ class SystemTray(QObject):
         menu.addAction(self.i18n.tr("tray.menu_about")).triggered.connect(self.dashboard.show_about)
         menu.addAction(self.i18n.tr("tray.menu_quit")).triggered.connect(lambda: QApplication.quit())
         return menu
+
+    def show_message(self, title: str, message: str, icon=QSystemTrayIcon.Information, timeout: int = 1000):
+        if self.tray_icon and self.tray_icon.supportsMessages():
+            self.tray_icon.showMessage(title, message, icon, timeout)

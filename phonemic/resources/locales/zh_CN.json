@@ -6,12 +6,13 @@
     "info": "请注意，手机和电脑必须处于同一局域网中。\n手机扫码或在浏览器中输入服务地址以连接。\n为保障数据安全，请务必在信任网络环境中使用，切勿在公共网络使用。",
     "status_connected": "已连接",
     "status_disconnected": "未连接",
-    "menu_settings" : "设置",
-    "menu_action" : "偏好设置",
-    "menu_command" : "命令配置",
-    "menu_help" : "帮助",
-    "menu_help_guide" : "使用帮助",
-    "menu_about" : "关于 PhoneMic"
+    "menu_program": "程序",
+    "menu_action": "偏好设置",
+    "menu_command": "命令配置",
+    "menu_exit": "退出",
+    "menu_help": "帮助",
+    "menu_help_guide": "使用帮助",
+    "menu_about": "关于 PhoneMic"
   },
   "help": {
     "warning": "帮助文件不存在",
@@ -25,7 +26,9 @@
     "menu_show": "显示主界面",
     "menu_settings": "设置",
     "menu_about": "关于",
-    "menu_quit": "退出"
+    "menu_quit": "退出",
+    "minimized_title": "PhoneMic",
+    "minimized_message": "程序已最小化到系统托盘，点击托盘图标可恢复"
   },
   "hud": {},
   "settings": {
@@ -41,13 +44,19 @@
     "max_records": "最大记录条数",
     "records_suffix": " 条",
     "max_records_tooltip": "手机端聊天界面最多保存的消息数量",
+    "close_group": "关闭行为",
+    "close_quit": "退出程序",
+    "close_tray": "最小化到系统托盘",
+    "close_tooltip": "选择点击窗口关闭按钮时的行为",
+    "close_behavior": "关闭按钮行为",
     "other_group": "其他",
     "language": "语言",
     "language_tooltip": "界面语言，修改后需重启程序生效",
     "lang_zh": "简体中文",
     "lang_en": "English",
     "restart_title": "提示",
-    "restart_message": "语言已更改，请重启 PhoneMic 以使新语言完全生效。"
+    "restart_message": "语言已更改，请重启 PhoneMic 以使新语言完全生效。",
+    "close_placeholder": "请选择关闭行为..."
   },
   "ip_selector": {
     "title": "选择局域网IP地址",
@@ -56,6 +65,13 @@
   "about": {
     "title": "关于 PhoneMic",
     "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>通过手机语音输入，将文字无缝传输到电脑。</p><p>技术栈: PySide6, FastAPI, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+  },
+  "close_choice": {
+    "title": "关闭行为选择",
+    "prompt": "您希望点击关闭按钮时执行什么操作？",
+    "quit": "退出程序（完全关闭）",
+    "tray": "最小化到系统托盘（程序继续后台运行）",
+    "remember": "记住我的选择（可在偏好设置中修改）"
   },
   "mobile": {
     "input_placeholder_auto": "语音识别后自动发送...",

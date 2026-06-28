@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import sys
+import ctypes
 import threading
 import time
 from pathlib import Path
@@ -66,6 +67,11 @@ def main():
         # 如果还没有实例，则创建一个新的 (生产环境运行时的正常情况)
         app = QApplication(sys.argv)
     #app.setQuitOnLastWindowClosed(False)
+    # 设置应用名称（影响托盘气泡标题、任务管理器等）
+    app_id = "PhoneMic"
+    app.setApplicationName(app_id)          # 系统托盘气泡标题
+    app.setApplicationDisplayName(app_id)   # 任务管理器/窗口标题（可选）
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     app.setWindowIcon(QIcon(get_res_path("favicon.ico")))
 
     i18n = I18n.instance()
@@ -117,6 +123,8 @@ def main():
 
     # 5. 初始化系统托盘
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))   # 确保路径正确
+    # 把 tray 回传给 dashboard（用于显示气泡通知）
+    dashboard.tray = tray
 
     command_interceptor = CommandInterceptor()
     # 6. 启动队列监控
