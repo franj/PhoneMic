@@ -55,4 +55,6 @@ Section Uninstall
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+  ; 清除开机自启动注册表项（与 phonemic/utils/startup.py 写入的项保持一致）
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}"
 SectionEnd
