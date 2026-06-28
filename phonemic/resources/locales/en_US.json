@@ -60,6 +60,8 @@
     "startup_group": "Startup Options",
     "auto_start": "Auto-start on system boot",
     "auto_start_tooltip": "Run PhoneMic automatically when the system starts",
+    "auto_start_silent": "Start silently on boot (no main window)",
+    "auto_start_silent_tooltip": "Boot without showing the main window, runs in tray only; requires auto-start to be enabled",
     "mode_label": "Network selection mode",
     "mode_auto": "Auto-select best network",
     "mode_last": "Use last selected network",

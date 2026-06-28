@@ -61,6 +61,8 @@
     "startup_group": "啟動選項",
     "auto_start": "開機自動啟動",
     "auto_start_tooltip": "系統啟動時自動執行 PhoneMic",
+    "auto_start_silent": "開機時靜默啟動（不顯示主視窗）",
+    "auto_start_silent_tooltip": "開機自動啟動時不顯示主視窗，僅在系統匣運行；需先勾選開機自動啟動",
     "mode_label": "網絡選擇策略",
     "mode_auto": "自動選擇最佳網絡",
     "mode_last": "使用上次選擇的網絡",

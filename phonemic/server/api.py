@@ -19,7 +19,7 @@ import uvicorn
 import copy
 
 from phonemic.bridge_interface import EventBridge
-from phonemic.utils.paths import get_res_path
+from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
 
@@ -243,8 +243,8 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
     global _server, _server_thread
     set_bridge(bridge)   # 确保队列已设置
 
-    is_frozen = getattr(sys, 'frozen', False)
-    log_config = LOGGING_CONFIG if is_frozen else None
+    is_packaged = is_frozen()
+    log_config = LOGGING_CONFIG if is_packaged else None
 
     config = uvicorn.Config(
         app,

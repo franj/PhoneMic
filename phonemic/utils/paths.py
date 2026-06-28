@@ -1,7 +1,20 @@
 import json
 import os
 import sys
+import builtins
 from pathlib import Path
+
+
+def is_frozen() -> bool:
+    """检测当前是否运行在打包环境。
+
+    兼容 PyInstaller 和 Nuitka：
+    - PyInstaller 设置 sys.frozen = True
+    - Nuitka 不设置 sys.frozen，而是注入 __compiled__ 到 builtins 命名空间
+
+    参考: https://github.com/Nuitka/Nuitka/issues/216
+    """
+    return getattr(sys, 'frozen', False) or hasattr(builtins, '__compiled__')
 
 
 def get_app_root() -> Path:

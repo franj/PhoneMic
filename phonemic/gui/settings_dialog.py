@@ -140,6 +140,14 @@ class SettingsDialog(QDialog):
         self.auto_start_check.setToolTip(self.i18n.tr("settings.auto_start_tooltip"))
         layout.addRow(self.auto_start_check)
 
+        # 开机静默启动复选框（依赖开机自启）
+        self.silent_start_check = QCheckBox(self.i18n.tr("settings.auto_start_silent"))
+        self.silent_start_check.setToolTip(self.i18n.tr("settings.auto_start_silent_tooltip"))
+        layout.addRow(self.silent_start_check)
+
+        # 联动：自启状态变化时，启用/禁用静默复选框
+        self.auto_start_check.toggled.connect(self._update_silent_check_state)
+
         # 网络选择策略下拉框
         self.mode_combo = QComboBox()
         self.mode_combo.addItem(self.i18n.tr("settings.mode_auto"), "auto")
@@ -149,6 +157,12 @@ class SettingsDialog(QDialog):
         layout.addRow(self.i18n.tr("settings.mode_label") + ":", self.mode_combo)
 
         return group
+
+    def _update_silent_check_state(self, auto_start_enabled: bool):
+        """根据开机自启状态联动静默复选框：禁用时自动取消勾选"""
+        self.silent_start_check.setEnabled(auto_start_enabled)
+        if not auto_start_enabled:
+            self.silent_start_check.setChecked(False)
 
     def _create_other_group(self):
         group = QGroupBox(self.i18n.tr("settings.other_group"))
@@ -184,7 +198,14 @@ class SettingsDialog(QDialog):
 
         # 启动选项
         # 开机自启动状态从注册表读取
-        self.auto_start_check.setChecked(startup.is_auto_start_enabled())
+        auto_start_on = startup.is_auto_start_enabled()
+        self.auto_start_check.setChecked(auto_start_on)
+        # 静默启动偏好从配置读取（仅在自启开启时有意义）
+        self.silent_start_check.setChecked(
+            auto_start_on and self.sm.get("auto_start_silent", False)
+        )
+        # 同步初始启用/禁用状态
+        self._update_silent_check_state(auto_start_on)
         # 网络选择策略
         mode = self.sm.get("network_selection_mode", "ask")
         self.set_combo_index(self.mode_combo, mode)
@@ -209,8 +230,12 @@ class SettingsDialog(QDialog):
             self.sm.set("close_action", self.close_combo.currentData())
 
         # 启动选项
-        # 开机自启动
-        startup.set_auto_start_enabled(self.auto_start_check.isChecked())
+        # 开机自启动：注册表实际生效，静默偏好作为启动参数
+        auto_start_on = self.auto_start_check.isChecked()
+        silent_pref = self.silent_start_check.isChecked()
+        startup.set_auto_start_enabled(auto_start_on, silent=silent_pref)
+        # 持久化静默偏好（即使自启关闭也存，下次开启自启时恢复更友好）
+        self.sm.set("auto_start_silent", silent_pref)
         # 网络选择策略
         self.sm.set("network_selection_mode", self.mode_combo.currentData())
 

@@ -54,6 +54,7 @@ class SettingsManager(QObject):
             "close_action": None,                # None, "quit", "tray"
             "network_selection_mode": "ask",      # "auto", "last", "ask"
             "last_network_mac": None,             # 上次使用的网卡MAC
+            "auto_start_silent": False,           # 开机自启时是否静默（不显示主窗口）
         }
         print(f"default lan is {default['language']}")
         
@@ -75,6 +76,10 @@ class SettingsManager(QObject):
                 if "network_selection_mode" in loaded:
                     if loaded["network_selection_mode"] not in ("auto", "last", "ask"):
                         loaded["network_selection_mode"] = default["network_selection_mode"]
+                # 校验 auto_start_silent 必须为 bool
+                if "auto_start_silent" in loaded:
+                    if not isinstance(loaded["auto_start_silent"], bool):
+                        loaded["auto_start_silent"] = default["auto_start_silent"]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置

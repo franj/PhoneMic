@@ -324,8 +324,86 @@ def test_auto_start_check_saves_to_startup_module(qtbot, settings_manager, mock_
     qtbot.addWidget(dialog)
     dialog.auto_start_check.setChecked(True)
     dialog.accept()
-    mock_set.assert_called_once_with(True)
+    # 默认非静默，silent=False
+    mock_set.assert_called_once_with(True, silent=False)
     dialog.close()
+
+
+# ===================== 静默启动联动测试 =====================
+
+def test_silent_check_disabled_when_auto_start_off(qtbot, settings_manager, mock_languages, monkeypatch):
+    """开机自启关闭时，静默复选框应禁用且不勾选"""
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: False)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.auto_start_check.isChecked() is False
+    assert dialog.silent_start_check.isEnabled() is False
+    assert dialog.silent_start_check.isChecked() is False
+    dialog.close()
+
+
+def test_silent_check_enabled_when_auto_start_on(qtbot, settings_manager, mock_languages, monkeypatch):
+    """开机自启开启时，静默复选框应可用"""
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: True)
+    settings_manager.set("auto_start_silent", False)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.silent_start_check.isEnabled() is True
+    assert dialog.silent_start_check.isChecked() is False
+    dialog.close()
+
+
+def test_silent_check_loads_preference_when_auto_start_on(qtbot, settings_manager, mock_languages, monkeypatch):
+    """开机自启开启 + 配置中 auto_start_silent=True 时，复选框勾选"""
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: True)
+    settings_manager.set("auto_start_silent", True)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.silent_start_check.isChecked() is True
+    dialog.close()
+
+
+def test_silent_check_unchecks_when_auto_start_toggled_off(qtbot, settings_manager, mock_languages, monkeypatch):
+    """运行时取消开机自启，静默复选框应自动取消勾选并禁用"""
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: True)
+    settings_manager.set("auto_start_silent", True)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.silent_start_check.isChecked() is True
+    # 取消自启
+    dialog.auto_start_check.setChecked(False)
+    assert dialog.silent_start_check.isEnabled() is False
+    assert dialog.silent_start_check.isChecked() is False
+    dialog.close()
+
+
+def test_silent_check_reenables_when_auto_start_toggled_on(qtbot, settings_manager, mock_languages, monkeypatch):
+    """运行时勾选开机自启，静默复选框应重新可用"""
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: False)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.silent_start_check.isEnabled() is False
+    # 勾选自启
+    dialog.auto_start_check.setChecked(True)
+    assert dialog.silent_start_check.isEnabled() is True
+    dialog.close()
+
+
+def test_silent_preference_saved_on_accept(qtbot, settings_manager, mock_languages, monkeypatch):
+    """勾选静默并确定后，auto_start_silent 持久化且注册表调用带 silent=True"""
+    mock_set = MagicMock()
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.is_auto_start_enabled", lambda: False)
+    monkeypatch.setattr("phonemic.gui.settings_dialog.startup.set_auto_start_enabled", mock_set)
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    # 先勾选自启（这会启用静默复选框），再勾选静默
+    dialog.auto_start_check.setChecked(True)
+    dialog.silent_start_check.setChecked(True)
+    dialog.accept()
+    # 注册表调用带 silent=True
+    mock_set.assert_called_once_with(True, silent=True)
+    # 配置已持久化
+    assert settings_manager.get("auto_start_silent") is True
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
