@@ -57,7 +57,15 @@
     "lang_zh": "香港繁體中文",
     "lang_en": "English",
     "restart_title": "提示",
-    "restart_message": "語言已變更，請重新啟動 PhoneMic 以使新語言完全生效。"
+    "restart_message": "語言已變更，請重新啟動 PhoneMic 以使新語言完全生效。",
+    "startup_group": "啟動選項",
+    "auto_start": "開機自動啟動",
+    "auto_start_tooltip": "系統啟動時自動執行 PhoneMic",
+    "mode_label": "網絡選擇策略",
+    "mode_auto": "自動選擇最佳網絡",
+    "mode_last": "使用上次選擇的網絡",
+    "mode_ask": "每次啟動詢問",
+    "mode_tooltip": "選擇程式啟動時如何決定網絡地址"
   },
   "ip_selector": {
     "title": "選擇區域網絡 IP 地址",
@@ -140,5 +148,21 @@
     "error_name_empty": "名稱不可為空白",
     "error_pattern_empty": "比對模式不可為空白",
     "error_param_empty": "動作參數不可為空白"
+  },
+  "error": {
+    "title": "錯誤",
+    "no_lan_ip": "未偵測到可用區域網絡 IP，程式將結束。",
+    "no_free_port": "找不到可用連接埠（由 12000 開始），程式將結束。",
+    "server_timeout": "伺服器啟動逾時，請檢查連接埠 {port} 是否可用。",
+    "switch_network_fail": "新伺服器啟動失敗，嘗試恢復舊 IP {old_ip}。"
+  },
+  "info": {
+    "title": "提示",
+    "single_network_no_switch": "只有一個網絡地址，無需切換。",
+    "switch_network_success": "已切換到 {ip}"
+  },
+  "log": {
+    "last_mac_not_found": "上次使用的網絡未找到，回退到自動選擇",
+    "selected_ip_port": "已選 IP: {ip}, 連接埠: {port}"
   }
 }

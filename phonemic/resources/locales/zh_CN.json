@@ -149,5 +149,21 @@
     "error_name_empty": "名称不能为空",
     "error_pattern_empty": "匹配模式不能为空",
     "error_param_empty": "动作参数不能为空"
+  },
+  "error": {
+    "title": "错误",
+    "no_lan_ip": "未检测到可用局域网IP，程序将退出。",
+    "no_free_port": "未找到可用端口（从 12000 开始），程序将退出。",
+    "server_timeout": "服务器启动超时，请检查端口 {port} 是否可用。",
+    "switch_network_fail": "新服务器启动失败，尝试恢复旧 IP {old_ip}。"
+  },
+  "info": {
+      "title": "提示",
+      "single_network_no_switch": "只有一个网络地址，无需切换。",
+      "switch_network_success": "已切换到 {ip}"
+  },
+  "log": {
+      "last_mac_not_found": "上次使用的网络未找到，回退到自动选择",
+      "selected_ip_port": "Selected IP: {ip}, Port: {port}"
   }
 }

@@ -44,7 +44,7 @@ class QueueSignals(QObject):
     def start_thread_pool_queue(self, queue: multiprocessing.Queue):
         self.monitor_thread = threading.Thread(
             target=self.queue_monitor,
-            args=(queue,),  # 注意逗号
+            args=(queue,),
             daemon=True
         )
         self.monitor_thread.start()
@@ -68,17 +68,14 @@ def wait_for_server(host: str, port: int, timeout: float = 5.0) -> bool:
 def parse_args():
     parser = argparse.ArgumentParser(description="PhoneMic - Voice input bridge from phone to PC")
     parser.add_argument("--silent", action="store_true", help="Start minimized to system tray (no main window)")
-    parser.add_argument("--show", action="store_true", help="Force show main window (overrides --silent)")
     parser.add_argument("--select-mode", choices=["auto", "last", "ask"],
                         help="Override network selection strategy: auto=best, last=previous, ask=prompt")
     return parser.parse_args()
 
 
 def main():
-    # 命令行参数
     args = parse_args()
 
-    # QApplication
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
@@ -108,7 +105,7 @@ def main():
     # 2. 根据模式选择 IP
     candidates = get_all_lan_ips()
     if not candidates:
-        QMessageBox.critical(None, "错误", "未检测到可用局域网IP，程序将退出。")
+        QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.no_lan_ip"))
         sys.exit(1)
 
     selected_ip = None
@@ -126,8 +123,7 @@ def main():
                 selected_ip = matched.ip
                 selected_mac = matched.mac
             else:
-                # 匹配失败，回退到 auto
-                logger.warning("上次使用的网络未找到，回退到自动选择")
+                logger.warning(i18n.tr("log.last_mac_not_found"))
                 selected_ip = candidates[0].ip
                 selected_mac = candidates[0].mac
         else:
@@ -135,7 +131,6 @@ def main():
             selected_ip = candidates[0].ip
             selected_mac = candidates[0].mac
     else:  # "ask"
-        # 弹出对话框让用户选择
         ip, mac = select_lan_ip()
         if ip is None:
             # 用户取消，退出
@@ -149,10 +144,10 @@ def main():
     # 3. 查找端口
     actual_port = find_free_port(start_port=12000)
     if actual_port is None:
-        QMessageBox.critical(None, "错误", "未找到可用端口（从 12000 开始），程序将退出。")
+        QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.no_free_port"))
         sys.exit(1)
 
-    logger.info(f"Selected IP: {selected_ip}, Port: {actual_port}")
+    logger.info(i18n.tr("log.selected_ip_port", ip=selected_ip, port=actual_port))
 
     # 4. 准备后端
     use_queue = False
@@ -160,7 +155,7 @@ def main():
 
     start_server(selected_ip, actual_port, bridge)
     if not wait_for_server(selected_ip, actual_port):
-        QMessageBox.critical(None, "错误", f"服务器启动超时，请检查端口 {actual_port} 是否可用。")
+        QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.server_timeout", port=actual_port))
         sys.exit(1)
 
     # 5. 创建 Dashboard 和 Tray
@@ -169,57 +164,44 @@ def main():
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     dashboard.tray = tray
 
-    # 决定是否显示窗口
-    if args.show:
-        # 命令行 --show 强制显示，覆盖 --silent
-        dashboard.show()
-    elif args.silent:
-        # 静默模式，不显示
+    if args.silent:
         dashboard.hide()
     else:
-        # 默认显示
         dashboard.show()
 
     # 注册网络切换回调
     def restart_network():
         nonlocal selected_ip, actual_port, selected_mac
-        # 检查当前可用IP数量
         candidates_now = get_all_lan_ips()
         if len(candidates_now) <= 1:
-            QMessageBox.information(dashboard, "提示", "只有一个网络地址，无需切换。")
+            QMessageBox.information(dashboard, i18n.tr("info.title"), i18n.tr("info.single_network_no_switch"))
             return
 
-        # 停止服务器
         stop_server()
-        # 弹出选择对话框
         new_ip, new_mac = select_lan_ip(dashboard)
         if new_ip is None:
-            # 用户取消，恢复旧服务
             start_server(selected_ip, actual_port, bridge)
             wait_for_server(selected_ip, actual_port)
             return
         if new_ip == selected_ip:
-            # 相同IP，直接重启
             start_server(selected_ip, actual_port, bridge)
             wait_for_server(selected_ip, actual_port)
             return
 
-        # 切换到新IP
         old_ip = selected_ip
         selected_ip = new_ip
         selected_mac = new_mac
         start_server(selected_ip, actual_port, bridge)
         if not wait_for_server(selected_ip, actual_port):
-            QMessageBox.critical(dashboard, "错误", f"新服务器启动失败，尝试恢复旧 IP {old_ip}。")
+            QMessageBox.critical(dashboard, i18n.tr("error.title"), i18n.tr("error.switch_network_fail", old_ip=old_ip))
             selected_ip = old_ip
             start_server(selected_ip, actual_port, bridge)
             wait_for_server(selected_ip, actual_port)
         else:
-            # 成功，更新界面和配置
             dashboard.update_network(selected_ip, actual_port)
             if selected_mac:
                 sm.set("last_network_mac", selected_mac)
-            QMessageBox.information(dashboard, "提示", f"已切换到 {selected_ip}")
+            QMessageBox.information(dashboard, i18n.tr("info.title"), i18n.tr("info.switch_network_success", ip=selected_ip))
 
     dashboard.set_restart_network_callback(restart_network)
 

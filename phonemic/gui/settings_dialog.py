@@ -34,7 +34,6 @@ class SettingsDialog(QDialog):
         self.setModal(True)
 
         self.setMinimumWidth(400)
-        self.resize(500, 750)  # 增加高度以适应新分组
 
         self._setup_ui()
         self._load_settings()
@@ -45,13 +44,8 @@ class SettingsDialog(QDialog):
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(12)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        main_layout.addWidget(scroll)
-
         content_widget = QWidget()
-        scroll.setWidget(content_widget)
+        main_layout.addWidget(content_widget)
         content_layout = QVBoxLayout(content_widget)
         content_layout.setSpacing(16)
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -67,6 +61,7 @@ class SettingsDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         main_layout.addWidget(self.button_box)
+        self.adjustSize()
 
     @staticmethod
     def set_combo_index(combo, data):

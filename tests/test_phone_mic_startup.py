@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from PySide6.QtWidgets import QApplication
 
 import phonemic.PhoneMic as pm
+from phonemic.utils.i18n import I18n
 from phonemic.utils.network import IpCandidate
 
 
@@ -71,7 +72,6 @@ def test_parse_args_default():
     sys.argv = ["PhoneMic.py"]
     args = pm.parse_args()
     assert args.silent is False
-    assert args.show is False
     assert args.select_mode is None
 
 
@@ -79,14 +79,6 @@ def test_parse_args_silent():
     sys.argv = ["PhoneMic.py", "--silent"]
     args = pm.parse_args()
     assert args.silent is True
-    assert args.show is False
-
-
-def test_parse_args_show():
-    sys.argv = ["PhoneMic.py", "--show"]
-    args = pm.parse_args()
-    assert args.silent is False
-    assert args.show is True
 
 
 def test_parse_args_select_mode():
@@ -133,23 +125,6 @@ def test_main_silent_mode(qapp, mocker, mock_components):
     mock_components["dashboard"].assert_called_once()
     mock_components["dashboard"].return_value.show.assert_not_called()
     mock_components["dashboard"].return_value.hide.assert_called_once()
-
-
-def test_main_show_override_silent(qapp, mocker, mock_components):
-    """测试 --show 覆盖 --silent：显示窗口"""
-    candidates = [
-        IpCandidate("192.168.1.100", "eth0", "Ethernet", 0, mac="AA:BB:CC:DD:EE:01")
-    ]
-    mock_components["get_ips"].return_value = candidates
-
-    sys.argv = ["PhoneMic.py", "--silent", "--show"]
-
-    with pytest.raises(SystemExit) as exc:
-        pm.main()
-    assert exc.value.code == 0
-
-    mock_components["dashboard"].return_value.show.assert_called_once()
-    mock_components["dashboard"].return_value.hide.assert_not_called()
 
 
 def test_main_last_mode_match(qapp, mocker):
@@ -354,7 +329,11 @@ def test_main_no_candidates(qapp, mocker):
     assert exc.value.code == 1
 
     mock_QMessageBox.critical.assert_called_once()
-    assert "未检测到可用局域网IP" in mock_QMessageBox.critical.call_args[0][2]
+    
+    i18n = I18n.instance()
+    expected = i18n.tr("error.no_lan_ip")
+    mock_QMessageBox.critical.assert_called_once()
+    assert expected in mock_QMessageBox.critical.call_args[0][2]
 
 
 def test_main_no_free_port(qapp, mocker):
@@ -374,7 +353,10 @@ def test_main_no_free_port(qapp, mocker):
     assert exc.value.code == 1
 
     mock_QMessageBox.critical.assert_called_once()
-    assert "未找到可用端口" in mock_QMessageBox.critical.call_args[0][2]
+    i18n = I18n.instance()
+    expected = i18n.tr("error.no_free_port")
+    mock_QMessageBox.critical.assert_called_once()
+    assert expected in mock_QMessageBox.critical.call_args[0][2]
 
 
 def test_main_server_start_timeout(qapp, mocker):
@@ -396,4 +378,7 @@ def test_main_server_start_timeout(qapp, mocker):
     assert exc.value.code == 1
 
     mock_QMessageBox.critical.assert_called_once()
-    assert "服务器启动超时" in mock_QMessageBox.critical.call_args[0][2]
+    i18n = I18n.instance()
+    expected = i18n.tr("error.server_timeout")
+    mock_QMessageBox.critical.assert_called_once()
+    assert expected[:7] in mock_QMessageBox.critical.call_args[0][2]

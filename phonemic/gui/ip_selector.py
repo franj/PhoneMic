@@ -7,8 +7,6 @@ from PySide6.QtWidgets import (
 from phonemic.utils.network import get_all_lan_ips, IpCandidate
 from phonemic.utils.i18n import I18n
 
-# IpCandidate 已在 network 中定义，无需再定义
-
 
 class IpSelector(QDialog):
     """IP 选择对话框，用于多 IP 场景下让用户手动选择绑定地址"""
@@ -23,7 +21,6 @@ class IpSelector(QDialog):
         self.setModal(True)
         self.resize(450, 350)
 
-        # 按 priority 升序排序
         sorted_candidates = sorted(candidates, key=lambda c: c.priority)
         self._candidates = sorted_candidates
 
@@ -37,10 +34,9 @@ class IpSelector(QDialog):
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         layout.addWidget(self.list_widget)
 
-        # 填充列表：显示描述 - IP，存储索引
         for idx, cand in enumerate(sorted_candidates):
             item = QListWidgetItem(f"{cand.description} - {cand.ip}")
-            item.setData(Qt.UserRole, idx)   # 存储索引
+            item.setData(Qt.UserRole, idx)
             self.list_widget.addItem(item)
 
         if self.list_widget.count() > 0:
@@ -54,7 +50,6 @@ class IpSelector(QDialog):
         self.list_widget.itemDoubleClicked.connect(self.accept)
 
     def get_selected_candidate(self) -> Optional[IpCandidate]:
-        """获取用户选中的候选对象，若未选中或取消则返回 None"""
         if self.result() != QDialog.Accepted:
             return None
         current_row = self.list_widget.currentRow()
@@ -62,20 +57,17 @@ class IpSelector(QDialog):
             return None
         return self._candidates[current_row]
 
-    # 为了兼容性，保留旧方法（但会废弃）
     def get_selected_ip(self) -> Optional[str]:
         cand = self.get_selected_candidate()
         return cand.ip if cand else None
 
 
 def select_lan_ip(parent: QWidget | None = None) -> Tuple[Optional[str], Optional[str]]:
-    """
-    弹出 IP 选择对话框，返回用户选择的 (ip, mac)。
-    若取消或没有可用 IP，返回 (None, None)。
-    """
+    """弹出 IP 选择对话框，返回用户选择的 (ip, mac)。若取消或没有可用 IP，返回 (None, None)。"""
+    i18n = I18n.instance()
     candidates = get_all_lan_ips()
     if not candidates:
-        QMessageBox.critical(parent, "错误", "未检测到可用局域网IP，请检查网络连接。")
+        QMessageBox.critical(parent, i18n.tr("error.title"), i18n.tr("error.no_lan_ip"))
         return None, None
     if len(candidates) == 1:
         return candidates[0].ip, candidates[0].mac

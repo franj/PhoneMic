@@ -147,5 +147,21 @@
     "error_name_empty": "Name cannot be empty",
     "error_pattern_empty": "Match pattern cannot be empty",
     "error_param_empty": "Action parameters cannot be empty"
+  },
+  "error": {
+    "title": "Error",
+    "no_lan_ip": "No available LAN IP detected, program will exit.",
+    "no_free_port": "No available port found (starting from 12000), program will exit.",
+    "server_timeout": "Server startup timeout, please check if port {port} is available.",
+    "switch_network_fail": "New server startup failed, trying to restore old IP {old_ip}."
+  },
+  "info": {
+      "title": "Info",
+      "single_network_no_switch": "Only one network address, no need to switch.",
+      "switch_network_success": "Switched to {ip}"
+  },
+  "log": {
+      "last_mac_not_found": "Last used network not found, fallback to auto selection",
+      "selected_ip_port": "Selected IP: {ip}, Port: {port}"
   }
 }
