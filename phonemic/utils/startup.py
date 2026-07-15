@@ -33,11 +33,9 @@ def _get_exe_path() -> str:
         # 打包后的 exe
         return f'"{exe}"'
     else:
-        # 开发环境：优先使用同目录下的 pythonw.exe（无控制台窗口）
-        pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-        if os.path.exists(pythonw):
-            exe = pythonw
-        return f'"{exe}" -m phonemic.PhoneMic'
+        # 开发环境：优先使用uvw（无控制台窗口）
+        from phonemic.utils.paths import get_app_root
+        return f'uvw run --directory "{get_app_root()}" --gui-script phonemic/PhoneMic.py'
 
 
 def is_auto_start_enabled() -> bool:
@@ -57,8 +55,10 @@ def is_auto_start_enabled() -> bool:
         )
         value, _ = winreg.QueryValueEx(key, "PhoneMic")
         winreg.CloseKey(key)
-        # value 形如: "C:\\path\\pythonw.exe" -m phonemic.PhoneMic --silent
-        # 或: "C:\\path\\PhoneMic.exe" --silent
+        # 如果是uvw直接返回True，uvw run --directory "{get_app_root()}" --gui-script phonemic/PhoneMic.py
+        if value.split()[0] == "uvw":
+            return True
+        # value 形如: "C:\\path\\PhoneMic.exe" --silent
         # 提取首个带引号的路径并校验是否存在
         return _command_target_exists(value)
     except FileNotFoundError:
