@@ -917,7 +917,8 @@
         const chatManager = new ChatListManager(chatContainer, appConfig);
         window.chatManagerInstance = chatManager;
 
-        const wsClient = new WSClient(`ws://${window.location.host}/ws`, appConfig);
+        const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsClient = new WSClient(`${wsProto}//${location.host}/ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
         
         new MessageInteractionManager(chatContainer, uiController, wsClient);
