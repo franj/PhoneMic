@@ -90,9 +90,11 @@ def test_match_command_empty_commands():
     assert match_command("anything", []) is None
 
 
-# ---------- execute_command 测试 ----------
+# ---------- execute_command 测试：key 类型 ----------
 @patch("phonemic.utils.command_processor.send_keys")
-def test_execute_command_key_action(mock_send_keys):
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_action(mock_sleep, mock_send_keys):
+    """纯按键组合（向后兼容）"""
     cmd = VoiceCommand(
         id="k1", name="", matchType="exact", matchPattern="",
         actionType="key", actionParams="ctrl+c", enabled=True
@@ -101,6 +103,145 @@ def test_execute_command_key_action(mock_send_keys):
     mock_send_keys.assert_called_once_with("ctrl+c")
 
 
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_action_with_sequence(mock_sleep, mock_send_keys):
+    """逗号分隔的按键序列：解析后逐段调用 send_keys"""
+    cmd = VoiceCommand(
+        id="seq1", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams="ctrl+a, delete",
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    # 应调用两次 send_keys，分别传入每个组合
+    assert mock_send_keys.call_count == 2
+    mock_send_keys.assert_any_call("ctrl+a")
+    mock_send_keys.assert_any_call("delete")
+
+
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_action_single_combo(mock_sleep, mock_send_keys):
+    """向后兼容：单个组合不带逗号仍然正常工作"""
+    cmd = VoiceCommand(
+        id="seq2", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams="enter",
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    mock_send_keys.assert_called_once_with("enter")
+
+
+# ---------- execute_command 测试：key 类型混合粘贴文本 ----------
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_with_text_segment(mock_sleep, mock_send_keys, mock_flash):
+    """混合：粘贴文本 + 按键"""
+    cmd = VoiceCommand(
+        id="mix1", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams='"hello", enter',
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    mock_flash.assert_called_once_with("hello")
+    mock_send_keys.assert_called_once_with("enter")
+
+
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_quotes_pair(mock_sleep, mock_send_keys, mock_flash):
+    """粘贴双引号对 + 左移光标：\"\"\", left"""
+    cmd = VoiceCommand(
+        id="mix2", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams=r'"\"\"", left',
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    mock_flash.assert_called_once_with('""')
+    mock_send_keys.assert_called_once_with("left")
+
+
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_text_with_content(mock_sleep, mock_send_keys, mock_flash):
+    """粘贴文本中的 {content} 被替换"""
+    cmd = VoiceCommand(
+        id="mix3", name="", matchType="prefix", matchPattern="记录 ",
+        actionType="key",
+        actionParams='"【{content}】", enter',
+        enabled=True
+    )
+    execute_command(cmd, all_text="记录 开心", prefix="记录 ", content="开心")
+    mock_flash.assert_called_once_with("【开心】")
+    mock_send_keys.assert_called_once_with("enter")
+
+
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_text_with_time_date(mock_sleep, mock_send_keys, mock_flash):
+    """粘贴文本中的 {time} {date} 被替换"""
+    cmd = VoiceCommand(
+        id="mix4", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams='"{date} {time}", enter',
+        enabled=True
+    )
+    with patch("phonemic.utils.input_parser.datetime") as mock_dt:
+        from datetime import datetime
+        mock_dt.now.return_value = datetime(2026, 8, 7, 14, 30, 0)
+        execute_command(cmd, all_text="", prefix="", content="")
+    mock_flash.assert_called_once_with("2026-08-07 14:30:00")
+
+
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_pure_text(mock_sleep, mock_send_keys, mock_flash):
+    """纯粘贴文本（无按键）"""
+    cmd = VoiceCommand(
+        id="mix5", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams='"你好世界"',
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    mock_flash.assert_called_once_with("你好世界")
+    mock_send_keys.assert_not_called()
+
+
+@patch("phonemic.utils.command_processor.flash_insert")
+@patch("phonemic.utils.command_processor.send_keys")
+@patch("phonemic.utils.command_processor.time.sleep")
+def test_execute_command_key_complex_mixed(mock_sleep, mock_send_keys, mock_flash):
+    """复杂混合序列：全选+粘贴文本+粘贴引号对+左移+回车"""
+    cmd = VoiceCommand(
+        id="mix6", name="", matchType="exact", matchPattern="",
+        actionType="key",
+        actionParams=r'ctrl+a, "替换内容", ctrl+v, "\"\"", left, enter',
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    # send_keys 被调用 4 次
+    assert mock_send_keys.call_count == 4
+    mock_send_keys.assert_any_call("ctrl+a")
+    mock_send_keys.assert_any_call("ctrl+v")
+    mock_send_keys.assert_any_call("left")
+    mock_send_keys.assert_any_call("enter")
+    # flash_insert 被调用 2 次
+    assert mock_flash.call_count == 2
+    mock_flash.assert_any_call("替换内容")
+    mock_flash.assert_any_call('""')
+
+
+# ---------- execute_command 测试：exec 类型 ----------
 @patch("phonemic.utils.command_processor.subprocess.Popen")
 def test_execute_command_exec_action(mock_popen):
     cmd = VoiceCommand(
@@ -116,6 +257,7 @@ def test_execute_command_exec_action(mock_popen):
 
 @patch("phonemic.utils.command_processor.subprocess.Popen")
 def test_execute_command_complex_params_with_quotes(mock_popen):
+    """带引号的 exec 参数：pyparsing 正确分词，不再有 shlex 歧义"""
     cmd = VoiceCommand(
         id="e2", name="", matchType="prefix", matchPattern="",
         actionType="exec", actionParams='python -c "print({content})"', enabled=True
@@ -123,7 +265,8 @@ def test_execute_command_complex_params_with_quotes(mock_popen):
     execute_command(cmd, all_text="", prefix="", content="2+2")
     mock_popen.assert_called_once()
     args, _ = mock_popen.call_args
-    assert (args[0] == ['python', '-c', 'print(2+2)']) or (args[0] == ['python', '-c', '"print(2+2)"'])
+    # pyparsing 正确去除了引号
+    assert args[0] == ['python', '-c', 'print(2+2)']
 
 
 @patch("phonemic.utils.command_processor.subprocess.Popen")
@@ -150,19 +293,18 @@ def test_execute_command_empty_tokens(mock_popen):
     mock_popen.assert_not_called()
 
 
-@patch("phonemic.utils.command_processor.logger")
-def test_execute_command_format_error(mock_logger):
+@patch("phonemic.utils.command_processor.subprocess.Popen")
+def test_execute_command_unknown_placeholder_preserved(mock_popen):
+    """不认识的占位符 {missing} 原样保留，不报错"""
     cmd = VoiceCommand(
         id="e5", name="", matchType="prefix", matchPattern="",
         actionType="exec", actionParams="unknown {missing}", enabled=True
     )
-    # 需要确保 execute_command 内部对格式化失败的 warning 被记录，但不抛出异常
-    # 同时需要防止实际 subprocess.Popen 调用（可选 patch）
-    with patch("phonemic.utils.command_processor.subprocess.Popen") as mock_popen:
-        execute_command(cmd, all_text="test", prefix="", content="")
-        # 格式化失败后会保留原模板，仍会执行
-        mock_popen.assert_called_once()
-    mock_logger.warning.assert_called_once()
+    execute_command(cmd, all_text="test", prefix="", content="")
+    mock_popen.assert_called_once()
+    args, _ = mock_popen.call_args
+    # {missing} 原样保留在 token 中
+    assert "{missing}" in args[0]
 
 
 def test_execute_command_unknown_action_type(caplog):
@@ -173,6 +315,21 @@ def test_execute_command_unknown_action_type(caplog):
     with caplog.at_level(logging.ERROR):
         execute_command(cmd, all_text="", prefix="", content="")
     assert "未知动作类型" in caplog.text
+
+
+# ---------- exec 测试：Windows 路径反斜杠 ----------
+@patch("phonemic.utils.command_processor.subprocess.Popen")
+def test_execute_command_exec_windows_backslash_path(mock_popen):
+    """Windows 路径反斜杠不被破坏（pyparsing 替代 shlex 的核心优势）"""
+    cmd = VoiceCommand(
+        id="e7", name="", matchType="prefix", matchPattern="",
+        actionType="exec",
+        actionParams=r'python "C:\Users\name\script.py"',
+        enabled=True
+    )
+    execute_command(cmd, all_text="", prefix="", content="")
+    args, _ = mock_popen.call_args
+    assert args[0] == ['python', r'C:\Users\name\script.py']
 
 
 # ---------- 新增测试：{cwd} 自定义工作目录 ----------
@@ -261,35 +418,3 @@ def test_execute_command_without_cwd_uses_default_cwd(mock_get_workdir, mock_pop
 #    # 移除 {cwd} 后，参数应为 ['python', 'script.py']
 #    assert args[0] == ['python', 'script.py']
 #    assert kwargs.get("cwd") == "C:\\work"
-
-
-# ---------- 新增测试：按键序列（通过 execute_command 传递） ----------
-@patch("phonemic.utils.command_processor.send_keys")
-def test_execute_command_key_action_with_sequence(mock_send_keys):
-    """验证 key 动作支持逗号分隔的序列，参数原样传递给 send_keys"""
-    cmd = VoiceCommand(
-        id="seq1", name="", matchType="exact", matchPattern="",
-        actionType="key",
-        actionParams="ctrl+a, delete",
-        enabled=True
-    )
-    execute_command(cmd, all_text="", prefix="", content="")
-    mock_send_keys.assert_called_once_with("ctrl+a, delete")
-
-
-@patch("phonemic.utils.command_processor.send_keys")
-def test_execute_command_key_action_single_combo(mock_send_keys):
-    """向后兼容：单个组合不带逗号仍然正常工作"""
-    cmd = VoiceCommand(
-        id="seq2", name="", matchType="exact", matchPattern="",
-        actionType="key",
-        actionParams="enter",
-        enabled=True
-    )
-    execute_command(cmd, all_text="", prefix="", content="")
-    mock_send_keys.assert_called_once_with("enter")
-
-
-# ---------- 可选：测试 extract_cwd_from_tokens 内部函数（如果希望直接测试）----------
-# 由于 extract_cwd_from_tokens 未在 __all__ 中公开，但可通过导入测试
-# 为了完整，可以添加（如果用户愿意导入内部函数）。这里通过 execute_command 间接测试已足够。

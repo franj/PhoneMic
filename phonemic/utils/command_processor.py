@@ -1,14 +1,18 @@
 import subprocess
-import shlex
 import logging
 import re
 import os
-import sys
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from phonemic.gui.keyboard import send_keys
+from phonemic.gui.keyboard import send_keys, flash_insert
 from phonemic.utils.paths import get_exec_workdir
+from phonemic.utils.input_parser import (
+    parse_input_sequence,
+    parse_exec_args,
+    apply_template,
+)
 from .commands_manager import VoiceCommand, CommandsManager
 
 logger = logging.getLogger(__name__)
@@ -26,13 +30,6 @@ def match_command(text: str, commands: List[VoiceCommand]) -> Optional[Tuple[Voi
             if text.startswith(pattern):
                 return (cmd, pattern, text[len(pattern):])
     return None
-
-def _safe_format(template: str, **kwargs) -> str:
-    try:
-        return template.format(**kwargs)
-    except (KeyError, IndexError) as e:
-        logger.warning(f"占位符格式化失败: {template}, 错误: {e}")
-        return template
 
 def extract_cwd_from_command_str(command_str: str) -> Tuple[str, Optional[Path]]:
     """
@@ -91,7 +88,18 @@ def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str)
     params = cmd.actionParams
     try:
         if action_type == "key":
-            send_keys(params)
+            # 解析混合输入序列：按键段 + 粘贴文本段
+            segments = parse_input_sequence(params)
+            if not segments:
+                logger.error("执行命令失败：按键序列为空")
+                return
+            for seg_type, seg_value in segments:
+                if seg_type == "key":
+                    send_keys(seg_value)
+                elif seg_type == "text":
+                    text = apply_template(seg_value, all_text=all_text, prefix=prefix, content=content)
+                    flash_insert(text)
+                time.sleep(0.05)
         elif action_type == "exec":
             # 1. 提取并移除 {cwd:...} token（在格式化之前，避免占位符破坏标记）
             remaining_cmd, custom_cwd = extract_cwd_from_command_str(params)
@@ -99,15 +107,15 @@ def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str)
                 logger.error("执行命令失败：参数列表为空")
                 return
 
-            # 2. 静态拆分，固定参数边界
-            tokens = shlex.split(remaining_cmd, posix=(sys.platform != "win32"))
+            # 2. 使用 pyparsing 分词（替代 shlex，Windows 反斜杠友好）
+            tokens = parse_exec_args(remaining_cmd)
             if not tokens:
                 logger.error("执行命令失败：参数列表为空")
                 return
 
-            # 3. 对剩余每个 token 独立替换占位符
+            # 3. 对每个 token 独立替换占位符
             formatted_tokens = [
-                _safe_format(token, all_text=all_text, prefix=prefix, content=content)
+                apply_template(token, all_text=all_text, prefix=prefix, content=content)
                 for token in tokens
             ]
 
