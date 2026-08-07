@@ -21,6 +21,7 @@ dependencies = [
     "qrcode>=8.2,<9.0",
     "pillow>=12.2.0,<13.0.0",
     "requests>=2.34.2,<3.0.0",
+    "pyparsing>=3.1,<4.0",
 ]
 
 
