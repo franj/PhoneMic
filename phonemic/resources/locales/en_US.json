@@ -117,13 +117,13 @@
     "action_exec": "Run Program",
     "action_type_help": "Send keys or execute external program",
     "action_param": "Action Params",
-    "action_param_placeholder": "e.g., ctrl+a, delete or python script.py {content}",
-    "action_param_help": "Key sequence (comma-separated), supports {content}/{prefix}/{all_text}, use {cwd:\"path\"} for working directory",
+    "action_param_placeholder": "e.g., ctrl+a, delete or \"\\\"\"\", left or python script.py {content}",
+    "action_param_help": "Key sequence (comma-separated); quoted text (single/double quotes) = paste, supports {time}/{date}/{content}/{prefix}/{all_text}, use {cwd:\"path\"} for working directory",
     "enabled": "Enabled",
     "enabled_help": "Uncheck to disable this command temporarily",
     "example_btn": "📋 Examples",
     "example_title": "Action Parameter Examples",
-    "example_content": "[Key Sequence Examples]\n- Single key: enter, tab, space, backspace, delete\n- Combination: ctrl+c, shift+alt+a, ctrl+shift+esc\n- Sequence (select all then delete): ctrl+a, delete\n- Sequence (copy then paste): ctrl+c, ctrl+v\n\n[Command Line Examples]\n- Simple program: calc\n- With argument: python D:\\script.py {content}\n- With placeholder: echo \"User said: {all_text}\" >> log.txt\n\n[Custom Working Directory]\n- Add {cwd:\"absolute_path\"} at the beginning, e.g.:\n  {cwd:\"D:\\\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\nNote: Placeholders {content}, {prefix}, {all_text} are replaced automatically.",
+    "example_content": "[Key Sequence Examples]\n- Single key: enter, tab, space, backspace, delete\n- Combination: ctrl+c, shift+alt+a, ctrl+shift+esc\n- Sequence (select all then delete): ctrl+a, delete\n- Sequence (copy then paste): ctrl+c, ctrl+v\n\n[Paste Text Examples]\n- Wrap text in single or double quotes to paste it\n- Cursor between quotes: \"\\\"\\\"\", left\n- Paste and enter: \"hello\", enter\n- Paste with placeholder: \"Current time: {time}\"\n- Paste with placeholder: \"Today is: {date}\"\n\n[Command Line Examples]\n- Simple program: calc\n- With argument: python D:\\script.py {content}\n- With placeholder: echo \"User said: {all_text}\" >> log.txt\n\n[Custom Working Directory]\n- Add {cwd:\"absolute_path\"} at the beginning, e.g.:\n  {cwd:\"D:\\\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\nNote: Placeholders {time}, {date}, {content}, {prefix}, {all_text} are replaced automatically.\n{time} -> current HH:MM:SS, {date} -> today YYYY-MM-DD, {content} -> remaining text after prefix match.",
     "column_enabled": "Enabled",
     "column_name": "Name",
     "column_match_type": "Match Type",
@@ -158,12 +158,12 @@
     "switch_network_fail": "New server startup failed, trying to restore old IP {old_ip}."
   },
   "info": {
-      "title": "Info",
-      "single_network_no_switch": "Only one network address, no need to switch.",
-      "switch_network_success": "Switched to {ip}"
+    "title": "Info",
+    "single_network_no_switch": "Only one network address, no need to switch.",
+    "switch_network_success": "Switched to {ip}"
   },
   "log": {
-      "last_mac_not_found": "Last used network not found, fallback to auto selection",
-      "selected_ip_port": "Selected IP: {ip}, Port: {port}"
+    "last_mac_not_found": "Last used network not found, fallback to auto selection",
+    "selected_ip_port": "Selected IP: {ip}, Port: {port}"
   }
 }
