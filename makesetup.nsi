@@ -1,4 +1,5 @@
 Unicode true
+SetCompressor /SOLID lzma
 
 !define APP_NAME "PhoneMic"
 !define PUBLISHER "PhoneMic Team"
