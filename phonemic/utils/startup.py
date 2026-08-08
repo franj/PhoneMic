@@ -24,8 +24,9 @@ def _get_exe_path() -> str:
     """获取开机自启的启动命令（带引号，以防路径含空格）。
 
     - 打包后：返回 exe 路径，如 "C:\\path\\PhoneMic.exe"
-    - 开发环境：返回 .venv 中的 python 解释器 + "-m phonemic.PhoneMic"
-      优先使用 pythonw.exe（无控制台窗口），避免开机时弹出黑窗。
+    - 开发环境：返回 .venv 中的 pythonw.exe + "-m phonemic.PhoneMic"
+      pythonw.exe 是 GUI 子系统（PE subsystem=2），不会分配控制台窗口，
+      避免开机时弹出黑窗。
       依赖 .venv 的 editable install（_editable_impl_phonemic.pth）使包可在任意工作目录导入。
     """
     exe = sys.executable
@@ -33,9 +34,11 @@ def _get_exe_path() -> str:
         # 打包后的 exe
         return f'"{exe}"'
     else:
-        # 开发环境：优先使用uvw（无控制台窗口）
-        from phonemic.utils.paths import get_app_root
-        return f'uvw run --directory "{get_app_root()}" --gui-script phonemic/PhoneMic.py'
+        # 开发环境：优先使用 sys.executable 同目录的 pythonw.exe（GUI 子系统，无黑窗）
+        pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(pythonw):
+            exe = pythonw
+        return f'"{exe}" -m phonemic.PhoneMic'
 
 
 def is_auto_start_enabled() -> bool:
@@ -55,10 +58,7 @@ def is_auto_start_enabled() -> bool:
         )
         value, _ = winreg.QueryValueEx(key, "PhoneMic")
         winreg.CloseKey(key)
-        # 如果是uvw直接返回True，uvw run --directory "{get_app_root()}" --gui-script phonemic/PhoneMic.py
-        if value.split()[0] == "uvw":
-            return True
-        # value 形如: "C:\\path\\PhoneMic.exe" --silent
+        # value 形如: "C:\\path\\pythonw.exe" -m phonemic.PhoneMic --silent
         # 提取首个带引号的路径并校验是否存在
         return _command_target_exists(value)
     except FileNotFoundError:
