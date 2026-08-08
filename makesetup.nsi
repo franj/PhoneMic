@@ -29,6 +29,15 @@ Page license
 Page directory
 Page instfiles
 
+; ----------  exe info ----------
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName" "PhoneMic"
+VIAddVersionKey "CompanyName" "PhoneMic Team"
+VIAddVersionKey "FileDescription" "PhoneMic Installer"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 PhoneMic Team. Licensed under Apache 2.0."
+VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "ProductVersion" "${VERSION}"
+
 Section
   SetOutPath $INSTDIR
   File /r "${SOURCE_DIR}\*.*"
@@ -56,6 +65,6 @@ Section Uninstall
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-  ; 清除开机自启动注册表项（与 phonemic/utils/startup.py 写入的项保持一致）
+  ; Clear the startup registry entry (consistent with the entry written by phonemic/utils/startup.py)
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_NAME}"
 SectionEnd
