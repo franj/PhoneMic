@@ -1,9 +1,9 @@
 """
 混合输入序列解析与模板替换。
 
-- parse_input_sequence: 解析 key 类型的 actionParams，支持按键组合和粘贴文本混合。
+- parse_input_sequence: 解析 key 类型的 actionParams，支持按键组合和文本输入混合。
 - parse_exec_args: 替代 shlex.split，Windows 反斜杠友好。
-- apply_template: 统一的占位符替换，exec 和粘贴文本共用。
+- apply_template: 统一的占位符替换，exec 和文本输入共用。
 """
 import logging
 from datetime import datetime
@@ -25,45 +25,31 @@ def parse_input_sequence(s: str) -> List[Tuple[str, str]]:
     支持的引号类型：
     - ASCII 双引号 "..."  ：支持 \\" 转义
     - ASCII 单引号 '...'  ：支持 \\' 转义
-    - 全角双引号 “...”   ：U+201C/U+201D 配对（无需转义，左右字符不同）
-    - 全角单引号 ‘...’   ：U+2018/U+2019 配对
 
     段之间用逗号分隔，引号内的逗号不算分隔符。
 
     示例:
-        'ctrl+a, "hello", left'  → [('key','ctrl+a'), ('text','hello'), ('key','left')]
-        '"\\"\\"", left'         → [('text','""'), ('key','left')]
-        '‘“”’, left'             → [('text','“”'), ('key','left')]   # 全角引号
-        '"time: {time}", enter'  → [('text','time: {time}'), ('key','enter')]
+        ctrl+a, "hello", left  ->  [('key','ctrl+a'), ('text','hello'), ('key','left')]
+        ctrl+a, "\"\"", left    ->  [('text','""'), ('key','left')]  (用反斜杠转义)
+        "time: {time}", enter   ->  [('text','time: {time}'), ('key','enter')]
     """
     if not s or not s.strip():
         return []
 
     segments: List[Tuple[str, str]] = []
 
-    # ASCII 双引号段：支持 \" 转义
+    # 双引号段：支持 \" 转义
     dq = pp.QuotedString('"', esc_char='\\')
-    # ASCII 单引号段：支持 \' 转义
+    # 单引号段：支持 \' 转义
     sq = pp.QuotedString("'", esc_char='\\')
 
-    # 全角双引号段：U+201C ... U+201D（左右字符不同，无需转义）
-    # set_parse_action 返回剥去首尾引号后的内容
-    cn_dq = pp.Regex(r'\u201c[^\u201d]*\u201d').set_parse_action(
-        lambda t: [t[0][1:-1]]
-    )
-
-    # 全角单引号段：U+2018 ... U+2019
-    cn_sq = pp.Regex(r'\u2018[^\u2019]*\u2019').set_parse_action(
-        lambda t: [t[0][1:-1]]
-    )
-
-    # 引号段 → text（QuotedString 已自动剥引号，Regex 的 parse_action 已剥引号）
-    quoted = (dq | sq | cn_dq | cn_sq).add_parse_action(
+    # 引号段 → text
+    quoted = (dq | sq).add_parse_action(
         lambda t: segments.append(('text', t[0]))
     )
 
-    # 非引号非逗号段 → key（排除所有引号字符）
-    unquoted = pp.Regex(r'[^"\',\u201c\u201d\u2018\u2019]+').add_parse_action(
+    # 非引号非逗号段 → key
+    unquoted = pp.Regex(r'[^"\',]+').add_parse_action(
         lambda t: segments.append(('key', t[0].strip())) if t[0].strip() else None
     )
 
@@ -110,7 +96,7 @@ def parse_exec_args(s: str) -> List[str]:
     return tokens
 
 
-# ---------- 模板替换 (exec 和粘贴文本共用) ----------
+# ---------- 模板替换 (exec 和文本输入共用) ----------
 
 def apply_template(text: str, all_text: str = "", prefix: str = "", content: str = "") -> str:
     """
