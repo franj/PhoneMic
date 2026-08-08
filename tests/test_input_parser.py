@@ -123,6 +123,53 @@ class TestParseInputSequence:
         result = parse_input_sequence('"你好世界", enter')
         assert result == [("text", "你好世界"), ("key", "enter")]
 
+    # ---- 全角引号支持 ----
+
+    def test_fullwidth_double_quotes(self):
+        """全角双引号 \u201c...\u201d 作为粘贴文本段"""
+        result = parse_input_sequence("\u201chello\u201d, enter")
+        assert result == [("text", "hello"), ("key", "enter")]
+
+    def test_fullwidth_single_quotes(self):
+        """全角单引号 \u2018...\u2019 作为粘贴文本段"""
+        result = parse_input_sequence("\u2018hello\u2019, enter")
+        assert result == [("text", "hello"), ("key", "enter")]
+
+    def test_fullwidth_quotes_paste_curly_quotes(self):
+        """用户真实场景：用全角单引号包裹全角双引号，粘贴 \u201c\u201d + 左移光标"""
+        # actionParams = '\u2018\u201c\u201d\u2019, left'
+        params = "\u2018\u201c\u201d\u2019, left"
+        result = parse_input_sequence(params)
+        assert result == [("text", "\u201c\u201d"), ("key", "left")]
+
+    def test_fullwidth_double_quotes_empty(self):
+        """全角双引号空段"""
+        result = parse_input_sequence("\u201c\u201d, enter")
+        assert result == [("text", ""), ("key", "enter")]
+
+    def test_fullwidth_single_quotes_empty(self):
+        """全角单引号空段"""
+        result = parse_input_sequence("\u2018\u2019, enter")
+        assert result == [("text", ""), ("key", "enter")]
+
+    def test_fullwidth_quotes_with_comma_inside(self):
+        """全角引号内的逗号不算分隔符"""
+        result = parse_input_sequence("\u201ca,b,c\u201d, enter")
+        assert result == [("text", "a,b,c"), ("key", "enter")]
+
+    def test_fullwidth_quotes_with_template(self):
+        """全角引号内支持模板占位符"""
+        result = parse_input_sequence("\u201c时间: {time}\u201d, enter")
+        assert result == [("text", "时间: {time}"), ("key", "enter")]
+
+    def test_fullwidth_quotes_not_treated_as_key(self):
+        """全角引号段不会被误认为按键组合"""
+        # 如果全角引号不被识别为引号段，它们会被当作 key 段
+        # 验证它们被正确识别为 text 段
+        result = parse_input_sequence("\u201chello\u201d")
+        assert len(result) == 1
+        assert result[0][0] == "text"
+
 
 # ==================== parse_exec_args ====================
 

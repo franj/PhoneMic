@@ -19,14 +19,21 @@ def parse_input_sequence(s: str) -> List[Tuple[str, str]]:
     """
     解析混合输入序列，返回 [(type, value), ...]。
 
-    - 引号段 (单引号或双引号) → ('text', 引号内文本)，支持 \\" 和 \\' 转义
+    - 引号段 → ('text', 引号内文本)
     - 非引号段 → ('key', 按键组合字符串)
+
+    支持的引号类型：
+    - ASCII 双引号 "..."  ：支持 \\" 转义
+    - ASCII 单引号 '...'  ：支持 \\' 转义
+    - 全角双引号 “...”   ：U+201C/U+201D 配对（无需转义，左右字符不同）
+    - 全角单引号 ‘...’   ：U+2018/U+2019 配对
 
     段之间用逗号分隔，引号内的逗号不算分隔符。
 
     示例:
         'ctrl+a, "hello", left'  → [('key','ctrl+a'), ('text','hello'), ('key','left')]
-        '"\\"\"", left'           → [('text','""'), ('key','left')]
+        '"\\"\\"", left'         → [('text','""'), ('key','left')]
+        '‘“”’, left'             → [('text','“”'), ('key','left')]   # 全角引号
         '"time: {time}", enter'  → [('text','time: {time}'), ('key','enter')]
     """
     if not s or not s.strip():
@@ -34,17 +41,29 @@ def parse_input_sequence(s: str) -> List[Tuple[str, str]]:
 
     segments: List[Tuple[str, str]] = []
 
-    # 双引号段：escChar='\\' 支持 \" 转义
+    # ASCII 双引号段：支持 \" 转义
     dq = pp.QuotedString('"', esc_char='\\')
-    # 单引号段：escChar='\\' 支持 \' 转义
+    # ASCII 单引号段：支持 \' 转义
     sq = pp.QuotedString("'", esc_char='\\')
-    # 引号段 → text
-    quoted = (dq | sq).add_parse_action(
+
+    # 全角双引号段：U+201C ... U+201D（左右字符不同，无需转义）
+    # set_parse_action 返回剥去首尾引号后的内容
+    cn_dq = pp.Regex(r'\u201c[^\u201d]*\u201d').set_parse_action(
+        lambda t: [t[0][1:-1]]
+    )
+
+    # 全角单引号段：U+2018 ... U+2019
+    cn_sq = pp.Regex(r'\u2018[^\u2019]*\u2019').set_parse_action(
+        lambda t: [t[0][1:-1]]
+    )
+
+    # 引号段 → text（QuotedString 已自动剥引号，Regex 的 parse_action 已剥引号）
+    quoted = (dq | sq | cn_dq | cn_sq).add_parse_action(
         lambda t: segments.append(('text', t[0]))
     )
 
-    # 非引号非逗号段 → key（至少一个字符，空段由 delimited_list 跳过）
-    unquoted = pp.Regex(r'[^"\',]+').add_parse_action(
+    # 非引号非逗号段 → key（排除所有引号字符）
+    unquoted = pp.Regex(r'[^"\',\u201c\u201d\u2018\u2019]+').add_parse_action(
         lambda t: segments.append(('key', t[0].strip())) if t[0].strip() else None
     )
 
