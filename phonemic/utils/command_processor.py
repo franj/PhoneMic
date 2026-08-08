@@ -18,16 +18,18 @@ from .commands_manager import VoiceCommand, CommandsManager
 logger = logging.getLogger(__name__)
 
 def match_command(text: str, commands: List[VoiceCommand]) -> Optional[Tuple[VoiceCommand, str, str]]:
+    text_lower = text.lower()
     for cmd in commands:
         if not cmd.enabled:
             continue
         match_type = cmd.matchType
         pattern = cmd.matchPattern
+        pattern_lower = pattern.lower()
         if match_type == "exact":
-            if text == pattern:
+            if text_lower == pattern_lower:
                 return (cmd, text, "")
         elif match_type == "prefix":
-            if text.startswith(pattern):
+            if text_lower.startswith(pattern_lower):
                 return (cmd, pattern, text[len(pattern):])
     return None
 

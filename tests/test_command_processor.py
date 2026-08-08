@@ -90,6 +90,83 @@ def test_match_command_empty_commands():
     assert match_command("anything", []) is None
 
 
+# ---------- match_command 测试：大小写不敏感 ----------
+def test_match_command_exact_case_insensitive_upper(sample_commands):
+    """完全匹配：输入大写，模式小写"""
+    result = match_command("HELLO", sample_commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert cmd.id == "1"
+    assert content == ""
+
+
+def test_match_command_exact_case_insensitive_mixed(sample_commands):
+    """完全匹配：混合大小写"""
+    result = match_command("HeLLo", sample_commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert cmd.id == "1"
+
+
+def test_match_command_prefix_case_insensitive(sample_commands):
+    """前缀匹配：输入大写，模式小写"""
+    result = match_command("CALC 2+2", sample_commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert cmd.id == "2"
+    assert content == "2+2"
+
+
+def test_match_command_prefix_case_insensitive_mixed(sample_commands):
+    """前缀匹配：混合大小写"""
+    result = match_command("Calc 2+2", sample_commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert cmd.id == "2"
+    assert content == "2+2"
+
+
+def test_match_command_prefix_pattern_upper():
+    """前缀匹配：模式大写，输入小写"""
+    commands = [
+        VoiceCommand(
+            id="u1", name="upper pattern", matchType="prefix", matchPattern="OPEN ",
+            actionType="key", actionParams="enter", enabled=True,
+        ),
+    ]
+    result = match_command("open notepad", commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert cmd.id == "u1"
+    assert content == "notepad"
+
+
+def test_match_command_exact_chinese_unchanged():
+    """中文匹配不受大小写转换影响"""
+    commands = [
+        VoiceCommand(
+            id="c1", name="chinese", matchType="exact", matchPattern="你好",
+            actionType="key", actionParams="enter", enabled=True,
+        ),
+    ]
+    assert match_command("你好", commands) is not None
+    assert match_command("你好世界", commands) is None
+
+
+def test_match_command_prefix_chinese_unchanged():
+    """中文前缀匹配不受大小写转换影响"""
+    commands = [
+        VoiceCommand(
+            id="c2", name="chinese prefix", matchType="prefix", matchPattern="打开 ",
+            actionType="exec", actionParams="echo {content}", enabled=True,
+        ),
+    ]
+    result = match_command("打开 记事本", commands)
+    assert result is not None
+    cmd, prefix, content = result
+    assert content == "记事本"
+
+
 # ---------- execute_command 测试：key 类型 ----------
 @patch("phonemic.utils.command_processor.send_keys")
 @patch("phonemic.utils.command_processor.time.sleep")
