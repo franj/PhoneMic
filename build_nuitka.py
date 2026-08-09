@@ -105,6 +105,7 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--include-data-files=./USER_GUIDE.md=USER_GUIDE.md",
         "--noinclude-default-mode=error",
         "--nofollow-import-to=tkinter,unittest,pydoc,test,distutils,setuptools,pdb",
+        "--nofollow-import-to=PIL",
         "--nofollow-import-to=PySide6.QtWebEngineWidgets",
         "--nofollow-import-to=PySide6.QtNetworkAuth",
         "--nofollow-import-to=PySide6.QtQml",

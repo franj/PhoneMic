@@ -4,9 +4,8 @@ import subprocess
 import sys
 
 import qrcode
-from PIL.ImageQt import ImageQt
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QAction
+from PySide6.QtGui import QPixmap, QAction, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QLabel,
     QFrame, QMenuBar, QMessageBox, QApplication,
@@ -19,6 +18,34 @@ from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
+
+
+def make_qr_pixmap(data: str, size: int = 250) -> QPixmap:
+    """直接从 qrcode 矩阵生成 QPixmap，不依赖 PIL/Pillow。"""
+    qr = qrcode.QRCode(box_size=1, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    matrix = qr.get_matrix()
+
+    matrix_size = len(matrix)
+    scale = max(1, size // matrix_size)
+    actual_size = matrix_size * scale
+
+    pixmap = QPixmap(actual_size, actual_size)
+    pixmap.fill(Qt.white)
+
+    painter = QPainter(pixmap)
+    painter.setBrush(QColor(0, 0, 0))
+    painter.setPen(Qt.NoPen)
+    for y, row in enumerate(matrix):
+        for x, is_dark in enumerate(row):
+            if is_dark:
+                painter.drawRect(x * scale, y * scale, scale, scale)
+    painter.end()
+
+    if pixmap.width() != size or pixmap.height() != size:
+        pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return pixmap
 
 
 class Dashboard(QMainWindow):
@@ -51,10 +78,7 @@ class Dashboard(QMainWindow):
         qr_label.setAlignment(Qt.AlignCenter)
 
         qr_url = f"http://{ip}:{port}"
-        pil_img = qrcode.make(qr_url)
-        pil_img = pil_img.resize((250, 250))
-        qimage = ImageQt(pil_img)
-        pixmap = QPixmap.fromImage(qimage)
+        pixmap = make_qr_pixmap(qr_url)
         qr_label.setPixmap(pixmap)
         layout.addWidget(qr_label)
 
@@ -143,10 +167,7 @@ class Dashboard(QMainWindow):
         """更新主界面的 IP 和二维码显示"""
         # 更新二维码
         qr_url = f"http://{ip}:{port}"
-        pil_img = qrcode.make(qr_url)
-        pil_img = pil_img.resize((250, 250))
-        qimage = ImageQt(pil_img)
-        pixmap = QPixmap.fromImage(qimage)
+        pixmap = make_qr_pixmap(qr_url)
         self.qr_label.setPixmap(pixmap)
 
         # 更新 IP 标签
