@@ -131,7 +131,7 @@ class SystemTray(QObject):
         menu.addAction(self.i18n.tr("dashboard.menu_command")).triggered.connect(self._open_commands_dialog)
         menu.addSeparator()
         menu.addAction(self.i18n.tr("tray.menu_about")).triggered.connect(self.dashboard.show_about)
-        menu.addAction(self.i18n.tr("tray.menu_quit")).triggered.connect(lambda: QApplication.quit())
+        menu.addAction(self.i18n.tr("tray.menu_quit")).triggered.connect(self.dashboard._quit_app)
         return menu
 
     def show_message(self, title: str, message: str, icon=QSystemTrayIcon.Information, timeout: int = 1000):
