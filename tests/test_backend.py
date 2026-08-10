@@ -5,6 +5,7 @@ PhoneMic 后端服务单元测试
 
 import json
 import multiprocessing
+import re
 import time
 import urllib.request
 import urllib.error
@@ -135,6 +136,43 @@ def test_only_one_active_connection(server_with_bridge):
     ws2.close()
 
 
+def test_config_message_on_connect(server_with_bridge):
+    """连接后客户端应收到 config 消息，包含 mobile_max_records 配置"""
+    host, port, queue = server_with_bridge
+
+    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        # 先消费队列中的 connect 事件
+        assert_first_msg_connect(queue)
+
+        # 客户端应收到 config 消息
+        msg = ws.recv(timeout=2)
+        data = json.loads(msg)
+        assert data["type"] == "config"
+        assert "mobile_max_records" in data
+        assert isinstance(data["mobile_max_records"], int)
+
+
+def test_unknown_message_type_tolerance(server_with_bridge):
+    """未知消息类型不应崩溃，后续合法消息应正常处理"""
+    host, port, queue = server_with_bridge
+
+    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        assert_first_msg_connect(queue)
+
+        # 消费 config 消息
+        ws.recv(timeout=2)
+
+        # 发送未知类型
+        ws.send(json.dumps({"type": "unknown_type", "text": "???"}))
+        time.sleep(0.3)  # 等待服务器处理
+
+        # 后续合法消息应正常工作
+        ws.send(json.dumps({"type": "preview", "text": "still working"}))
+        msg_type, text = queue.get(timeout=2)
+        assert msg_type == "preview"
+        assert text == "still working"
+
+
 # ---------- 测试 HTTP 路由 ----------
 def test_get_root_returns_html(server_with_bridge):
     """GET / 应返回 HTML 响应"""
@@ -146,6 +184,41 @@ def test_get_root_returns_html(server_with_bridge):
     assert "text/html" in resp.headers.get("content-type", "")
     body = resp.read().decode("utf-8")
     assert len(body) > 0
+
+
+def test_root_html_i18n_replaced(server_with_bridge):
+    """GET / 返回的 HTML 中 __I18N_JSON__ 占位符应被替换为有效 JSON"""
+    host, port, _ = server_with_bridge
+
+    url = f"http://{host}:{port}/"
+    resp = urllib.request.urlopen(url, timeout=2)
+    body = resp.read().decode("utf-8")
+
+    # 原始占位符不应出现
+    assert "__I18N_JSON__" not in body, "i18n placeholder was not replaced"
+
+    # 应包含 i18n-data script 标签，且内容为有效 JSON 对象
+    match = re.search(
+        r'<script id="i18n-data" type="application/json">\s*(.*?)\s*</script>',
+        body, re.DOTALL
+    )
+    assert match is not None, "i18n-data script tag not found in HTML"
+    i18n_data = json.loads(match.group(1))
+    assert isinstance(i18n_data, dict)
+    assert len(i18n_data) > 0, "i18n data should not be empty"
+
+
+def test_favicon_route(server_with_bridge):
+    """GET /favicon.ico 应返回图标文件"""
+    host, port, _ = server_with_bridge
+
+    url = f"http://{host}:{port}/favicon.ico"
+    resp = urllib.request.urlopen(url, timeout=2)
+    assert resp.status == 200
+    content_type = resp.headers.get("content-type", "")
+    assert "image" in content_type, f"Expected image content-type, got: {content_type}"
+    body = resp.read()
+    assert len(body) > 0, "favicon body should not be empty"
 
 
 # ---------- 集成测试 ----------
@@ -212,3 +285,35 @@ def test_server_start_stop():
     # 验证端口已释放（连接应失败）
     with pytest.raises((urllib.error.URLError, OSError, ConnectionRefusedError)):
         urllib.request.urlopen(url, timeout=1.0)
+
+
+def test_server_restart_cycle():
+    """验证服务器 stop 后可以重新 start（模拟网络切换场景）"""
+    host = "127.0.0.1"
+    port = get_test_port()
+    bridge = QueueEventBridge(multiprocessing.Queue())
+    set_bridge(bridge)
+
+    # 第一次启动
+    start_server(host, port, bridge)
+    assert wait_for_server_ready(host, port), "First start failed"
+
+    # 停止
+    stop_server()
+    time.sleep(0.5)
+
+    # 第二次启动（复用同一端口，验证 _create_app() 工厂模式）
+    start_server(host, port, bridge)
+    assert wait_for_server_ready(host, port), "Restart failed"
+
+    # 验证功能正常
+    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        assert_first_msg_connect(bridge.queue)
+
+        ws.send(json.dumps({"type": "preview", "text": "after restart"}))
+        msg_type, text = bridge.queue.get(timeout=2)
+        assert msg_type == "preview"
+        assert text == "after restart"
+
+    stop_server()
+    time.sleep(0.3)
