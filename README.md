@@ -114,7 +114,7 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 
 本软件使用了以下开源组件：
 - PySide6 (LGPL v3) – [主页](https://www.qt.io/qt-for-python)
-- Tremolo (MIT) – [主页](https://github.com/nggit/tremolo)
+- aiohttp (Apache 2.0) – [主页](https://github.com/aio-libs/aiohttp)
 - PyWin32 (PSF License)
 - PyAutoGUI (BSD 3-Clause)
 - Pyperclip (BSD 3-Clause)

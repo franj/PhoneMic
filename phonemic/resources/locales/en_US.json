@@ -74,7 +74,7 @@
   },
   "about": {
     "title": "About PhoneMic",
-    "content": "<h3>PhoneMic</h3><p>Version {version} commit: {commit}</p><p>Seamlessly transfer text from your phone to your computer via voice input.</p><p>Tech stack: PySide6, Tremolo, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+    "content": "<h3>PhoneMic</h3><p>Version {version} commit: {commit}</p><p>Seamlessly transfer text from your phone to your computer via voice input.</p><p>Tech stack: PySide6, aiohttp, WebSocket</p><p>© 2026 PhoneMic Team</p>"
   },
   "close_choice": {
     "title": "Choose Close Action",

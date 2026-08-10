@@ -1,6 +1,6 @@
 """
 PhoneMic 后端服务单元测试
-使用真实 HTTP/WebSocket 连接测试 Tremolo 服务器。
+使用真实 HTTP/WebSocket 连接测试 aiohttp 服务器。
 """
 
 import json

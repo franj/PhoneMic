@@ -7,9 +7,9 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
    Homepage: https://www.qt.io/qt-for-python
    Note: Dynamically linked; related source code can be obtained from https://www.qt.io/offline-installers
 
-2. Tremolo
-   License: MIT
-   Homepage: https://github.com/nggit/tremolo
+2. aiohttp
+   License: Apache 2.0
+   Homepage: https://github.com/aio-libs/aiohttp
 
 3. PyWin32
    License: PSF (Python Software Foundation) License

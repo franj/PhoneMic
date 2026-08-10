@@ -8,9 +8,9 @@ PhoneMic – 第三方依赖声明
    主页：https://www.qt.io/qt-for-python
    说明：动态链接使用，相关源代码可从 https://www.qt.io/offline-installers 获取
 
-2. Tremolo
-   许可证：MIT
-   主页：https://github.com/nggit/tremolo
+2. aiohttp
+   许可证：Apache 2.0
+   主页：https://github.com/aio-libs/aiohttp
 
 3. PyWin32
    许可证：PSF (Python Software Foundation) License
