@@ -106,6 +106,12 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--noinclude-default-mode=error",
         "--nofollow-import-to=tkinter,unittest,pydoc,test,distutils,setuptools,pdb",
         "--nofollow-import-to=PIL",
+        # 已移除的旧依赖（防御性排除，防止残留引用）
+        "--nofollow-import-to=fastapi,uvicorn,starlette,pydantic,pydantic_core",
+        "--nofollow-import-to=jinja2,requests,tremolo",
+        # aiohttp 可选加速包（未安装，防御性排除）
+        "--nofollow-import-to=aiodns,brotli,cchardet",
+        # 注意: ssl/hashlib/http 不可排除，aiohttp 依赖它们
         "--nofollow-import-to=PySide6.QtWebEngineWidgets",
         "--nofollow-import-to=PySide6.QtNetworkAuth",
         "--nofollow-import-to=PySide6.QtQml",

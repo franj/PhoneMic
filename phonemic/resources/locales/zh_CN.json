@@ -75,7 +75,7 @@
   },
   "about": {
     "title": "关于 PhoneMic",
-    "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>通过手机语音输入，将文字无缝传输到电脑。</p><p>技术栈: PySide6, FastAPI, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+    "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>通过手机语音输入，将文字无缝传输到电脑。</p><p>技术栈: PySide6, aiohttp, WebSocket</p><p>© 2026 PhoneMic Team</p>"
   },
   "close_choice": {
     "title": "关闭行为选择",

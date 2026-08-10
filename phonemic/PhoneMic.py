@@ -7,7 +7,8 @@ import threading
 import time
 from typing import Any, Optional
 
-import requests
+import urllib.request
+import urllib.error
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -56,10 +57,10 @@ def wait_for_server(host: str, port: int, timeout: float = 5.0) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
-            resp = requests.get(url, timeout=0.5)
-            if resp.status_code == 200:
+            resp = urllib.request.urlopen(url, timeout=0.5)
+            if resp.status == 200:
                 return True
-        except requests.RequestException:
+        except (urllib.error.URLError, OSError):
             pass
         time.sleep(0.2)
     return False

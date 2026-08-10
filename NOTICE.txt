@@ -1,4 +1,4 @@
-﻿PhoneMic – 第三方依赖声明
+PhoneMic – 第三方依赖声明
 
 本软件 (PhoneMic) 使用 Apache 2.0 许可证开源（详见 LICENSE 文件），
 同时包含以下第三方组件，特此致谢：
@@ -8,55 +8,43 @@
    主页：https://www.qt.io/qt-for-python
    说明：动态链接使用，相关源代码可从 https://www.qt.io/offline-installers 获取
 
-2. FastAPI
-   许可证：MIT
-   主页：https://fastapi.tiangolo.com
+2. aiohttp
+   许可证：Apache 2.0
+   主页：https://github.com/aio-libs/aiohttp
 
-3. Uvicorn
-   许可证：BSD 3-Clause
-   主页：https://www.uvicorn.org
-
-4. PyWin32
+3. PyWin32
    许可证：PSF (Python Software Foundation) License
    主页：https://github.com/mhammond/pywin32
 
-5. PyAutoGUI
+4. PyAutoGUI
    许可证：BSD 3-Clause
    主页：https://github.com/asweigart/pyautogui
 
-6. Pyperclip
+5. Pyperclip
    许可证：BSD 3-Clause
    主页：https://github.com/asweigart/pyperclip
 
-7. netifaces
+6. netifaces
    许可证：MIT
    主页：https://github.com/al45tair/netifaces
 
-8. psutil
+7. psutil
    许可证：BSD 3-Clause
    主页：https://github.com/giampaolo/psutil
 
-9. Jinja2
+8. keyboard
+   许可证：MIT
+   主页：https://github.com/boppreh/keyboard
+
+9. qrcode
    许可证：BSD 3-Clause
-   主页：https://jinja.palletsprojects.com
+   主页：https://github.com/lincolnloop/python-qrcode
 
-10. keyboard
+10. pyparsing
     许可证：MIT
-    主页：https://github.com/boppreh/keyboard
+    主页：https://github.com/pyparsing/pyparsing
 
-11. qrcode
-    许可证：BSD 3-Clause
-    主页：https://github.com/lincolnloop/python-qrcode
-
-12. Pillow
-    许可证：MIT  (Historical Permission Notice and Disclaimer - HPND)
-    主页：https://python-pillow.org
-
-13. requests
-    许可证：Apache 2.0
-    主页：https://requests.readthedocs.io
-
-14. Nuitka (仅打包使用，不包含在最终分发中)
+11. Nuitka (仅打包使用，不包含在最终分发中)
     许可证：Apache 2.0
     主页：https://nuitka.net
 
