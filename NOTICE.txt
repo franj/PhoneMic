@@ -1,4 +1,4 @@
-PhoneMic – 第三方依赖声明
+﻿PhoneMic – 第三方依赖声明
 
 本软件 (PhoneMic) 使用 Apache 2.0 许可证开源（详见 LICENSE 文件），
 同时包含以下第三方组件，特此致谢：
