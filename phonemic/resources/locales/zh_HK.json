@@ -75,7 +75,7 @@
   },
   "about": {
     "title": "關於 PhoneMic",
-    "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>透過手機語音輸入，將文字無縫傳輸到電腦。</p><p>技術棧: PySide6, FastAPI, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+    "content": "<h3>PhoneMic</h3><p>版本 {version} commit: {commit}</p><p>透過手機語音輸入，將文字無縫傳輸到電腦。</p><p>技術棧: PySide6, Tremolo, WebSocket</p><p>© 2026 PhoneMic Team</p>"
   },
   "close_choice": {
     "title": "關閉行為選擇",

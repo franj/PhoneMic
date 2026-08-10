@@ -7,55 +7,43 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
    Homepage: https://www.qt.io/qt-for-python
    Note: Dynamically linked; related source code can be obtained from https://www.qt.io/offline-installers
 
-2. FastAPI
+2. Tremolo
    License: MIT
-   Homepage: https://fastapi.tiangolo.com
+   Homepage: https://github.com/nggit/tremolo
 
-3. Uvicorn
-   License: BSD 3-Clause
-   Homepage: https://www.uvicorn.org
-
-4. PyWin32
+3. PyWin32
    License: PSF (Python Software Foundation) License
    Homepage: https://github.com/mhammond/pywin32
 
-5. PyAutoGUI
+4. PyAutoGUI
    License: BSD 3-Clause
    Homepage: https://github.com/asweigart/pyautogui
 
-6. Pyperclip
+5. Pyperclip
    License: BSD 3-Clause
    Homepage: https://github.com/asweigart/pyperclip
 
-7. netifaces
+6. netifaces
    License: MIT
    Homepage: https://github.com/al45tair/netifaces
 
-8. psutil
+7. psutil
    License: BSD 3-Clause
    Homepage: https://github.com/giampaolo/psutil
 
-9. Jinja2
+8. keyboard
+   License: MIT
+   Homepage: https://github.com/boppreh/keyboard
+
+9. qrcode
    License: BSD 3-Clause
-   Homepage: https://jinja.palletsprojects.com
+   Homepage: https://github.com/lincolnloop/python-qrcode
 
-10. keyboard
+10. pyparsing
     License: MIT
-    Homepage: https://github.com/boppreh/keyboard
+    Homepage: https://github.com/pyparsing/pyparsing
 
-11. qrcode
-    License: BSD 3-Clause
-    Homepage: https://github.com/lincolnloop/python-qrcode
-
-12. Pillow
-    License: MIT (Historical Permission Notice and Disclaimer - HPND)
-    Homepage: https://python-pillow.org
-
-13. requests
-    License: Apache 2.0
-    Homepage: https://requests.readthedocs.io
-
-14. Nuitka (used only for packaging, not included in final distribution)
+11. Nuitka (used only for packaging, not included in final distribution)
     License: Apache 2.0
     Homepage: https://nuitka.net
 
