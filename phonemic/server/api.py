@@ -56,7 +56,7 @@ class ConnectionManager:
             old_ws = self.active_websocket
             self.active_websocket = None
             try:
-                await old_ws.close(code=1000, reason="New connection replaces old one")
+                await old_ws.close(code=1000)
                 self.bridge.emit("disconnect")
                 logger.info("Old WebSocket connection replaced, disconnect event sent.")
             except Exception as e:
@@ -88,9 +88,6 @@ class ConnectionManager:
             logger.info("Active WebSocket disconnected, event sent.")
 
 
-# 创建 Tremolo 应用
-app = Application()
-
 # 全局通信管理（用于与主进程通信）
 _manager: Optional[ConnectionManager] = None
 
@@ -101,87 +98,99 @@ def set_bridge(bridge: EventBridge) -> None:
     logger.info("Message bridge set for backend service")
 
 
-@app.route('/favicon.ico')
-async def favicon(response):
-    """返回 favicon"""
-    await response.sendfile(get_res_path("favicon.ico"), content_type='image/x-icon')
-    return True  # 保持 keep-alive
-
-
-@app.route('/')
-async def index(response):
+def _create_app() -> Application:
     """
-    返回手机端聊天页面（mobile.html）。
-    若模板文件不存在，则返回错误提示。
+    创建 Tremolo Application 实例并注册路由。
+    每次调用创建新实例，避免多次启停时共享状态被污染。
     """
-    html_path = get_res_path("mobile.html")
-    try:
-        with open(html_path, "r", encoding="utf-8") as f:
-            html = f.read()
-        # 替换 i18n 占位符为 JSON 数据
-        i18n_data = I18n.instance().get_section("mobile")
-        html = html.replace("__I18N_JSON__", json.dumps(i18n_data, ensure_ascii=False))
-        response.set_content_type(b'text/html; charset=utf-8')
-        return html
-    except Exception as e:
-        logger.error(f"Failed to load mobile.html: {e}")
-        response.set_content_type(b'text/html; charset=utf-8')
-        response.set_status(404)
-        return '<h3>Error: mobile.html not found. Please check resources/ directory.</h3>'
+    app = Application()
+
+    @app.route('/favicon.ico')
+    async def favicon(response):
+        """返回 favicon"""
+        await response.sendfile(get_res_path("favicon.ico"), content_type='image/x-icon')
+        return True  # 保持 keep-alive
+
+    @app.route('/')
+    async def index(response):
+        """
+        返回手机端聊天页面（mobile.html）。
+        若模板文件不存在，则返回错误提示。
+        """
+        html_path = get_res_path("mobile.html")
+        try:
+            with open(html_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            # 替换 i18n 占位符为 JSON 数据
+            i18n_data = I18n.instance().get_section("mobile")
+            html = html.replace("__I18N_JSON__", json.dumps(i18n_data, ensure_ascii=False))
+            response.set_content_type(b'text/html; charset=utf-8')
+            return html
+        except Exception as e:
+            logger.error(f"Failed to load mobile.html: {e}")
+            response.set_content_type(b'text/html; charset=utf-8')
+            response.set_status(404)
+            return '<h3>Error: mobile.html not found. Please check resources/ directory.</h3>'
+
+    @app.route('/ws')
+    async def websocket_endpoint(websocket=None):
+        """WebSocket 端点，处理手机端的实时消息。"""
+        if websocket is None:
+            return  # 非 WebSocket 升级请求
+
+        if _manager is None:
+            logger.error("Message bridge not initialized. Call set_bridge() before starting server.")
+            await websocket.close(code=1011, reason="Server not ready")
+            return
+
+        await _manager.connect(websocket)
+
+        try:
+            while True:
+                message = await websocket.receive()
+                try:
+                    data = json.loads(message)
+                    msg_type = data.get("type")
+                    text = data.get("text", "")
+
+                    if msg_type in ("preview", "send"):
+                        _manager.bridge.emit(msg_type, text)
+                        logger.debug(f"Received {msg_type}: {text[:50]}...")
+                    else:
+                        logger.warning(f"Unknown message type: {msg_type}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON: {message}, error: {e}")
+                    # 不关闭连接，继续接收下一条
+        except WebSocketClientClosed:
+            _manager.disconnect(websocket)
+        except Exception as e:
+            logger.exception(f"Unexpected error in receive_loop: {e}")
+            _manager.disconnect(websocket)
+
+    return app
 
 
-@app.route('/ws')
-async def websocket_endpoint(websocket=None):
-    """WebSocket 端点，处理手机端的实时消息。"""
-    if websocket is None:
-        return  # 非 WebSocket 升级请求
-
-    if _manager is None:
-        logger.error("Message bridge not initialized. Call set_bridge() before starting server.")
-        await websocket.close(code=1011, reason="Server not ready")
-        return
-
-    await _manager.connect(websocket)
-
-    try:
-        while True:
-            message = await websocket.receive()
-            try:
-                data = json.loads(message)
-                msg_type = data.get("type")
-                text = data.get("text", "")
-
-                if msg_type in ("preview", "send"):
-                    _manager.bridge.emit(msg_type, text)
-                    logger.debug(f"Received {msg_type}: {text[:50]}...")
-                else:
-                    logger.warning(f"Unknown message type: {msg_type}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON: {message}, error: {e}")
-                # 不关闭连接，继续接收下一条
-    except WebSocketClientClosed:
-        _manager.disconnect(websocket)
-    except Exception as e:
-        logger.exception(f"Unexpected error in receive_loop: {e}")
-        _manager.disconnect(websocket)
-
+# 兼容性导出：提供 app 对象供外部引用（每次启停使用新实例）
+app = _create_app()
 
 # ---------- 线程管理（用于启动/停止服务）----------
 _server_thread: Optional[threading.Thread] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _serve_task = None
+_running_app: Optional[Application] = None
 
 
 def start_server(host: str, port: int, bridge: EventBridge) -> None:
     """在后台线程中启动 Tremolo 服务（非阻塞）。"""
-    global _server_thread, _event_loop, _serve_task
+    global _server_thread, _event_loop, _serve_task, _running_app
     set_bridge(bridge)
+    _running_app = _create_app()
 
     def _run():
         global _event_loop, _serve_task
         _event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_event_loop)
-        _serve_task = _event_loop.create_task(app.serve(host, port))
+        _serve_task = _event_loop.create_task(_running_app.serve(host, port))
         try:
             _event_loop.run_until_complete(_serve_task)
         except asyncio.CancelledError:
@@ -189,7 +198,14 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
         except Exception as e:
             logger.error(f"Server error: {e}")
         finally:
-            _event_loop.close()
+            try:
+                _event_loop.stop()
+            except Exception:
+                pass
+            try:
+                _event_loop.close()
+            except Exception:
+                pass
 
     _server_thread = threading.Thread(target=_run, daemon=True)
     _server_thread.start()
@@ -215,11 +231,19 @@ def run_server(host: str, port: int = 7979, bridge: Optional[EventBridge] = None
     elif _manager is None:
         raise RuntimeError("Bridge must be provided either via set_bridge() or run_server(bridge=...)")
 
+    run_app = _create_app()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(app.serve(host, port))
+        loop.run_until_complete(run_app.serve(host, port))
     except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
-        loop.close()
+        try:
+            loop.stop()
+        except Exception:
+            pass
+        try:
+            loop.close()
+        except Exception:
+            pass
