@@ -131,7 +131,7 @@ def _create_app() -> web.Application:
 
     async def websocket_endpoint(request):
         """WebSocket 端点，处理手机端的实时消息。"""
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
 
         if _manager is None:
@@ -157,6 +157,9 @@ def _create_app() -> web.Application:
                     except json.JSONDecodeError as e:
                         logger.error(f"Invalid JSON: {msg.data}, error: {e}")
                         # 不关闭连接，继续接收下一条
+                elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+                    logger.info(f"WebSocket closing, type={msg.type}")
+                    break
                 elif msg.type == WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {ws.exception()}")
         except Exception as e:
