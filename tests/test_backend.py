@@ -14,7 +14,7 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 
 from phonemic.bridge_queue import QueueEventBridge
-from phonemic.server.api import set_bridge, start_server, stop_server
+from phonemic.server.api import set_bridge, start_server, stop_server, push_config, send_to_phone
 
 
 # ---------- 辅助函数 ----------
@@ -150,6 +150,57 @@ def test_config_message_on_connect(server_with_bridge):
         assert data["type"] == "config"
         assert "mobile_max_records" in data
         assert isinstance(data["mobile_max_records"], int)
+
+
+def test_push_config_to_connected_phone(server_with_bridge):
+    """push_config 应实时推送配置更新到已连接的手机端"""
+    host, port, queue = server_with_bridge
+
+    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        assert_first_msg_connect(queue)
+
+        # 消费连接时的初始 config 消息
+        ws.recv(timeout=2)
+
+        # 通过公共 API 推送新的配置
+        result = push_config("mobile_max_records", 25)
+        assert result is True
+
+        # 手机端应收到推送的 config 消息
+        msg = ws.recv(timeout=2)
+        data = json.loads(msg)
+        assert data["type"] == "config"
+        assert data["mobile_max_records"] == 25
+
+
+def test_send_to_phone_custom_message(server_with_bridge):
+    """send_to_phone 应能推送任意自定义消息"""
+    host, port, queue = server_with_bridge
+
+    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        assert_first_msg_connect(queue)
+
+        # 消费初始 config 消息
+        ws.recv(timeout=2)
+
+        # 推送自定义消息
+        result = send_to_phone({"type": "notice", "text": "hello from server"})
+        assert result is True
+
+        msg = ws.recv(timeout=2)
+        data = json.loads(msg)
+        assert data["type"] == "notice"
+        assert data["text"] == "hello from server"
+
+
+def test_send_to_phone_when_disconnected():
+    """没有连接时 send_to_phone 应返回 False"""
+    from phonemic.server.api import set_bridge, send_to_phone
+    bridge = QueueEventBridge(multiprocessing.Queue())
+    set_bridge(bridge)
+
+    result = send_to_phone({"type": "test"})
+    assert result is False
 
 
 def test_unknown_message_type_tolerance(server_with_bridge):

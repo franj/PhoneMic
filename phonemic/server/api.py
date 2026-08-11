@@ -45,22 +45,7 @@ class ConnectionManager:
     def _on_max_records_changed(self, new_value: int) -> None:
         self.max_records = new_value
         logger.info(f"Mobile max records updated to {new_value}")
-        # 推送配置更新到已连接的手机端
-        if self.active_websocket is not None and _event_loop is not None:
-            asyncio.run_coroutine_threadsafe(self._push_config(), _event_loop)
-
-    async def _push_config(self) -> None:
-        """向当前活动的 WebSocket 连接推送配置更新。"""
-        if self.active_websocket is None:
-            return
-        try:
-            await self.active_websocket.send_str(json.dumps({
-                "type": "config",
-                "mobile_max_records": self.max_records
-            }))
-            logger.debug(f"Pushed config update to client: max_records={self.max_records}")
-        except Exception as e:
-            logger.warning(f"Failed to push config update: {e}")
+        push_config("mobile_max_records", self.max_records)
 
     async def connect(self, ws: web.WebSocketResponse) -> None:
         """
@@ -110,6 +95,51 @@ def set_bridge(bridge: EventBridge) -> None:
     global _manager
     _manager = ConnectionManager(bridge)
     logger.info("Message bridge set for backend service")
+
+
+# ---------- 公共 API：向手机端推送消息 ----------
+
+def send_to_phone(message: dict) -> bool:
+    """
+    向已连接的手机端推送任意 JSON 消息。
+    线程安全，可从主线程（Qt 回调）或任意线程调用。
+
+    Args:
+        message: 要发送的 JSON 消息字典
+
+    Returns:
+        True 如果消息已调度发送，False 如果没有连接或调度失败
+    """
+    if _manager is None or _manager.active_websocket is None:
+        return False
+    if _event_loop is None:
+        return False
+
+    async def _send():
+        try:
+            await _manager.active_websocket.send_str(
+                json.dumps(message, ensure_ascii=False)
+            )
+            logger.debug(f"Pushed message to phone: {message}")
+        except Exception as e:
+            logger.warning(f"Failed to push message to phone: {e}")
+
+    asyncio.run_coroutine_threadsafe(_send(), _event_loop)
+    return True
+
+
+def push_config(key: str, value) -> bool:
+    """
+    向已连接的手机端推送配置更新。
+
+    Args:
+        key: 配置键名（如 "mobile_max_records"）
+        value: 配置值
+
+    Returns:
+        True 如果消息已调度发送
+    """
+    return send_to_phone({"type": "config", key: value})
 
 
 def _create_app() -> web.Application:
