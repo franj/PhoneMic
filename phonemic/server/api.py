@@ -45,6 +45,22 @@ class ConnectionManager:
     def _on_max_records_changed(self, new_value: int) -> None:
         self.max_records = new_value
         logger.info(f"Mobile max records updated to {new_value}")
+        # 推送配置更新到已连接的手机端
+        if self.active_websocket is not None and _event_loop is not None:
+            asyncio.run_coroutine_threadsafe(self._push_config(), _event_loop)
+
+    async def _push_config(self) -> None:
+        """向当前活动的 WebSocket 连接推送配置更新。"""
+        if self.active_websocket is None:
+            return
+        try:
+            await self.active_websocket.send_str(json.dumps({
+                "type": "config",
+                "mobile_max_records": self.max_records
+            }))
+            logger.debug(f"Pushed config update to client: max_records={self.max_records}")
+        except Exception as e:
+            logger.warning(f"Failed to push config update: {e}")
 
     async def connect(self, ws: web.WebSocketResponse) -> None:
         """
