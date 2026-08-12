@@ -51,21 +51,22 @@
 ### 方式二：从源码运行
 
 ```bash
-# 克隆仓库（任选一个源）
+# 打开命令行，克隆仓库（任选一个源）
 git clone https://github.com/franj/PhoneMic.git
 # 或
 git clone https://gitee.com/franj/PhoneMic.git
 
 cd phonemic
 
-# 安装 uv（如未安装）
-pip install uv
+# 需要先安装 uv，详见 https://docs.astral.sh/uv/getting-started/installation/ ，windows安装命令如下：
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 安装依赖
+uv venv --python 3.14.6
 uv sync
 
 # 运行程序
-uv run python -m phonemic.PhoneMic
+uvw run python -m phonemic.PhoneMic
 ```
 
 ## 🛠 语音命令（扩展功能）
