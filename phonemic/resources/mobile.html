@@ -297,10 +297,14 @@ __I18N_JSON__
             
             this.debug = options.debug || false;
             
-            // 【新增】允许忽略的残余首字符参数。直接传入字符串即可。
-            // 默认包含中文句号、英文点号、空格。转为数组以便精确匹配。
+            // 允许忽略的残余首字符参数
             const prefixStr = options.ignorePrefixChars !== undefined ? options.ignorePrefixChars : "。. ";
             this.ignorePrefixChars = Array.from(prefixStr);
+
+            // 【新增】退格触发前的最短间隔检查（默认 0 禁用）
+            this.minKeyupGapBeforeDelete = options.minKeyupGapBeforeDelete || 0;
+            // 记录最近一次字符输入的时间戳（仅在 IDLE 状态更新）
+            this.lastKeyupTime = 0;
 
             this.state = FSM.IDLE;
             this.expectedText = "";
@@ -358,7 +362,7 @@ __I18N_JSON__
         _normalizeText(text) {
             let processed = text;
             if (processed.length > 0 && this.ignorePrefixChars.includes(processed[0])) {
-                processed = processed.substring(1); // 剥离最前面的 1 个字符
+                processed = processed.substring(1);
             }
             return processed.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
         }
@@ -373,6 +377,12 @@ __I18N_JSON__
         }
 
         _handleEvent(e) {
+            // ===== 记录最近一次字符输入的 keyup =====
+            if (e.type === 'keyup' && this.state === FSM.IDLE && !this._isControlKey(e.key)) {
+                this.lastKeyupTime = Date.now();
+                this._log(`Recorded keyup "${e.key}" at ${this.lastKeyupTime}`);
+            }
+
             if (e.type === 'blur') {
                 const text = this._normalizeText(this.element.value);
                 if (text.length > 0) {
@@ -400,6 +410,13 @@ __I18N_JSON__
                 case FSM.IDLE:
                     // 【修改】只有在输入框非逻辑为空时，退格才算作删除流程的开始
                     if (e.type === 'keydown' && e.key === 'Backspace' && !this._isLogicalZero(this.element.value)) {
+                        // 如果配置了最小间隔且距离上次字符输入时间不足，则忽略本次退格
+                        const now = Date.now();
+                        const gap = now - this.lastKeyupTime;
+                        if (this.minKeyupGapBeforeDelete > 0 && this.lastKeyupTime > 0 && gap < this.minKeyupGapBeforeDelete) {
+                            this._log(`⏳ Backspace ignored: too soon after keyup (${gap}ms < ${this.minKeyupGapBeforeDelete}ms)`);
+                            break;  // 不进入删除状态
+                        }
                         this.state = FSM.DELETING;
                         this._log("Feature matching started: Entering continuous backspace");
                     }
@@ -496,7 +513,9 @@ __I18N_JSON__
 
         init() {
             if (this.isIOS) {
-                this.doubaoObserver = new DoubaoVoiceObserver(this.element, false);
+                this.doubaoObserver = new DoubaoVoiceObserver(this.element, 
+                    {minKeyupGapBeforeDelete: 1000}
+                );
                 this.element.addEventListener(DoubaoVoiceObserver.EVENT_COMPLETE, this._doubaoComplete);
             } else {
                 this.element.addEventListener('compositionstart', this._compStart);

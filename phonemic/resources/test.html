@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>🕵️ 盲听所有未知输入事件 (带暂停功能)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 10px;
+            font-family: -apple-system, sans-serif;
+            background: #121212;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        h3 { margin: 5px 0 10px; font-size: 15px; color: #bbb; }
+        
+        #test-area {
+            width: 100%;
+            height: 90px;
+            box-sizing: border-box;
+            padding: 10px;
+            font-size: 16px;
+            border: 1px solid #444;
+            background: #222;
+            color: #fff;
+            border-radius: 8px;
+            resize: none;
+            outline: none;
+            margin-bottom: 10px;
+        }
+
+        .control-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 12px;
+        }
+        .btn-group {
+            display: flex;
+            gap: 6px;
+        }
+        .btn-action {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 11px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        /* 暂停状态样式 */
+        .btn-pause {
+            background: #ffeb3b;
+            color: #000;
+        }
+        .btn-clear {
+            background: #cf6679;
+            color: #000;
+        }
+
+        #log-container {
+            flex: 1;
+            background: #000;
+            color: #00ff66;
+            border-radius: 8px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 11px;
+            overflow-y: auto;
+            line-height: 1.4;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.8);
+        }
+        .log-item {
+            border-bottom: 1px solid #222;
+            padding: 4px 0;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+        .log-item.input-core { color: #ffeb3b; font-weight: bold; } 
+        .log-item.selection-core { color: #00e5ff; } 
+        .log-item.unknown { color: #ff4081; } 
+        .log-item.system-tip { color: #ffffff; background: #333; padding: 4px 8px; border-radius: 3px; margin: 4px 0; }
+    </style>
+</head>
+<body>
+
+    <h3>🕵️ 使用【豆包语音输入】测试，捕获隐藏事件：</h3>
+    <textarea id="test-area" placeholder="在此处说话..."></textarea>
+
+    <div class="control-bar">
+        <span>🤖 动态捕获 (<span id="event-count">0</span> 个事件被监听):</span>
+        <div class="btn-group">
+            <button id="btn-pause" class="btn-action btn-pause" onclick="togglePause()">⏸️ 暂停监控</button>
+            <button class="btn-action btn-clear" onclick="clearLogs()">清空</button>
+        </div>
+    </div>
+    
+    <div id="log-container">
+        <div style="color: #666;">初始化监听器中...</div>
+    </div>
+
+<script>
+    const textarea = document.getElementById('test-area');
+    const logContainer = document.getElementById('log-container');
+    const eventCountSpan = document.getElementById('event-count');
+    const btnPause = document.getElementById('btn-pause');
+
+    // 全局暂停标志
+    let isPaused = false;
+
+    // 过滤掉高频噪音事件（防止屏幕滚动、长按等事件卡死页面）
+    const NOISE_EVENTS = new Set([
+        'pointermove', 'mousemove', 'touchmove', 
+        'pointerover', 'pointerout', 'mouseenter', 'mouseleave', 'mouseover', 'mouseout',
+        'scroll', 'wheel', 'pointerdown', 'pointerup',
+        'gotpointercapture', 'lostpointercapture'
+    ]);
+
+    const CORE_INPUT_EVENTS = new Set([
+        'beforeinput', 'input', 
+        'compositionstart', 'compositionupdate', 'compositionend',
+        'keydown', 'keypress', 'keyup'
+    ]);
+
+    function addLog(className, text) {
+        if (logContainer.innerText.includes('初始化')) {
+            logContainer.innerHTML = '';
+        }
+        const time = new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+        const item = document.createElement('div');
+        item.className = `log-item ${className}`;
+        item.innerHTML = `[${time}] ${text}`;
+        logContainer.insertBefore(item, logContainer.firstChild);
+    }
+
+    function clearLogs() {
+        logContainer.innerHTML = '<div style="color: #666;">等待事件触发...</div>';
+    }
+
+    // 控制暂停/恢复的函数
+    function togglePause() {
+        isPaused = !isPaused;
+        if (isPaused) {
+            btnPause.textContent = '▶️ 开始监控';
+            btnPause.style.background = '#4caf50';
+            btnPause.style.color = '#fff';
+            addLog('system-tip', `⚠️ <b>已暂停监控</b>。此时您可以安全地选中日志并进行复制。`);
+        } else {
+            btnPause.textContent = '⏸️ 暂停监控';
+            btnPause.style.background = '#ffeb3b';
+            btnPause.style.color = '#000';
+            addLog('system-tip', `▶️ <b>已恢复监控</b>，继续捕获键盘与输入事件。`);
+        }
+    }
+
+    // 动态扫描输入框原型链上的所有事件属性
+    let allSupportedEvents = [];
+    let currentObj = textarea;
+
+    while (currentObj) {
+        const propNames = Object.getOwnPropertyNames(currentObj);
+        for (const name of propNames) {
+            if (name.startsWith('on')) {
+                const eventName = name.slice(2); 
+                if (!NOISE_EVENTS.has(eventName) && !allSupportedEvents.includes(eventName)) {
+                    allSupportedEvents.push(eventName);
+                }
+            }
+        }
+        currentObj = Object.getPrototypeOf(currentObj);
+    }
+
+    eventCountSpan.textContent = allSupportedEvents.length;
+
+    // 动态绑定监听
+    allSupportedEvents.forEach(eventName => {
+        textarea.addEventListener(eventName, (e) => {
+            // 如果处于暂停状态，直接拦截，不输出日志
+            if (isPaused) return;
+
+            let logClass = 'unknown';
+            if (CORE_INPUT_EVENTS.has(eventName)) {
+                logClass = 'input-core';
+            }
+
+            let extraInfo = '';
+            if (e.inputType) extraInfo += ` | inputType: <b>${e.inputType}</b>`;
+            if (e.data !== undefined && e.data !== null) extraInfo += ` | data: "${e.data}"`;
+            if (e.isComposing !== undefined) extraInfo += ` | isComposing: ${e.isComposing}`;
+            if (e.key !== undefined) extraInfo += ` | key: "${e.key}"`;
+
+            addLog(logClass, `触发事件: <b style="font-size:12px;">[${eventName}]</b>${extraInfo}`);
+        });
+    });
+
+    // 补充监听：光标和选择范围改变事件
+    document.addEventListener('selectionchange', () => {
+        // 如果处于暂停状态，直接拦截
+        if (isPaused) return;
+        addLog('selection-core', `<b>[selectionchange]</b> | 光标位置/选区发生变化 | 当前字数: ${textarea.value.length}`);
+    });
+
+    addLog('system-tip', `成功初始化！已动态绑定并过滤了无用噪音。`);
+</script>
+</body>
+</html>

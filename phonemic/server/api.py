@@ -15,7 +15,7 @@ from typing import Optional
 from aiohttp import web, WSMsgType
 
 from phonemic.bridge_interface import EventBridge
-from phonemic.utils.paths import get_res_path
+from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
 
@@ -169,6 +169,23 @@ def _create_app() -> web.Application:
                 status=404,
                 content_type='text/html'
             )
+    async def test(request):
+        """
+        返回手机输入测试页面（test.html）。
+        若模板文件不存在，则返回错误提示。
+        """
+        html_path = get_res_path("test.html")
+        try:
+            with open(html_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            return web.Response(text=html, content_type='text/html', charset='utf-8')
+        except Exception as e:
+            logger.error(f"Failed to load test.html: {e}")
+            return web.Response(
+                text='<h3>Error: test.html not found. Please check resources/ directory.</h3>',
+                status=404,
+                content_type='text/html'
+            )
 
     async def favicon(request):
         """返回 favicon"""
@@ -216,6 +233,8 @@ def _create_app() -> web.Application:
         return ws
 
     app.router.add_get('/', index)
+    if not is_frozen():
+        app.router.add_get('/test', test)
     app.router.add_get('/favicon.ico', favicon)
     app.router.add_get('/ws', websocket_endpoint)
 

@@ -97,6 +97,7 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--lto=yes",
         "--enable-plugin=pyside6",
         "--include-data-dir=./phonemic/resources=phonemic/resources",
+        "--noinclude-data-files=*/test.html",
         f"--include-data-files={build_info_path}=build_info.json",
         "--include-data-files=./LICENSE=LICENSE",
         "--include-data-files=./LICENSE.LGPL.txt=LICENSE.LGPL.txt",
