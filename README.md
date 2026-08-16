@@ -62,7 +62,7 @@ cd phonemic
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 安装依赖
-uv venv --python 3.14.6
+uv venv --python 3.13.14
 uv sync
 
 # 运行程序
