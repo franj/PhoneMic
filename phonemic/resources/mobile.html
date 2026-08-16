@@ -301,9 +301,12 @@ __I18N_JSON__
             const prefixStr = options.ignorePrefixChars !== undefined ? options.ignorePrefixChars : "。. ";
             this.ignorePrefixChars = Array.from(prefixStr);
 
-            // 【新增】退格触发前的最短间隔检查（默认 0 禁用）
-            this.minKeyupGapBeforeDelete = options.minKeyupGapBeforeDelete || 0;
-            // 记录最近一次字符输入的时间戳（仅在 IDLE 状态更新）
+            // 【新增】退格触发时的 gap 区间匹配（默认 0 禁用）
+            // 仅当 gap 落在 [min, max] 毫秒区间内时，才判定为豆包内部修正并忽略退格
+            const gapCfg = options.keyupDeleteGap || {};
+            this.keyupDeleteGapMin = gapCfg.min || 0;
+            this.keyupDeleteGapMax = gapCfg.max || 0;
+            // 记录最近一次单字符输入的时间戳（仅在 IDLE 状态更新）
             this.lastKeyupTime = 0;
 
             this.state = FSM.IDLE;
@@ -377,10 +380,10 @@ __I18N_JSON__
         }
 
         _handleEvent(e) {
-            // ===== 记录最近一次字符输入的 keyup =====
-            if (e.type === 'keyup' && this.state === FSM.IDLE && !this._isControlKey(e.key)) {
+            // ===== 记录最近一次单字符输入的 keyup =====
+            if (e.type === 'keyup' && this.state === FSM.IDLE && !this._isControlKey(e.key) && e.key.length === 1) {
                 this.lastKeyupTime = Date.now();
-                this._log(`Recorded keyup "${e.key}" at ${this.lastKeyupTime}`);
+                this._log(`Recorded single-char keyup "${e.key}" at ${this.lastKeyupTime}`);
             }
 
             if (e.type === 'blur') {
@@ -410,11 +413,12 @@ __I18N_JSON__
                 case FSM.IDLE:
                     // 【修改】只有在输入框非逻辑为空时，退格才算作删除流程的开始
                     if (e.type === 'keydown' && e.key === 'Backspace' && !this._isLogicalZero(this.element.value)) {
-                        // 如果配置了最小间隔且距离上次字符输入时间不足，则忽略本次退格
+                        // 如果配置了区间且距离上次单字符输入落在特征区间内，则判定为内部修正，忽略本次退格
                         const now = Date.now();
                         const gap = now - this.lastKeyupTime;
-                        if (this.minKeyupGapBeforeDelete > 0 && this.lastKeyupTime > 0 && gap < this.minKeyupGapBeforeDelete) {
-                            this._log(`⏳ Backspace ignored: too soon after keyup (${gap}ms < ${this.minKeyupGapBeforeDelete}ms)`);
+                        if (this.keyupDeleteGapMin > 0 && this.keyupDeleteGapMax > 0 && this.lastKeyupTime > 0
+                            && gap >= this.keyupDeleteGapMin && gap <= this.keyupDeleteGapMax) {
+                            this._log(`⏳ Backspace ignored: gap matches internal-correction signature (${this.keyupDeleteGapMin}ms ≤ ${gap}ms ≤ ${this.keyupDeleteGapMax}ms)`);
                             break;  // 不进入删除状态
                         }
                         this.state = FSM.DELETING;
@@ -513,8 +517,8 @@ __I18N_JSON__
 
         init() {
             if (this.isIOS) {
-                this.doubaoObserver = new DoubaoVoiceObserver(this.element, 
-                    {minKeyupGapBeforeDelete: 1000}
+                this.doubaoObserver = new DoubaoVoiceObserver(this.element,
+                    {keyupDeleteGap: {min: 500, max: 700}}
                 );
                 this.element.addEventListener(DoubaoVoiceObserver.EVENT_COMPLETE, this._doubaoComplete);
             } else {
