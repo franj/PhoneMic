@@ -852,6 +852,7 @@ __I18N_JSON__
             this.chatManager.addMessage(text);
         }
         sendCurrentMessage(text) {
+            if (!text) text = this.inputBox.value;
             this.sendExternalMessage(text);
             this.inputBox.value = '';
             this.adjustHeight();
