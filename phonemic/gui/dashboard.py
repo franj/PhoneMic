@@ -133,6 +133,7 @@ class Dashboard(QMainWindow):
         ip_label = QLabel(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
         ip_label.setAlignment(Qt.AlignCenter)
         ip_label.setWordWrap(True)
+        ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(ip_label)
 
         # ----- 模式切换按钮 -----
