@@ -308,6 +308,12 @@ def stop_server() -> None:
         _server_thread.join(timeout=5.0)
 
 
+def restart_server(host: str, port: int, bridge: EventBridge) -> None:
+    """重启服务端，切换绑定地址。"""
+    stop_server()
+    start_server(host, port, bridge)
+
+
 def run_server(host: str, port: int = 7979, bridge: Optional[EventBridge] = None) -> None:
     """
     阻塞运行服务（用于测试）。

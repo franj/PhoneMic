@@ -14,7 +14,8 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 
 from phonemic.bridge_queue import QueueEventBridge
-from phonemic.server.api import set_bridge, start_server, stop_server, push_config, send_to_phone
+from phonemic.server.api import set_bridge, start_server, stop_server, restart_server, push_config, send_to_phone
+from phonemic.tunnel.mode import TunnelMode, get_bind_address
 
 
 # ---------- 辅助函数 ----------
@@ -365,6 +366,60 @@ def test_server_restart_cycle():
         msg_type, text = bridge.queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "after restart"
+
+    stop_server()
+    time.sleep(0.3)
+
+
+# ---------- 测试 restart_server（模式切换）----------
+def test_restart_server_with_different_host():
+    """restart_server 应能切换绑定地址（模拟 LAN→Cloudflare 模式切换）"""
+    port = get_test_port()
+    bridge = QueueEventBridge(multiprocessing.Queue())
+    set_bridge(bridge)
+
+    # 第一次启动：LAN 模式（0.0.0.0）
+    lan_host = get_bind_address(TunnelMode.LAN)
+    start_server(lan_host, port, bridge)
+    assert wait_for_server_ready("127.0.0.1", port), "LAN mode start failed"
+
+    # 重启：Cloudflare 模式（127.0.0.1）
+    cf_host = get_bind_address(TunnelMode.CLOUDFLARE)
+    restart_server(cf_host, port, bridge)
+    assert wait_for_server_ready("127.0.0.1", port), "Cloudflare mode restart failed"
+
+    # 验证 WebSocket 仍能正常工作
+    with ws_connect(f"ws://127.0.0.1:{port}/ws") as ws:
+        assert_first_msg_connect(bridge.queue)
+        ws.send(json.dumps({"type": "preview", "text": "after mode switch"}))
+        msg_type, text = bridge.queue.get(timeout=2)
+        assert msg_type == "preview"
+        assert text == "after mode switch"
+
+    stop_server()
+    time.sleep(0.3)
+
+
+def test_restart_server_preserves_bridge():
+    """restart_server 后 bridge 仍能正常推送消息"""
+    port = get_test_port()
+    bridge = QueueEventBridge(multiprocessing.Queue())
+    set_bridge(bridge)
+
+    start_server("127.0.0.1", port, bridge)
+    assert wait_for_server_ready("127.0.0.1", port)
+
+    restart_server("127.0.0.1", port, bridge)
+    assert wait_for_server_ready("127.0.0.1", port)
+
+    with ws_connect(f"ws://127.0.0.1:{port}/ws") as ws:
+        assert_first_msg_connect(bridge.queue)
+        ws.recv(timeout=2)  # consume config
+        result = send_to_phone({"type": "notice", "text": "post-restart"})
+        assert result is True
+        msg = ws.recv(timeout=2)
+        data = json.loads(msg)
+        assert data["text"] == "post-restart"
 
     stop_server()
     time.sleep(0.3)
