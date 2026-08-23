@@ -3,14 +3,10 @@
 提供配对码生成/验证和客户端令牌管理，用于 Cloudflare 隧道模式下的设备授权。
 """
 
-import json
 import random
 import string
 import time
-from pathlib import Path
 from typing import Optional
-
-from phonemic.utils.paths import get_config_dir
 
 _PAIRING_CODE_TTL = 60  # 秒
 _TOKEN_LENGTH = 32
@@ -57,57 +53,19 @@ class PairingCodeManager:
 class TokenManager:
     """
     客户端令牌管理器。
-    管理已授权设备的令牌白名单，持久化到 JSON 文件。
+    内存中只保存一个令牌，新配对码生成新令牌后旧令牌立即失效。
+    不持久化，程序重启后需重新配对。
     """
 
-    def __init__(self, storage_path: Optional[Path] = None):
-        if storage_path is None:
-            storage_path = get_config_dir() / "tunnel_tokens.json"
-        self._path = storage_path
-        self._tokens: dict[str, dict] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if self._path.exists():
-            try:
-                with open(self._path, "r", encoding="utf-8") as f:
-                    self._tokens = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                self._tokens = {}
-
-    def _save(self) -> None:
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(self._tokens, f, indent=2, ensure_ascii=False)
+    def __init__(self):
+        self._token: Optional[str] = None
 
     def generate_token(self) -> str:
-        """生成 32 字符随机令牌（小写字母+数字）。"""
+        """生成新令牌并替换旧令牌，旧令牌立即失效。"""
         chars = string.ascii_lowercase + string.digits
-        return ''.join(random.choices(chars, k=_TOKEN_LENGTH))
-
-    def add(self, token: str, name: str = "") -> None:
-        """添加令牌到白名单。"""
-        self._tokens[token] = {
-            "name": name,
-            "created_at": time.time(),
-        }
-        self._save()
+        self._token = ''.join(random.choices(chars, k=_TOKEN_LENGTH))
+        return self._token
 
     def validate(self, token: str) -> bool:
-        """验证令牌是否在白名单中。"""
-        return token in self._tokens
-
-    def revoke(self, token: str) -> bool:
-        """吊销令牌，返回是否成功。"""
-        if token in self._tokens:
-            del self._tokens[token]
-            self._save()
-            return True
-        return False
-
-    def list_all(self) -> dict:
-        """返回所有令牌的副本。"""
-        return self._tokens.copy()
-
-    def count(self) -> int:
-        """返回已授权令牌数量。"""
-        return len(self._tokens)
+        """验证令牌是否匹配当前令牌。"""
+        return self._token is not None and token == self._token
