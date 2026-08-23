@@ -78,7 +78,9 @@ PhoneMic 默认在局域网内工作。如果你需要通过互联网远程连�
 
 1. 下载并安装 `cloudflared`：
    - 前往 [cloudflared Releases](https://github.com/cloudflare/cloudflared/releases) 下载对应平台的版本。
-   - Windows 用户下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统 PATH 目录下（如 `C:\Windows\`），或放到 PhoneMic 程序同级目录。
+   - Windows 用户有两种选择：
+     - **安装版（推荐）：** 下载 `.msi` 安装包，双击安装，自动配置 PATH。
+     - **免安装版：** 下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统 PATH 目录下（如 `C:\Windows\`），或放到 PhoneMic 程序同级目录。
    - 安装后在命令行执行 `cloudflared --version` 确认可用。
 
 2. 无需 Cloudflare 账号。PhoneMic 使用的是 Cloudflare 免费快速隧道（`trycloudflare.com`），每次启动会分配一个随机域名。

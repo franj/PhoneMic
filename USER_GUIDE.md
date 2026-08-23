@@ -57,9 +57,10 @@ PhoneMic 运行时，电脑任务栏右下角会显示一个小图标。
 ### 安装 cloudflared
 
 1. 打开 [cloudflared Releases](https://github.com/cloudflare/cloudflared/releases) 页面。
-2. Windows 用户下载 `cloudflared-windows-amd64.exe`。
-3. 把文件重命名为 `cloudflared.exe`，放到系统目录（如 `C:\Windows\`）或 PhoneMic 程序所在的文件夹。
-4. 打开命令提示符，输入 `cloudflared --version`，能看到版本号就说明安装成功。
+2. Windows 用户有两种选择：
+   - **安装版（推荐）：** 下载 `.msi` 安装包，双击安装，自动配置 PATH。
+   - **免安装版：** 下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统目录（如 `C:\Windows\`）或 PhoneMic 程序所在的文件夹。
+3. 打开命令提示符，输入 `cloudflared --version`，能看到版本号就说明安装成功。
 
 > 不需要注册 Cloudflare 账号。PhoneMic 用的是免费快速隧道，每次启动自动分配一个临时域名。
 
