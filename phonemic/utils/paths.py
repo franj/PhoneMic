@@ -65,6 +65,12 @@ def get_exec_workdir() -> Path:
     workdir.mkdir(parents=True, exist_ok=True)
     return workdir
 
+def get_bin_dir() -> Path:
+    """返回外部二进制文件目录（如 cloudflared.exe）"""
+    bin_dir = _get_local_app_data() / 'PhoneMic' / 'bin'
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    return bin_dir
+
 def get_build_info():
     """
     读取构建信息，返回 (version, commit, date) 元组。

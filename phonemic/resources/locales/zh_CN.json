@@ -13,7 +13,27 @@
     "menu_exit": "退出",
     "menu_help": "帮助",
     "menu_help_guide": "使用帮助",
-    "menu_about": "关于 PhoneMic"
+    "menu_about": "关于 PhoneMic",
+    "btn_lan": "局域网",
+    "btn_cloudflare": "Cloudflare",
+    "btn_generate_pairing": "生成配对码",
+    "pairing_hint": "点击生成配对码",
+    "pairing_code": "配对码: {code}",
+    "pairing_expired": "配对码已过期，请重新生成",
+    "cf_connecting": "Cloudflare 隧道连接中...",
+    "switching": "切换中...",
+    "cf_info": "通过 Cloudflare 隧道提供 HTTPS 安全连接，支持互联网访问"
+  },
+  "tunnel": {
+    "error_title": "隧道错误",
+    "pairing_success_title": "配对成功",
+    "pairing_success_msg": "新设备已授权连接",
+    "auth_timeout": "认证超时",
+    "auth_failed": "认证失败",
+    "auth_expected": "等待认证消息",
+    "start_failed": "cloudflared 启动失败，已回退到局域网模式",
+    "crashed": "cloudflared 进程意外退出",
+    "binary_not_found": "未找到 cloudflared，已回退到局域网模式"
   },
   "help": {
     "warning": "帮助文件不存在",
@@ -97,7 +117,11 @@
     "log_ws_disconnected": "[WS] 断开",
     "log_ws_unknown_type": "[WS] 未处理的消息类型:",
     "log_ws_parse_error": "[WS] 解析消息失败",
-    "log_config_updated": "[Config] 更新 maxHistory = "
+    "log_config_updated": "[Config] 更新 maxHistory = ",
+    "auth_title": "设备配对",
+    "auth_pairing_hint": "请在电脑端查看配对码并输入",
+    "auth_submit": "确认配对",
+    "auth_failed": "认证失败"
   },
   "commands": {
     "title": "命令管理",
