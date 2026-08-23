@@ -87,6 +87,8 @@ def mobile_page(page):
     page.wait_for_function(
         "() => window.__mockWS && window.__mockWS.current && window.__mockWS.current.readyState === 1"
     )
+    # Simulate server sending config message (LAN mode: auto-connect on first message)
+    page.evaluate("() => window.__mockWS.triggerMessage({type: 'config', mobile_max_records: 5})")
     yield page
 
 

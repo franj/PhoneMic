@@ -48,6 +48,16 @@
     许可证：Apache 2.0
     主页：https://nuitka.net
 
+12. cloudflared (可选依赖，用户可自行安装)
+    许可证：Apache 2.0
+    主页：https://github.com/cloudflare/cloudflared
+    下载：https://github.com/cloudflare/cloudflared/releases
+    说明：PhoneMic 在 Cloudflare 隧道模式下通过子进程调用 cloudflared
+    建立 HTTPS 隧道，实现互联网远程访问。该组件由 Cloudflare 提供，
+    PhoneMic 不修改其源码或二进制，仅作为外部工具调用。用户需自行
+    下载安装，也可使用 PhoneMic 内嵌版本（如有）。cloudflared 及其
+    许可证文件请见 https://github.com/cloudflare/cloudflared/blob/master/LICENSE
+
 --------------------------------------------------------------------
 关于 LGPL 协议的补充说明：
 

@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import urllib.request
 import urllib.error
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -21,6 +21,8 @@ from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server
+from phonemic.tunnel.manager import TunnelManager
+from phonemic.tunnel.mode import TunnelMode, set_mode
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
 from phonemic.utils.paths import get_res_path
 from phonemic.utils.i18n import I18n
@@ -206,6 +208,34 @@ def main():
 
     dashboard.set_restart_network_callback(restart_network)
 
+    # 6. 隧道管理（Cloudflare / LAN 模式切换）
+    tunnel_mgr = TunnelManager(actual_port, bridge)
+
+    def _on_tunnel_url(url: str):
+        bridge.emit("tunnel_url", url)
+
+    def _on_tunnel_error(err: str):
+        bridge.emit("tunnel_error", err)
+
+    def _on_mode_changed(mode: TunnelMode):
+        bridge.emit("tunnel_mode_changed", mode.value)
+
+    tunnel_mgr.set_callbacks(
+        on_url=_on_tunnel_url,
+        on_error=_on_tunnel_error,
+        on_mode_changed=_on_mode_changed,
+    )
+    dashboard.set_mode_switch_callback(lambda mode: tunnel_mgr.switch_mode(mode))
+    dashboard.set_generate_pairing_callback(lambda: tunnel_mgr.pairing.generate())
+
+    # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
+    if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
+        dashboard._switching = True
+        dashboard.act_lan.setEnabled(False)
+        dashboard.act_cf.setEnabled(False)
+        dashboard.ip_label.setText(i18n.tr("dashboard.cf_connecting"))
+        QTimer.singleShot(500, lambda: tunnel_mgr.switch_mode(TunnelMode.CLOUDFLARE))
+
     # 6. 事件处理
     command_interceptor = CommandInterceptor()
 
@@ -222,6 +252,21 @@ def main():
         elif event_type == "disconnect":
             dashboard.update_connection_status(False)
             tray.update_connection_status(False)
+        elif event_type == "tunnel_url":
+            dashboard.update_tunnel_url(payload)
+            dashboard.on_switch_completed()
+        elif event_type == "tunnel_error":
+            QMessageBox.warning(dashboard, i18n.tr("tunnel.error_title"), str(payload))
+            dashboard.on_switch_completed()
+        elif event_type == "tunnel_mode_changed":
+            mode = TunnelMode(payload)
+            dashboard._mode = mode
+            set_mode(mode)
+            dashboard._apply_mode_ui()
+            if mode == TunnelMode.LAN:
+                dashboard.on_switch_completed()
+        elif event_type == "pairing_success":
+            tray.show_message(i18n.tr("tunnel.pairing_success_title"), i18n.tr("tunnel.pairing_success_msg"), timeout=3000)
         else:
             logger.warning(f"Unknown event: {event_type}")
 
@@ -232,9 +277,10 @@ def main():
     else:
         bridge.event_signal.connect(on_backend_event)
 
-    # 7. 退出清理
+    # 8. 退出清理
     def on_quit():
         logger.info("Shutting down...")
+        tunnel_mgr.stop()
         stop_server()
 
     app.aboutToQuit.connect(on_quit)

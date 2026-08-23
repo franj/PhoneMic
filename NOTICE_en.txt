@@ -47,6 +47,18 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
     License: Apache 2.0
     Homepage: https://nuitka.net
 
+12. cloudflared (optional dependency, users may install separately)
+    License: Apache 2.0
+    Homepage: https://github.com/cloudflare/cloudflared
+    Download: https://github.com/cloudflare/cloudflared/releases
+    Note: PhoneMic invokes cloudflared as an external subprocess in Cloudflare
+    tunnel mode to establish an HTTPS tunnel for internet remote access. This
+    component is provided by Cloudflare. PhoneMic does not modify its source
+    code or binaries; it is used solely as an external tool. Users need to
+    install it themselves or use a bundled version (if available). The
+    cloudflared license is at
+    https://github.com/cloudflare/cloudflared/blob/master/LICENSE
+
 --------------------------------------------------------------------
 Additional Note on the LGPL License:
 
