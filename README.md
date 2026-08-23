@@ -70,6 +70,33 @@ uv sync
 uvw run app
 ```
 
+## 🌐 互联网访问（Cloudflare 隧道模式）
+
+PhoneMic 默认在局域网内工作。如果你需要通过互联网远程连接（比如外出时用手机连家里的电脑），可以切换到 **Cloudflare 隧道模式**，它会自动建立 HTTPS 加密隧道，无需公网 IP 和端口映射。
+
+### 前置条件
+
+1. 下载并安装 `cloudflared`：
+   - 前往 [cloudflared Releases](https://github.com/cloudflare/cloudflared/releases) 下载对应平台的版本。
+   - Windows 用户下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统 PATH 目录下（如 `C:\Windows\`），或放到 PhoneMic 程序同级目录。
+   - 安装后在命令行执行 `cloudflared --version` 确认可用。
+
+2. 无需 Cloudflare 账号。PhoneMic 使用的是 Cloudflare 免费快速隧道（`trycloudflare.com`），每次启动会分配一个随机域名。
+
+### 使用步骤
+
+1. 在 PhoneMic 主界面点击 **「Cloudflare」** 按钮切换模式。
+2. 程序会自动启动隧道，成功后界面显示二维码和配对码。
+3. 用手机扫码打开页面，输入 4 位配对码完成认证。
+4. 认证通过后即可正常使用，后续重连无需再次输入配对码（程序重启后需重新配对）。
+
+### 说明
+
+- **安全性：** 隧道提供 HTTPS 加密；配对码 60 秒有效，仅最后一个配对的设备可连接。
+- **域名变化：** 每次启动隧道域名会变，程序会自动更新二维码，重新扫码即可。
+- **回退机制：** 如果 `cloudflared` 未安装或启动失败，程序会自动回退到局域网模式。
+- **中国大陆用户：** Cloudflare 隧道在国内可能有连接不稳定的情况，如遇问题请使用局域网模式。
+
 ## 🛠 语音命令（扩展功能）
 
 PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特定文字映射为模拟按键、输入文本或运行外部程序。
