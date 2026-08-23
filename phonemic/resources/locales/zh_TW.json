@@ -13,27 +13,7 @@
     "menu_exit": "結束",
     "menu_help": "說明",
     "menu_help_guide": "使用說明",
-    "menu_about": "關於 PhoneMic",
-    "btn_lan": "區域網路",
-    "btn_cloudflare": "Cloudflare",
-    "btn_generate_pairing": "產生配對碼",
-    "pairing_hint": "點擊產生配對碼",
-    "pairing_code": "配對碼: {code}",
-    "pairing_expired": "配對碼已過期，請重新產生",
-    "cf_connecting": "Cloudflare 隧道連線中...",
-    "switching": "切換中...",
-    "cf_info": "透過 Cloudflare 隧道提供 HTTPS 安全連線，支援網際網路存取"
-  },
-  "tunnel": {
-    "error_title": "隧道錯誤",
-    "pairing_success_title": "配對成功",
-    "pairing_success_msg": "新裝置已授權連線",
-    "auth_timeout": "認證逾時",
-    "auth_failed": "認證失敗",
-    "auth_expected": "等待認證訊息",
-    "start_failed": "cloudflared 啟動失敗，已回退到區域網路模式",
-    "crashed": "cloudflared 行程意外結束",
-    "binary_not_found": "找不到 cloudflared，已回退到區域網路模式"
+    "menu_about": "關於 PhoneMic"
   },
   "help": {
     "warning": "找不到說明檔",
@@ -117,11 +97,7 @@
     "log_ws_disconnected": "[WS] 中斷連線",
     "log_ws_unknown_type": "[WS] 未處理的訊息類型:",
     "log_ws_parse_error": "[WS] 解析訊息失敗",
-    "log_config_updated": "[Config] 更新 maxHistory = ",
-    "auth_title": "裝置配對",
-    "auth_pairing_hint": "請在電腦端查看配對碼並輸入",
-    "auth_submit": "確認配對",
-    "auth_failed": "認證失敗"
+    "log_config_updated": "[Config] 更新 maxHistory = "
   },
   "commands": {
     "title": "命令管理",

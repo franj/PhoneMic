@@ -13,27 +13,7 @@
     "menu_switch_network": "Switch Network",
     "menu_help": "Help",
     "menu_help_guide": "User Guide",
-    "menu_about": "About PhoneMic",
-    "btn_lan": "LAN",
-    "btn_cloudflare": "Cloudflare",
-    "btn_generate_pairing": "Generate Pairing Code",
-    "pairing_hint": "Click to generate pairing code",
-    "pairing_code": "Pairing code: {code}",
-    "pairing_expired": "Pairing code expired, please regenerate",
-    "cf_connecting": "Cloudflare tunnel connecting...",
-    "switching": "Switching...",
-    "cf_info": "Secure HTTPS connection via Cloudflare tunnel, accessible over internet"
-  },
-  "tunnel": {
-    "error_title": "Tunnel Error",
-    "pairing_success_title": "Pairing Successful",
-    "pairing_success_msg": "New device authorized",
-    "auth_timeout": "Authentication timeout",
-    "auth_failed": "Authentication failed",
-    "auth_expected": "Expected auth message",
-    "start_failed": "cloudflared failed to start, fell back to LAN mode",
-    "crashed": "cloudflared process exited unexpectedly",
-    "binary_not_found": "cloudflared not found, fell back to LAN mode"
+    "menu_about": "About PhoneMic"
   },
   "help": {
     "warning": "Help File Missing",
@@ -116,11 +96,7 @@
     "log_ws_disconnected": "[WS] Disconnected",
     "log_ws_unknown_type": "[WS] Unknown message type:",
     "log_ws_parse_error": "[WS] Failed to parse message",
-    "log_config_updated": "[Config] Updated maxHistory = ",
-    "auth_title": "Device Pairing",
-    "auth_pairing_hint": "Check the pairing code on your computer and enter it",
-    "auth_submit": "Confirm Pairing",
-    "auth_failed": "Authentication failed"
+    "log_config_updated": "[Config] Updated maxHistory = "
   },
   "commands": {
     "title": "Command Manager",
