@@ -90,11 +90,26 @@ class ConnectionManager:
 # 全局通信管理（用于与主进程通信）
 _manager: Optional[ConnectionManager] = None
 
+# 隧道认证状态（Cloudflare 模式下启用）
+_tunnel_auth_enabled = False
+_pairing_manager = None
+_token_manager = None
+
+
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
     global _manager
     _manager = ConnectionManager(bridge)
     logger.info("Message bridge set for backend service")
+
+
+def set_tunnel_auth(enabled: bool, pairing=None, tokens=None) -> None:
+    """设置隧道认证状态。Cloudflare 模式下需要配对码或令牌认证。"""
+    global _tunnel_auth_enabled, _pairing_manager, _token_manager
+    _tunnel_auth_enabled = enabled
+    _pairing_manager = pairing
+    _token_manager = tokens
+    logger.info(f"Tunnel auth {'enabled' if enabled else 'disabled'}")
 
 
 # ---------- 公共 API：向手机端推送消息 ----------
@@ -140,6 +155,68 @@ def push_config(key: str, value) -> bool:
         True 如果消息已调度发送
     """
     return send_to_phone({"type": "config", key: value})
+
+
+async def _handle_auth(ws: web.WebSocketResponse) -> bool:
+    """
+    处理 WebSocket 认证流程。
+    Cloudflare 模式下，客户端需发送配对码或令牌才能建立连接。
+
+    流程：
+    1. 服务端发送 auth_required
+    2. 客户端回复 auth（method=token 或 pairing_code）
+    3. 服务端验证，回复 auth_success 或 auth_failed
+    """
+    await ws.send_str(json.dumps({"type": "auth_required"}))
+
+    try:
+        msg = await asyncio.wait_for(ws.receive(), timeout=30.0)
+    except asyncio.TimeoutError:
+        await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_timeout")}))
+        await ws.close()
+        return False
+    except Exception as e:
+        logger.warning(f"Auth receive error: {e}")
+        await ws.close()
+        return False
+
+    if msg.type != WSMsgType.TEXT:
+        await ws.close()
+        return False
+
+    try:
+        data = json.loads(msg.data)
+    except json.JSONDecodeError:
+        await ws.close()
+        return False
+
+    if data.get("type") != "auth":
+        await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_expected")}))
+        await ws.close()
+        return False
+
+    method = data.get("method")
+
+    if method == "token" and _token_manager:
+        token = data.get("token", "")
+        if _token_manager.validate(token):
+            logger.info("Token auth succeeded")
+            await ws.send_str(json.dumps({"type": "auth_success"}))
+            return True
+
+    elif method == "pairing_code" and _pairing_manager and _token_manager:
+        code = data.get("code", "")
+        if _pairing_manager.validate(code):
+            token = _token_manager.generate_token()
+            logger.info("Pairing code auth succeeded, token issued")
+            await ws.send_str(json.dumps({"type": "auth_success", "token": token}))
+            if _manager:
+                _manager.bridge.emit("pairing_success")
+            return True
+
+    await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_failed")}))
+    await ws.close()
+    return False
 
 
 def _create_app() -> web.Application:
@@ -201,6 +278,11 @@ def _create_app() -> web.Application:
             logger.error("Message bridge not initialized. Call set_bridge() before starting server.")
             await ws.close(code=1011, message=b"Server not ready")
             return ws
+
+        # Cloudflare 模式下需要认证
+        if _tunnel_auth_enabled:
+            if not await _handle_auth(ws):
+                return ws
 
         await _manager.connect(ws)
 
