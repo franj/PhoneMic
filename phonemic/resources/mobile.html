@@ -195,6 +195,70 @@
             -webkit-user-select: text;
             user-select: text;
         }
+        /* ========== 认证弹窗 ========== */
+        #auth-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        #auth-overlay.show { display: flex; }
+        .auth-box {
+            background: white;
+            border-radius: 16px;
+            padding: 28px 24px;
+            text-align: center;
+            max-width: 300px;
+            width: 80%;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+        }
+        .auth-box h3 {
+            margin: 0 0 8px 0;
+            font-size: 18px;
+            color: #333;
+        }
+        .auth-box p {
+            margin: 0 0 16px 0;
+            font-size: 13px;
+            color: #999;
+        }
+        .auth-box input {
+            width: 140px;
+            height: 48px;
+            font-size: 28px;
+            text-align: center;
+            border: 2px solid #07c160;
+            border-radius: 10px;
+            margin-bottom: 16px;
+            letter-spacing: 12px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        .auth-box input:focus {
+            border-color: #06ad56;
+            box-shadow: 0 0 0 3px rgba(7,193,96,0.15);
+        }
+        .auth-box button {
+            width: 100%;
+            height: 44px;
+            background: #07c160;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .auth-box button:active { background: #06ad56; }
+        #auth-error {
+            display: none;
+            color: #cc0000;
+            font-size: 13px;
+            margin-top: 12px;
+        }
     </style>
 </head>
 <body>
@@ -211,6 +275,18 @@
             <button id="mode-toggle">⚡</button>
         </div>
         <button id="btn-send"></button>
+    </div>
+</div>
+
+<!-- 认证弹窗（Cloudflare 隧道模式） -->
+<div id="auth-overlay">
+    <div class="auth-box">
+        <h3 data-i18n="auth_title">设备配对</h3>
+        <p data-i18n="auth_pairing_hint">请在电脑端查看配对码并输入</p>
+        <input type="text" id="pairing-code-input" maxlength="4" inputmode="numeric" placeholder="0000" autocomplete="off" enterkeyhint="done">
+        <br>
+        <button id="pairing-submit" data-i18n="auth_submit">确认配对</button>
+        <div id="auth-error"></div>
     </div>
 </div>
 
@@ -232,7 +308,11 @@ __I18N_JSON__
         "log_ws_disconnected": "[WS] 断开",
         "log_ws_unknown_type": "[WS] 未处理的消息类型:",
         "log_ws_parse_error": "[WS] 解析消息失败",
-        "log_config_updated": "[Config] 更新 maxHistory = "
+        "log_config_updated": "[Config] 更新 maxHistory = ",
+        "auth_title": "设备配对",
+        "auth_pairing_hint": "请在电脑端查看配对码并输入",
+        "auth_submit": "确认配对",
+        "auth_failed": "认证失败"
     };
 
     var i18nData = {};
@@ -642,6 +722,8 @@ __I18N_JSON__
             this.reconnectInterval = 2000;
             this.reconnectTimer = null;
             this.messageHandlers = new Map();
+            this._token = null;
+            try { this._token = localStorage.getItem('phonemic_token') || null; } catch(e) { this._token = null; }
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
         connect() {
@@ -650,16 +732,41 @@ __I18N_JSON__
                 this.ws = new WebSocket(this.url);
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
-                    this.isConnected = true;
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    this._notifyStatusChange(true);
+                    // 有令牌则立即发送，否则等待 auth_required
+                    if (this._token) {
+                        this.ws.send(JSON.stringify({type: 'auth', method: 'token', token: this._token}));
+                    }
                 };
                 this.ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        const handler = this.messageHandlers.get(data.type);
-                        if (handler) handler(data);
-                        else console.warn(window.i18n.log_ws_unknown_type, data.type);
+                        if (data.type === 'auth_required') {
+                            if (!this._token) {
+                                this._showPairingUI();
+                            }
+                        } else if (data.type === 'auth_success') {
+                            if (data.token) {
+                                this._token = data.token;
+                                try { localStorage.setItem('phonemic_token', data.token); } catch(e) {}
+                            }
+                            this.isConnected = true;
+                            this._hidePairingUI();
+                            this._notifyStatusChange(true);
+                        } else if (data.type === 'auth_failed') {
+                            this._showAuthError(data.message || window.i18n.auth_failed);
+                            this._token = null;
+                            try { localStorage.removeItem('phonemic_token'); } catch(e) {}
+                        } else {
+                            // 非认证消息：LAN 模式下自动建立连接
+                            if (!this.isConnected) {
+                                this.isConnected = true;
+                                this._notifyStatusChange(true);
+                            }
+                            const handler = this.messageHandlers.get(data.type);
+                            if (handler) handler(data);
+                            else console.warn(window.i18n.log_ws_unknown_type, data.type);
+                        }
                     } catch (err) { console.error(window.i18n.log_ws_parse_error, err); }
                 };
                 this.ws.onclose = () => {
@@ -680,6 +787,32 @@ __I18N_JSON__
         }
         _notifyStatusChange(connected) {
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected } }));
+        }
+        _showPairingUI() {
+            const el = document.getElementById('auth-overlay');
+            if (el) el.classList.add('show');
+            const input = document.getElementById('pairing-code-input');
+            if (input) {
+                setTimeout(() => { input.focus(); input.click(); }, 200);
+            }
+        }
+        _hidePairingUI() {
+            const el = document.getElementById('auth-overlay');
+            if (el) el.classList.remove('show');
+            const err = document.getElementById('auth-error');
+            if (err) err.style.display = 'none';
+        }
+        _showAuthError(msg) {
+            const err = document.getElementById('auth-error');
+            if (err) {
+                err.textContent = msg;
+                err.style.display = 'block';
+            }
+        }
+        sendPairingCode(code) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({type: 'auth', method: 'pairing_code', code: code}));
+            }
         }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
@@ -954,7 +1087,26 @@ __I18N_JSON__
             }
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
-        
+
+        // 配对码输入处理
+        const pairingInput = document.getElementById('pairing-code-input');
+        const pairingBtn = document.getElementById('pairing-submit');
+        const submitPairing = () => {
+            const code = pairingInput.value.trim();
+            if (code.length === 4) {
+                const err = document.getElementById('auth-error');
+                if (err) err.style.display = 'none';
+                wsClient.sendPairingCode(code);
+            }
+        };
+        pairingBtn.addEventListener('click', submitPairing);
+        pairingInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); submitPairing(); }
+        });
+        pairingInput.addEventListener('input', () => {
+            pairingInput.value = pairingInput.value.replace(/[^0-9]/g, '');
+        });
+
         wsClient.connect();
         uiController.onConnectionChange(false);
         chatManager.scrollToBottom();
