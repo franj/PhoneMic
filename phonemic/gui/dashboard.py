@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Optional
 import os
 import subprocess
 import sys
@@ -7,14 +7,15 @@ import qrcode
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QAction, QPainter, QColor
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QLabel,
-    QFrame, QMenuBar, QMessageBox, QApplication,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QFrame, QMenuBar, QMessageBox, QApplication,
     QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
 from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, get_bind_address
 from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
@@ -56,14 +57,22 @@ class Dashboard(QMainWindow):
         self.sm = SettingsManager.instance()
         self.tray = tray  # 保存托盘对象引用
         self.setWindowTitle(self.i18n.tr("dashboard.title"))
-        self.setFixedSize(400, 480)
+        self.setFixedSize(400, 520)
         self.setWindowFlags(self.windowFlags() & (~Qt.WindowMaximizeButtonHint) | Qt.WindowCloseButtonHint)
+        self._mode: TunnelMode = get_mode()
+        self._tunnel_url: Optional[str] = None
+        self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._setup_ui(ip, port)
         self._setup_menu()
+        self._apply_mode_ui()
 
     def set_restart_network_callback(self, callback):
         """设置切换网络的回调函数"""
         self._restart_network_callback = callback
+
+    def set_mode_switch_callback(self, callback: Callable[[TunnelMode], None]):
+        """设置模式切换回调函数"""
+        self._mode_switch_callback = callback
 
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
@@ -93,6 +102,21 @@ class Dashboard(QMainWindow):
         ip_label.setWordWrap(True)
         layout.addWidget(ip_label)
 
+        # ----- 模式切换按钮 -----
+        toggle_layout = QHBoxLayout()
+
+        self.btn_lan = QPushButton("局域网")
+        self.btn_lan.setCheckable(False)
+        self.btn_lan.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.LAN))
+        toggle_layout.addWidget(self.btn_lan)
+
+        self.btn_cf = QPushButton("Cloudflare")
+        self.btn_cf.setCheckable(False)
+        self.btn_cf.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.CLOUDFLARE))
+        toggle_layout.addWidget(self.btn_cf)
+
+        layout.addLayout(toggle_layout)
+
         info_label = QLabel(self.i18n.tr("dashboard.info"))
         info_label.setAlignment(Qt.AlignCenter)
         info_label.setWordWrap(True)
@@ -112,6 +136,46 @@ class Dashboard(QMainWindow):
 
         self.qr_label = qr_label
         self.ip_label = ip_label
+        self.info_label = info_label
+
+    def _apply_mode_ui(self) -> None:
+        """根据当前模式更新按钮样式和元素显隐。"""
+        active_style = "background-color: #07c160; color: white; font-weight: bold;"
+        inactive_style = "color: #333;"
+
+        if self._mode == TunnelMode.LAN:
+            self.btn_lan.setStyleSheet(active_style)
+            self.btn_cf.setStyleSheet(inactive_style)
+            self.info_label.setVisible(True)
+        else:
+            self.btn_cf.setStyleSheet(active_style)
+            self.btn_lan.setStyleSheet(inactive_style)
+            self.info_label.setVisible(False)
+
+    def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
+        """点击模式切换按钮。"""
+        if target_mode == self._mode:
+            return
+        self._mode = target_mode
+        set_mode(target_mode)
+        self._apply_mode_ui()
+        if self._mode_switch_callback:
+            self._mode_switch_callback(target_mode)
+
+    def update_tunnel_url(self, url: Optional[str]) -> None:
+        """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
+        self._tunnel_url = url
+        if self._mode == TunnelMode.CLOUDFLARE:
+            if url:
+                pixmap = make_qr_pixmap(url)
+                self.qr_label.setPixmap(pixmap)
+                self.ip_label.setText(url)
+            else:
+                self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
+
+    def get_mode(self) -> TunnelMode:
+        """返回当前模式。"""
+        return self._mode
 
     def _setup_menu(self):
         menubar = self.menuBar()
