@@ -5,7 +5,7 @@ import sys
 
 import qrcode
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap, QAction, QPainter, QColor
+from PySide6.QtGui import QPixmap, QAction, QActionGroup, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QMenuBar, QMessageBox, QApplication,
@@ -136,21 +136,6 @@ class Dashboard(QMainWindow):
         ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(ip_label)
 
-        # ----- 模式切换按钮 -----
-        toggle_layout = QHBoxLayout()
-
-        self.btn_lan = QPushButton(self.i18n.tr("dashboard.btn_lan"))
-        self.btn_lan.setCheckable(False)
-        self.btn_lan.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.LAN))
-        toggle_layout.addWidget(self.btn_lan)
-
-        self.btn_cf = QPushButton(self.i18n.tr("dashboard.btn_cloudflare"))
-        self.btn_cf.setCheckable(False)
-        self.btn_cf.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.CLOUDFLARE))
-        toggle_layout.addWidget(self.btn_cf)
-
-        layout.addLayout(toggle_layout)
-
         # ----- 配对码区域（仅 Cloudflare 模式可见）-----
         self.pairing_widget = QWidget()
         pairing_layout = QHBoxLayout(self.pairing_widget)
@@ -172,7 +157,7 @@ class Dashboard(QMainWindow):
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
         self.cf_info_label.setAlignment(Qt.AlignCenter)
         self.cf_info_label.setWordWrap(True)
-        self.cf_info_label.setStyleSheet("color: #888; font-size: 10px;")
+        self.cf_info_label.setStyleSheet("color: blue; font-size: 10px;")
         self.cf_info_label.setVisible(False)
         layout.addWidget(self.cf_info_label)
 
@@ -198,47 +183,44 @@ class Dashboard(QMainWindow):
         self.info_label = info_label
 
     def _apply_mode_ui(self) -> None:
-        """根据当前模式更新按钮样式和元素显隐。"""
+        """根据当前模式更新菜单勾选状态和元素显隐。"""
         if self._switching:
-            gray_style = "background-color: #e0e0e0; color: #aaa; font-weight: bold;"
-            self.btn_lan.setStyleSheet(gray_style)
-            self.btn_cf.setStyleSheet(gray_style)
             blank = QPixmap(250, 250)
             blank.fill(Qt.white)
             self.qr_label.setPixmap(blank)
             return
 
-        active_style = "background-color: #07c160; color: white; font-weight: bold;"
-        inactive_style = "color: #333;"
-
         if self._mode == TunnelMode.LAN:
-            self.btn_lan.setStyleSheet(active_style)
-            self.btn_cf.setStyleSheet(inactive_style)
             self.info_label.setVisible(True)
             self.pairing_widget.setVisible(False)
             self.cf_info_label.setVisible(False)
-            # 恢复局域网二维码和地址
+            self.switch_network_action.setEnabled(True)
             qr_url = f"http://{self._lan_ip}:{self._lan_port}"
             self.qr_label.setPixmap(make_qr_pixmap(qr_url))
             self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
         else:
-            self.btn_cf.setStyleSheet(active_style)
-            self.btn_lan.setStyleSheet(inactive_style)
             self.info_label.setVisible(False)
             self.pairing_widget.setVisible(True)
             self.cf_info_label.setVisible(True)
+            self.switch_network_action.setEnabled(False)
             if not self._tunnel_url:
                 self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
 
+    def _sync_menu_checks(self) -> None:
+        """根据当前模式同步菜单勾选状态。"""
+        self.act_lan.setChecked(self._mode == TunnelMode.LAN)
+        self.act_cf.setChecked(self._mode == TunnelMode.CLOUDFLARE)
+
     def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
-        """点击模式切换按钮。"""
+        """点击模式切换菜单项。"""
         if target_mode == self._mode:
             return
         if self._switching:
+            self._sync_menu_checks()
             return
         self._switching = True
-        self.btn_lan.setEnabled(False)
-        self.btn_cf.setEnabled(False)
+        self.act_lan.setEnabled(False)
+        self.act_cf.setEnabled(False)
         self.ip_label.setText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
@@ -247,10 +229,11 @@ class Dashboard(QMainWindow):
             self._mode_switch_callback(target_mode)
 
     def on_switch_completed(self) -> None:
-        """模式切换完成（成功或失败），恢复按钮可用状态。"""
+        """模式切换完成（成功或失败），恢复菜单可用状态。"""
         self._switching = False
-        self.btn_lan.setEnabled(True)
-        self.btn_cf.setEnabled(True)
+        self.act_lan.setEnabled(True)
+        self.act_cf.setEnabled(True)
+        self._sync_menu_checks()
         self._apply_mode_ui()
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
@@ -273,6 +256,7 @@ class Dashboard(QMainWindow):
         menubar.setNativeMenuBar(False)
 
         program_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_program"))
+        network_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_network"))
         help_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_help"))
 
         # 偏好设置
@@ -284,17 +268,38 @@ class Dashboard(QMainWindow):
         commands_action = QAction(self.i18n.tr("dashboard.menu_command"), self)
         commands_action.triggered.connect(self._open_commands_dialog)
         program_menu.addAction(commands_action)
-        # 切换网络地址
-
-        switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
-        switch_network_action.triggered.connect(self._on_switch_network)
-        program_menu.addAction(switch_network_action)
 
         # 分隔线 + 退出
         program_menu.addSeparator()
         exit_action = QAction(self.i18n.tr("dashboard.menu_exit"), self)
         exit_action.triggered.connect(self._quit_app)
         program_menu.addAction(exit_action)
+
+        # 网络菜单 - 模式切换
+        mode_group = QActionGroup(self)
+        mode_group.setExclusive(True)
+
+        self.act_lan = QAction(self.i18n.tr("dashboard.btn_lan"), self)
+        self.act_lan.setCheckable(True)
+        self.act_lan.setChecked(self._mode == TunnelMode.LAN)
+        self.act_lan.triggered.connect(lambda: self._on_mode_clicked(TunnelMode.LAN))
+        mode_group.addAction(self.act_lan)
+        network_menu.addAction(self.act_lan)
+
+        self.act_cf = QAction(self.i18n.tr("dashboard.btn_cloudflare"), self)
+        self.act_cf.setCheckable(True)
+        self.act_cf.setChecked(self._mode == TunnelMode.CLOUDFLARE)
+        self.act_cf.triggered.connect(lambda: self._on_mode_clicked(TunnelMode.CLOUDFLARE))
+        mode_group.addAction(self.act_cf)
+        network_menu.addAction(self.act_cf)
+
+        network_menu.addSeparator()
+
+        # 切换网络地址（仅局域网模式可用）
+        self.switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
+        self.switch_network_action.triggered.connect(self._on_switch_network)
+        self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
+        network_menu.addAction(self.switch_network_action)
 
         # 帮助菜单
         help_action = QAction(self.i18n.tr("dashboard.menu_help_guide"), self)

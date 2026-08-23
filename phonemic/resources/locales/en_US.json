@@ -7,6 +7,7 @@
     "status_connected": "Connected",
     "status_disconnected": "Disconnected",
     "menu_program": "Program",
+    "menu_network": "Network",
     "menu_action": "Preferences",
     "menu_command": "Commands",
     "menu_exit": "Exit",

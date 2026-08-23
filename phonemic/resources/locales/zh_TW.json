@@ -7,6 +7,7 @@
     "status_connected": "已連線",
     "status_disconnected": "未連線",
     "menu_program": "程式",
+    "menu_network": "網路",
     "menu_action": "偏好設定",
     "menu_command": "命令設定",
     "menu_switch_network": "切換網路位址",

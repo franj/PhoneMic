@@ -231,8 +231,8 @@ def main():
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
         dashboard._switching = True
-        dashboard.btn_lan.setEnabled(False)
-        dashboard.btn_cf.setEnabled(False)
+        dashboard.act_lan.setEnabled(False)
+        dashboard.act_cf.setEnabled(False)
         dashboard.ip_label.setText(i18n.tr("dashboard.cf_connecting"))
         QTimer.singleShot(500, lambda: tunnel_mgr.switch_mode(TunnelMode.CLOUDFLARE))
 
