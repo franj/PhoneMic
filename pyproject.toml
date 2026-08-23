@@ -20,6 +20,8 @@ dependencies = [
     "aiohttp>=3.14,<4.0",
 ]
 
+[project.scripts]
+app = "phonemic.PhoneMic:main"
 
 [build-system]
 requires = ["hatchling"]
