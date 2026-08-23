@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 import qrcode
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QAction, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -61,7 +61,15 @@ class Dashboard(QMainWindow):
         self.setWindowFlags(self.windowFlags() & (~Qt.WindowMaximizeButtonHint) | Qt.WindowCloseButtonHint)
         self._mode: TunnelMode = get_mode()
         self._tunnel_url: Optional[str] = None
+        self._qr_url: Optional[str] = f"http://{ip}:{port}"
+        self._lan_ip = ip
+        self._lan_port = port
+        self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
+        self._generate_pairing_callback: Optional[Callable[[], str]] = None
+        self._pairing_timer = QTimer(self)
+        self._pairing_timer.setSingleShot(True)
+        self._pairing_timer.timeout.connect(self._on_pairing_expired)
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
@@ -74,6 +82,31 @@ class Dashboard(QMainWindow):
         """设置模式切换回调函数"""
         self._mode_switch_callback = callback
 
+    def set_generate_pairing_callback(self, callback: Callable[[], str]):
+        """设置生成配对码回调函数，返回配对码字符串。"""
+        self._generate_pairing_callback = callback
+
+    def _on_generate_pairing(self):
+        """生成配对码并显示。"""
+        if self._generate_pairing_callback:
+            code = self._generate_pairing_callback()
+            self.pairing_label.setText(self.i18n.tr("dashboard.pairing_code", code=code))
+            self.pairing_label.setStyleSheet(
+                "QPushButton { border: none; font-size: 18px; font-weight: bold; "
+                "color: #07c160; text-align: center; padding: 2px; }"
+                "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
+            )
+            self._pairing_timer.start(60000)
+
+    def _on_pairing_expired(self):
+        """配对码过期回调。"""
+        self.pairing_label.setText(self.i18n.tr("dashboard.pairing_hint"))
+        self.pairing_label.setStyleSheet(
+            "QPushButton { border: none; font-size: 16px; font-weight: bold; "
+            "color: #999; text-align: center; padding: 4px; }"
+            "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
+        )
+
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -82,7 +115,7 @@ class Dashboard(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        # ----- 二维码（修复倾斜问题）-----
+        # ----- 二维码 -----
         qr_label = QLabel()
         qr_label.setAlignment(Qt.AlignCenter)
 
@@ -105,17 +138,42 @@ class Dashboard(QMainWindow):
         # ----- 模式切换按钮 -----
         toggle_layout = QHBoxLayout()
 
-        self.btn_lan = QPushButton("局域网")
+        self.btn_lan = QPushButton(self.i18n.tr("dashboard.btn_lan"))
         self.btn_lan.setCheckable(False)
         self.btn_lan.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.LAN))
         toggle_layout.addWidget(self.btn_lan)
 
-        self.btn_cf = QPushButton("Cloudflare")
+        self.btn_cf = QPushButton(self.i18n.tr("dashboard.btn_cloudflare"))
         self.btn_cf.setCheckable(False)
         self.btn_cf.clicked.connect(lambda: self._on_mode_clicked(TunnelMode.CLOUDFLARE))
         toggle_layout.addWidget(self.btn_cf)
 
         layout.addLayout(toggle_layout)
+
+        # ----- 配对码区域（仅 Cloudflare 模式可见）-----
+        self.pairing_widget = QWidget()
+        pairing_layout = QHBoxLayout(self.pairing_widget)
+        pairing_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.pairing_label = QPushButton(self.i18n.tr("dashboard.pairing_hint"))
+        self.pairing_label.setStyleSheet(
+            "QPushButton { border: none; font-size: 14px; font-weight: bold; color: #07c160; "
+            "text-align: center; padding: 2px; }"
+            "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
+        )
+        self.pairing_label.setCursor(Qt.PointingHandCursor)
+        self.pairing_label.clicked.connect(self._on_generate_pairing)
+        pairing_layout.addWidget(self.pairing_label)
+
+        layout.addWidget(self.pairing_widget)
+
+        # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
+        self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
+        self.cf_info_label.setAlignment(Qt.AlignCenter)
+        self.cf_info_label.setWordWrap(True)
+        self.cf_info_label.setStyleSheet("color: #888; font-size: 10px;")
+        self.cf_info_label.setVisible(False)
+        layout.addWidget(self.cf_info_label)
 
         info_label = QLabel(self.i18n.tr("dashboard.info"))
         info_label.setAlignment(Qt.AlignCenter)
@@ -140,6 +198,15 @@ class Dashboard(QMainWindow):
 
     def _apply_mode_ui(self) -> None:
         """根据当前模式更新按钮样式和元素显隐。"""
+        if self._switching:
+            gray_style = "background-color: #e0e0e0; color: #aaa; font-weight: bold;"
+            self.btn_lan.setStyleSheet(gray_style)
+            self.btn_cf.setStyleSheet(gray_style)
+            blank = QPixmap(250, 250)
+            blank.fill(Qt.white)
+            self.qr_label.setPixmap(blank)
+            return
+
         active_style = "background-color: #07c160; color: white; font-weight: bold;"
         inactive_style = "color: #333;"
 
@@ -147,20 +214,43 @@ class Dashboard(QMainWindow):
             self.btn_lan.setStyleSheet(active_style)
             self.btn_cf.setStyleSheet(inactive_style)
             self.info_label.setVisible(True)
+            self.pairing_widget.setVisible(False)
+            self.cf_info_label.setVisible(False)
+            # 恢复局域网二维码和地址
+            qr_url = f"http://{self._lan_ip}:{self._lan_port}"
+            self.qr_label.setPixmap(make_qr_pixmap(qr_url))
+            self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
         else:
             self.btn_cf.setStyleSheet(active_style)
             self.btn_lan.setStyleSheet(inactive_style)
             self.info_label.setVisible(False)
+            self.pairing_widget.setVisible(True)
+            self.cf_info_label.setVisible(True)
+            if not self._tunnel_url:
+                self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
 
     def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
         """点击模式切换按钮。"""
         if target_mode == self._mode:
             return
+        if self._switching:
+            return
+        self._switching = True
+        self.btn_lan.setEnabled(False)
+        self.btn_cf.setEnabled(False)
+        self.ip_label.setText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
         self._apply_mode_ui()
         if self._mode_switch_callback:
             self._mode_switch_callback(target_mode)
+
+    def on_switch_completed(self) -> None:
+        """模式切换完成（成功或失败），恢复按钮可用状态。"""
+        self._switching = False
+        self.btn_lan.setEnabled(True)
+        self.btn_cf.setEnabled(True)
+        self._apply_mode_ui()
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
