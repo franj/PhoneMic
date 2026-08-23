@@ -4,6 +4,7 @@
 """
 
 import logging
+import threading
 from typing import Callable, Optional
 
 from phonemic.server.api import restart_server, stop_server, set_tunnel_auth
@@ -57,16 +58,25 @@ class TunnelManager:
     def switch_mode(self, mode: TunnelMode) -> bool:
         """
         切换到指定模式。
-        返回 True 表示成功，False 表示失败并已自动回退到 LAN。
+        在后台线程执行，避免阻塞 UI 线程。
+        返回 True 表示切换已启动，False 表示模式相同无需切换。
         """
         if mode == self._mode:
             return True
 
-        if mode == TunnelMode.CLOUDFLARE:
-            return self._switch_to_cloudflare()
-        else:
-            self._switch_to_lan()
-            return True
+        def _run():
+            try:
+                if mode == TunnelMode.CLOUDFLARE:
+                    self._switch_to_cloudflare()
+                else:
+                    self._switch_to_lan()
+            except Exception as e:
+                logger.exception(f"Mode switch error: {e}")
+                if self._on_error:
+                    self._on_error(str(e))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return True
 
     def _switch_to_cloudflare(self) -> bool:
         """切换到 Cloudflare 模式。"""

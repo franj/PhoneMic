@@ -70,58 +70,34 @@ class TestPairingCode:
 class TestTokenManager:
     """测试令牌管理器。"""
 
-    def test_generate_token_is_32_chars(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
+    def test_generate_token_is_32_chars(self):
+        mgr = TokenManager()
         token = mgr.generate_token()
         assert len(token) == 32
         assert token.isalnum()
 
-    def test_add_and_validate(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
+    def test_validate_generated_token(self):
+        mgr = TokenManager()
         token = mgr.generate_token()
-        mgr.add(token, "iPhone")
         assert mgr.validate(token) is True
 
-    def test_validate_unknown_token(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
+    def test_validate_unknown_token(self):
+        mgr = TokenManager()
         assert mgr.validate("unknown_token") is False
 
-    def test_revoke(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
-        token = mgr.generate_token()
-        mgr.add(token)
-        assert mgr.revoke(token) is True
-        assert mgr.validate(token) is False
+    def test_validate_before_generate(self):
+        mgr = TokenManager()
+        assert mgr.validate("any") is False
 
-    def test_revoke_unknown_returns_false(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
-        assert mgr.revoke("nonexistent") is False
+    def test_new_token_invalidates_old(self):
+        mgr = TokenManager()
+        token1 = mgr.generate_token()
+        assert mgr.validate(token1) is True
+        token2 = mgr.generate_token()
+        assert mgr.validate(token1) is False
+        assert mgr.validate(token2) is True
 
-    def test_persistence(self, tmp_path):
-        path = tmp_path / "tokens.json"
-        mgr1 = TokenManager(storage_path=path)
-        token = mgr1.generate_token()
-        mgr1.add(token, "iPad")
-
-        mgr2 = TokenManager(storage_path=path)
-        assert mgr2.validate(token) is True
-        assert mgr2.count() == 1
-        assert mgr2.list_all()[token]["name"] == "iPad"
-
-    def test_count(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
-        assert mgr.count() == 0
-        mgr.add("token1")
-        mgr.add("token2")
-        assert mgr.count() == 2
-
-    def test_generate_token_unique(self, tmp_path):
-        mgr = TokenManager(storage_path=tmp_path / "tokens.json")
+    def test_generate_token_unique(self):
+        mgr = TokenManager()
         tokens = {mgr.generate_token() for _ in range(100)}
         assert len(tokens) == 100
-
-    def test_load_corrupt_file(self, tmp_path):
-        path = tmp_path / "tokens.json"
-        path.write_text("not json")
-        mgr = TokenManager(storage_path=path)
-        assert mgr.count() == 0

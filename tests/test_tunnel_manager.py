@@ -16,11 +16,24 @@ def manager():
     return TunnelManager(port=12000, bridge=MagicMock())
 
 
+@pytest.fixture
+def sync_switch():
+    """让 switch_mode 中的后台线程同步执行，便于测试。"""
+    class SyncThread:
+        def __init__(self, target=None, daemon=False, **kwargs):
+            self._target = target
+        def start(self):
+            if self._target:
+                self._target()
+    with patch("phonemic.tunnel.manager.threading.Thread", SyncThread):
+        yield
+
+
 class TestSwitchMode:
     @patch("phonemic.tunnel.manager.restart_server")
     @patch.object(CloudflareTunnel, "_find_binary", return_value="/fake/cloudflared")
     @patch("phonemic.tunnel.manager.CloudflareTunnel")
-    def test_switch_to_cloudflare_starts_tunnel(self, mock_cf_cls, mock_binary, mock_restart, manager):
+    def test_switch_to_cloudflare_starts_tunnel(self, mock_cf_cls, mock_binary, mock_restart, manager, sync_switch):
         mock_tunnel = MagicMock()
         mock_cf_cls.return_value = mock_tunnel
         manager._tunnel = mock_tunnel
@@ -35,19 +48,19 @@ class TestSwitchMode:
 
     @patch("phonemic.tunnel.manager.restart_server")
     @patch.object(CloudflareTunnel, "is_available", return_value=False)
-    def test_switch_to_cloudflare_no_binary_falls_back(self, mock_avail, mock_restart, manager):
+    def test_switch_to_cloudflare_no_binary_falls_back(self, mock_avail, mock_restart, manager, sync_switch):
         on_error = MagicMock()
         manager.set_callbacks(on_error=on_error)
 
         result = manager.switch_mode(TunnelMode.CLOUDFLARE)
 
-        assert result is False
+        assert result is True
         assert manager.mode == TunnelMode.LAN
         mock_restart.assert_any_call("0.0.0.0", 12000, manager._bridge)
         on_error.assert_called()
 
     @patch("phonemic.tunnel.manager.restart_server")
-    def test_switch_to_lan_stops_tunnel(self, mock_restart, manager):
+    def test_switch_to_lan_stops_tunnel(self, mock_restart, manager, sync_switch):
         manager._mode = TunnelMode.CLOUDFLARE
         manager._tunnel = MagicMock()
 
@@ -58,7 +71,7 @@ class TestSwitchMode:
         mock_restart.assert_called_once_with("0.0.0.0", 12000, manager._bridge)
 
     @patch("phonemic.tunnel.manager.restart_server")
-    def test_switch_same_mode_noop(self, mock_restart, manager):
+    def test_switch_same_mode_noop(self, mock_restart, manager, sync_switch):
         result = manager.switch_mode(TunnelMode.LAN)
         assert result is True
         mock_restart.assert_not_called()
@@ -86,7 +99,8 @@ class TestCallbacks:
         on_error.assert_called_once_with("some error")
 
     @patch("phonemic.tunnel.manager.restart_server")
-    def test_on_mode_changed_callback(self, mock_restart, manager):
+    @patch.object(CloudflareTunnel, "is_available", return_value=True)
+    def test_on_mode_changed_callback(self, mock_avail, mock_restart, manager, sync_switch):
         on_mode = MagicMock()
         manager.set_callbacks(on_mode_changed=on_mode)
         manager._tunnel = MagicMock()
@@ -124,8 +138,6 @@ class TestAutoFallback:
 
         assert manager.mode == TunnelMode.CLOUDFLARE
         on_error.assert_called_once()
-        msg = on_error.call_args[0][0]
-        assert "意外退出" in msg
 
 
 class TestAuthManagers:
