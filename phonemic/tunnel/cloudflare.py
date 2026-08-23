@@ -60,8 +60,8 @@ class CloudflareTunnel(TunnelProvider):
 
     def _find_binary(self) -> Optional[str]:
         """查找 cloudflared 二进制文件路径。"""
-        if self._binary_path and os.path.isfile(self._binary_path):
-            return self._binary_path
+        if self._binary_path:
+            return self._binary_path if os.path.isfile(self._binary_path) else None
 
         # 检查 bin 目录
         exe_name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
