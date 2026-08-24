@@ -22,9 +22,11 @@
 ## 🚀 快速开始
 
 1. **下载安装**  
-   从以下任一平台下载最新的 `PhoneMic_Setup.exe` 并运行安装：
+   从以下任一平台下载最新的安装包并运行安装：
    - [GitHub Releases](https://github.com/franj/PhoneMic/releases)
    - [Gitee Releases](https://gitee.com/franj/PhoneMic/releases)
+   
+   提供两个版本：标准版（`PhoneMic_Setup_...exe`）和内嵌版（`PhoneMic_Setup_bundled_...exe`，自带 cloudflared，开箱即用）。
 
 2. **启动程序**  
    安装完成后，双击桌面图标或从开始菜单启动 PhoneMic。
@@ -44,9 +46,13 @@
 
 ### 方式一：使用预编译安装包（推荐）
 
-前往以下任一 Releases 页面下载 `PhoneMic_Setup.exe`：
+前往以下任一 Releases 页面下载安装包：
 - [GitHub Releases](https://github.com/franj/PhoneMic/releases)
 - [Gitee Releases](https://gitee.com/franj/PhoneMic/releases)
+
+提供两个版本：
+- **标准版** `PhoneMic_Setup_...exe`：体积小，仅用局域网模式可选；想用 Cloudflare 模式需自行安装 cloudflared
+- **内嵌版** `PhoneMic_Setup_bundled_...exe`：自带 cloudflared，开箱即用，无需额外安装
 
 ### 方式二：从源码运行
 
@@ -70,18 +76,19 @@ uv sync
 uvw run app
 ```
 
+> 从源码运行时，如需使用 Cloudflare 隧道模式，需自行安装 `cloudflared`，详见下文[前置条件](#前置条件)。
+
 ## 🌐 互联网访问（Cloudflare 隧道模式）
 
 PhoneMic 默认在局域网内工作。如果你需要通过互联网远程连接（比如外出时用手机连家里的电脑），可以切换到 **Cloudflare 隧道模式**，它会自动建立 HTTPS 加密隧道，无需公网 IP 和端口映射。
 
 ### 前置条件
 
-1. 下载并安装 `cloudflared`：
-   - 前往 [cloudflared Releases](https://github.com/cloudflare/cloudflared/releases) 下载对应平台的版本。
-   - Windows 用户有两种选择：
-     - **安装版（推荐）：** 下载 `.msi` 安装包，双击安装，自动配置 PATH。
-     - **免安装版：** 下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统 PATH 目录下（如 `C:\Windows\`），或放到 PhoneMic 程序同级目录。
-   - 安装后在命令行执行 `cloudflared --version` 确认可用。
+1. 安装 `cloudflared`（三选一）：
+   - **bundled 安装包用户：** cloudflared 已内嵌，无需额外安装，跳过即可。
+   - **安装版：** 前往 [cloudflared Releases](https://github.com/cloudflare/cloudflared/releases) 下载 `.msi` 安装包，双击安装，自动配置 PATH。
+   - **免安装版：** 下载 `cloudflared-windows-amd64.exe`，重命名为 `cloudflared.exe`，放到系统 PATH 目录下（如 `C:\Windows\`），或放到 PhoneMic 程序同级目录。
+   - 安装后在命令行执行 `cloudflared --version` 确认可用（bundled 用户可跳过此步）。
 
 2. 无需 Cloudflare 账号。PhoneMic 使用的是 Cloudflare 免费快速隧道（`trycloudflare.com`），每次启动会分配一个随机域名。
 
@@ -98,6 +105,7 @@ PhoneMic 默认在局域网内工作。如果你需要通过互联网远程连�
 - **域名变化：** 每次启动隧道域名会变，程序会自动更新二维码，重新扫码即可。
 - **回退机制：** 如果 `cloudflared` 未安装或启动失败，程序会自动回退到局域网模式。
 - **中国大陆用户：** Cloudflare 隧道在国内可能有连接不稳定的情况，如遇问题请使用局域网模式。
+- **公司/单位网络：** 如果局域网直连都不通，说明网络管控较严。Cloudflare 隧道通过互联网中转，连接本身有 HTTPS 加密和配对码认证，但请确认单位是否允许建立外部隧道连接，使用前请确认是否违反单位安全规定。
 
 ## 🛠 语音命令（扩展功能）
 
