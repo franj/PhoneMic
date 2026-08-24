@@ -32,6 +32,54 @@ MAIN_SCRIPT = PROJECT_ROOT / "phonemic" / "PhoneMic.py"
 # NSIS 配置
 NSIS_SCRIPT = PROJECT_ROOT / "makesetup.nsi"
 
+# ---------- 第三方二进制依赖 ----------
+VENDOR_CACHE = PROJECT_ROOT / "build" / "vendor"
+
+VENDORS = [
+    {
+        "name": "cloudflared",
+        "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-windows-amd64.exe",
+        "sha256": "c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5",
+        "dest": "bin/cloudflared.exe",
+    },
+]
+
+# ---------- 第三方二进制下载 ----------
+def prepare_vendors() -> None:
+    """下载并校验第三方二进制到缓存目录，然后拷贝到 standalone dist。"""
+    import hashlib
+    import urllib.request
+
+    VENDOR_CACHE.mkdir(parents=True, exist_ok=True)
+    standalone_dist = BUILD_DIR / "PhoneMic.dist"
+
+    for v in VENDORS:
+        filename = Path(v["dest"]).name
+        cache_path = VENDOR_CACHE / filename
+
+        if cache_path.exists():
+            sha = hashlib.sha256(cache_path.read_bytes()).hexdigest()
+            if sha == v["sha256"]:
+                print(f"  ✓ {v['name']}: 缓存有效，跳过下载")
+            else:
+                print(f"  ↓ {v['name']}: SHA256 不匹配，重新下载...")
+                urllib.request.urlretrieve(v["url"], cache_path)
+        else:
+            print(f"  ↓ {v['name']}: 下载中...")
+            urllib.request.urlretrieve(v["url"], cache_path)
+
+        sha = hashlib.sha256(cache_path.read_bytes()).hexdigest()
+        if sha != v["sha256"]:
+            print(f"  ✗ {v['name']}: SHA256 校验失败\n    期望: {v['sha256']}\n    实际: {sha}", file=sys.stderr)
+            sys.exit(1)
+        print(f"  ✓ {v['name']}: SHA256 校验通过")
+
+        dest_path = standalone_dist / v["dest"]
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cache_path, dest_path)
+        print(f"  → {v['name']}: 已拷贝到 {dest_path.relative_to(PROJECT_ROOT)}")
+
+
 # ---------- 辅助函数 ----------
 def read_version_from_pyproject():
     """从 pyproject.toml 读取版本号（PEP 621）"""
@@ -159,7 +207,7 @@ def compile_standalone(version: str, commit: str):
         sys.exit(1)
     print(f"✅ Standalone 编译完成，输出目录: {standalone_dist}")
 
-def package_standalone(version: str, date_str: str, commit: str):
+def package_standalone(version: str, date_str: str, commit: str, vendor: bool = False):
     """只打包 NSIS 安装包（假设 standalone 目录已存在）"""
     check_makensis()
     standalone_dist = BUILD_DIR / "PhoneMic.dist"
@@ -170,7 +218,11 @@ def package_standalone(version: str, date_str: str, commit: str):
         print(f"错误: 找不到 NSIS 脚本 {NSIS_SCRIPT}", file=sys.stderr)
         sys.exit(1)
 
-    build_suffix = f"{date_str}_{version}_{commit}"
+    suffix_parts = []
+    if vendor:
+        suffix_parts.append("bundled")
+    suffix_parts.extend([date_str, version, commit])
+    build_suffix = "_".join(suffix_parts)
     cmd = [
         "makensis",
         f"/DVERSION={version}",
@@ -184,7 +236,7 @@ def package_standalone(version: str, date_str: str, commit: str):
     subprocess.check_call(cmd)
     print(f"✅ 安装包已生成到 {DIST_DIR}/PhoneMic_Setup_{build_suffix}.exe")
 
-def build_standalone_installer(version: str, date_str: str, commit: str, action: str):
+def build_standalone_installer(version: str, date_str: str, commit: str, action: str, vendor: bool = False):
     """
     根据 action 执行 standalone 构建流程
     """
@@ -192,8 +244,11 @@ def build_standalone_installer(version: str, date_str: str, commit: str, action:
         print("⚠️  package 模式将跳过编译，仅打包现有 standalone 目录")
     if action in ("all", "compile"):
         compile_standalone(version, commit)
+    if vendor:
+        print("📦 准备第三方二进制依赖...")
+        prepare_vendors()
     if action in ("all", "package"):
-        package_standalone(version, date_str, commit)
+        package_standalone(version, date_str, commit, vendor)
 
 def build_onefile(version: str, date_str: str, commit: str, action: str):
     """
@@ -219,6 +274,10 @@ def main():
         "--action", choices=["all", "compile", "package"], default="all",
         help="执行动作: all (默认，编译+打包), compile (只编译), package (只打包，仅 standalone 有效)"
     )
+    parser.add_argument(
+        "--vendor", action="store_true",
+        help="编译后将第三方二进制（如 cloudflared）拷贝到 standalone dist 的 bin/ 目录"
+    )
     args = parser.parse_args()
 
     # 前置检查
@@ -242,7 +301,7 @@ def main():
         build_onefile(version, date_str, commit, args.action)
     else:  # standalone
         print("🔧 构建模式: Standalone + NSIS 安装包")
-        build_standalone_installer(version, date_str, commit, args.action)
+        build_standalone_installer(version, date_str, commit, args.action, args.vendor)
 
 if __name__ == "__main__":
     main()

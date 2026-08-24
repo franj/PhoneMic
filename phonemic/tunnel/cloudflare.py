@@ -12,7 +12,7 @@ import threading
 from typing import Optional, Callable
 
 from phonemic.tunnel.base import TunnelProvider
-from phonemic.utils.paths import get_bin_dir
+from phonemic.utils.paths import get_bin_dir, get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +63,19 @@ class CloudflareTunnel(TunnelProvider):
         if self._binary_path:
             return self._binary_path if os.path.isfile(self._binary_path) else None
 
-        # 检查 bin 目录
         exe_name = "cloudflared.exe" if os.name == "nt" else "cloudflared"
+
+        # 1. 应用目录下的 bin（打包内置）
+        app_bin = get_app_root() / "bin" / exe_name
+        if app_bin.is_file():
+            return str(app_bin)
+
+        # 2. bin 目录（用户手动安装到 LOCALAPPDATA）
         local_bin = get_bin_dir() / exe_name
         if local_bin.is_file():
             return str(local_bin)
 
-        # 检查 PATH
+        # 3. PATH
         found = shutil.which("cloudflared")
         if found:
             return found
