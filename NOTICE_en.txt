@@ -43,11 +43,16 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
     License: MIT
     Homepage: https://github.com/pyparsing/pyparsing
 
-11. Nuitka (used only for packaging, not included in final distribution)
+11. cryptography
+    License: Apache 2.0 / BSD 3-Clause
+    Homepage: https://github.com/pyca/cryptography
+    Note: Used for end-to-end encryption (AES-256-GCM) in Cloudflare tunnel mode
+
+12. Nuitka (used only for packaging, not included in final distribution)
     License: Apache 2.0
     Homepage: https://nuitka.net
 
-12. cloudflared (optional dependency, users may install separately)
+13. cloudflared (optional dependency, users may install separately)
     License: Apache 2.0
     Homepage: https://github.com/cloudflare/cloudflared
     Download: https://github.com/cloudflare/cloudflared/releases

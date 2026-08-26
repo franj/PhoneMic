@@ -44,11 +44,16 @@
     许可证：MIT
     主页：https://github.com/pyparsing/pyparsing
 
-11. Nuitka (仅打包使用，不包含在最终分发中)
+11. cryptography
+    许可证：Apache 2.0 / BSD 3-Clause
+    主页：https://github.com/pyca/cryptography
+    说明：用于 Cloudflare 隧道模式的端到端加密 (AES-256-GCM)
+
+12. Nuitka (仅打包使用，不包含在最终分发中)
     许可证：Apache 2.0
     主页：https://nuitka.net
 
-12. cloudflared (可选依赖，用户可自行安装)
+13. cloudflared (可选依赖，用户可自行安装)
     许可证：Apache 2.0
     主页：https://github.com/cloudflare/cloudflared
     下载：https://github.com/cloudflare/cloudflared/releases
