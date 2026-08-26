@@ -67,6 +67,7 @@ class Dashboard(QMainWindow):
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._generate_pairing_callback: Optional[Callable[[], str]] = None
+        self._e2ee_mgr = None  # E2EEManager 引用，由外部设置
         self._pairing_timer = QTimer(self)
         self._pairing_timer.setSingleShot(True)
         self._pairing_timer.timeout.connect(self._on_pairing_expired)
@@ -85,6 +86,10 @@ class Dashboard(QMainWindow):
     def set_generate_pairing_callback(self, callback: Callable[[], str]):
         """设置生成配对码回调函数，返回配对码字符串。"""
         self._generate_pairing_callback = callback
+
+    def set_e2ee_manager(self, mgr):
+        """设置 E2EE 管理器引用。"""
+        self._e2ee_mgr = mgr
 
     def _on_generate_pairing(self):
         """生成配对码并显示。"""
@@ -130,7 +135,7 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        ip_label = QLabel(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
+        ip_label = QLabel(f"http://{ip}:{port}")
         ip_label.setAlignment(Qt.AlignCenter)
         ip_label.setWordWrap(True)
         ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -195,15 +200,15 @@ class Dashboard(QMainWindow):
             self.pairing_widget.setVisible(False)
             self.cf_info_label.setVisible(False)
             self.switch_network_action.setEnabled(True)
-            qr_url = f"http://{self._lan_ip}:{self._lan_port}"
-            self.qr_label.setPixmap(make_qr_pixmap(qr_url))
-            self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
+            self._refresh_qr()
         else:
             self.info_label.setVisible(False)
             self.pairing_widget.setVisible(True)
             self.cf_info_label.setVisible(True)
             self.switch_network_action.setEnabled(False)
-            if not self._tunnel_url:
+            if self._tunnel_url:
+                self._refresh_qr()
+            else:
                 self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
@@ -236,14 +241,36 @@ class Dashboard(QMainWindow):
         self._sync_menu_checks()
         self._apply_mode_ui()
 
+    def _get_qr_url(self) -> str:
+        """获取当前 QR 码 URL（含 E2EE 密钥 fragment）。"""
+        if self._mode == TunnelMode.CLOUDFLARE and self._tunnel_url:
+            url = self._tunnel_url
+        else:
+            url = f"http://{self._lan_ip}:{self._lan_port}"
+        if self._e2ee_mgr and self._e2ee_mgr.enabled:
+            url = self._e2ee_mgr.append_to_url(url)
+        return url
+
+    def _refresh_qr(self) -> None:
+        """刷新 QR 码和地址栏。"""
+        if self._switching:
+            return
+        url = self._get_qr_url()
+        self.qr_label.setPixmap(make_qr_pixmap(url))
+        self.ip_label.setText(url)
+
     def update_tunnel_url(self, url: Optional[str]) -> None:
-        """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
+        """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
+
+        收到有效 URL 意味着隧道已建立，自动结束切换状态。
+        """
         self._tunnel_url = url
         if self._mode == TunnelMode.CLOUDFLARE:
             if url:
-                pixmap = make_qr_pixmap(url)
-                self.qr_label.setPixmap(pixmap)
-                self.ip_label.setText(url)
+                if self._switching:
+                    self.on_switch_completed()
+                else:
+                    self._refresh_qr()
             else:
                 self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
@@ -331,7 +358,7 @@ class Dashboard(QMainWindow):
         self.qr_label.setPixmap(pixmap)
 
         # 更新 IP 标签
-        self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
+        self.ip_label.setText(f"http://{ip}:{port}")
 
     def show_about(self):
         version, commit, _ = get_build_info()
@@ -354,7 +381,12 @@ class Dashboard(QMainWindow):
     def update_connection_status(self, connected: bool) -> None:
         self.connected = connected
         if connected:
-            self.status_label.setText('<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected"))
+            text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
+            if self._e2ee_mgr and self._e2ee_mgr.enabled:
+                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
+            else:
+                text += ' <span style="color:#999;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
+            self.status_label.setText(text)
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))
 

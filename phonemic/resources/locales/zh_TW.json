@@ -2,7 +2,6 @@
   "name": "繁體中文",
   "dashboard": {
     "title": "PhoneMic - 主視窗",
-    "ip_label": "服務位址",
     "info": "請注意，手機和電腦必須處於同一區域網路中。\n手機掃碼或在瀏覽器中輸入服務位址以連線。\n為保障資料安全，請務必在信任網路環境中使用，切勿在公共網路使用。",
     "status_connected": "已連線",
     "status_disconnected": "未連線",

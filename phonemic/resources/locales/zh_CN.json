@@ -2,10 +2,11 @@
   "name": "简体中文",
   "dashboard": {
     "title": "PhoneMic - 主界面",
-    "ip_label": "服务地址",
     "info": "请注意，手机和电脑必须处于同一局域网中。\n手机扫码或在浏览器中输入服务地址以连接。\n为保障数据安全，请务必在信任网络环境中使用，切勿在公共网络使用。",
     "status_connected": "已连接",
     "status_disconnected": "未连接",
+    "status_encrypted": "加密",
+    "status_plaintext": "明文",
     "menu_program": "程序",
     "menu_network": "网络",
     "menu_action": "偏好设置",
@@ -23,7 +24,8 @@
     "pairing_expired": "配对码已过期，请重新生成",
     "cf_connecting": "Cloudflare 隧道连接中...",
     "switching": "切换中...",
-    "cf_info": "通过 Cloudflare 隧道提供 HTTPS 安全连接，支持互联网访问"
+    "cf_info": "通过 Cloudflare 隧道提供 HTTPS 安全连接，支持互联网访问",
+    "btn_e2ee": "端到端加密"
   },
   "tunnel": {
     "error_title": "隧道错误",

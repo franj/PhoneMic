@@ -21,6 +21,7 @@ from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server
+from phonemic.tunnel.e2ee import E2EEManager
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
@@ -157,6 +158,12 @@ def main():
     bridge = QueueEventBridge(multiprocessing.Queue()) if use_queue else QtEventBridge()
 
     start_server(selected_ip, actual_port, bridge)
+
+    # E2EE 管理器
+    e2ee_mgr = E2EEManager()
+    from phonemic.server.api import set_e2ee_manager
+    set_e2ee_manager(e2ee_mgr)
+
     if not wait_for_server(selected_ip, actual_port):
         QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.server_timeout", port=actual_port))
         sys.exit(1)
@@ -228,6 +235,9 @@ def main():
     dashboard.set_mode_switch_callback(lambda mode: tunnel_mgr.switch_mode(mode))
     dashboard.set_generate_pairing_callback(lambda: tunnel_mgr.pairing.generate())
 
+    # E2EE：Cloudflare 模式自动启用，LAN 模式不加密
+    dashboard.set_e2ee_manager(e2ee_mgr)
+
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
         dashboard._switching = True
@@ -262,7 +272,13 @@ def main():
             mode = TunnelMode(payload)
             dashboard._mode = mode
             set_mode(mode)
+            # E2EE 自动管理：Cloudflare 启用，LAN 禁用
+            if mode == TunnelMode.CLOUDFLARE:
+                e2ee_mgr.enable()
+            else:
+                e2ee_mgr.disable()
             dashboard._apply_mode_ui()
+            dashboard.update_connection_status(dashboard.connected)
             if mode == TunnelMode.LAN:
                 dashboard.on_switch_completed()
         elif event_type == "pairing_success":

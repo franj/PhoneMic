@@ -15,6 +15,7 @@ from typing import Optional
 from aiohttp import web, WSMsgType
 
 from phonemic.bridge_interface import EventBridge
+from phonemic.tunnel.e2ee import E2EEManager
 from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
@@ -68,10 +69,11 @@ class ConnectionManager:
 
         # 发送当前配置（手机端初始化使用）
         try:
-            await ws.send_str(json.dumps({
+            await _send_json(ws, {
                 "type": "config",
-                "mobile_max_records": self.max_records
-            }))
+                "mobile_max_records": self.max_records,
+                "e2ee_enabled": _e2ee_manager.enabled if _e2ee_manager else False,
+            })
             logger.debug(f"Sent config to client: max_records={self.max_records}")
         except Exception as e:
             logger.warning(f"Failed to send initial config: {e}")
@@ -112,6 +114,33 @@ def set_tunnel_auth(enabled: bool, pairing=None, tokens=None) -> None:
     logger.info(f"Tunnel auth {'enabled' if enabled else 'disabled'}")
 
 
+# E2EE 状态（所有模式可用）
+_e2ee_manager: Optional[E2EEManager] = None
+
+# E2EE 控制消息，始终明文发送（不加密）
+_E2EE_CONTROL_TYPES = {
+    "e2ee_required",
+    "auth_required", "auth_success", "auth_failed",
+    "config",
+}
+
+
+def set_e2ee_manager(mgr: E2EEManager) -> None:
+    """设置 E2EE 管理器引用。"""
+    global _e2ee_manager
+    _e2ee_manager = mgr
+
+
+async def _send_json(ws: web.WebSocketResponse, message: dict) -> None:
+    """发送 JSON 消息，E2EE 启用时自动加密（控制消息除外）。
+
+    在事件循环内调用（async 上下文），直接 await 发送。
+    """
+    if _e2ee_manager and _e2ee_manager.enabled and message.get("type") not in _E2EE_CONTROL_TYPES:
+        message = _e2ee_manager.wrap(message)
+    await ws.send_str(json.dumps(message, ensure_ascii=False))
+
+
 # ---------- 公共 API：向手机端推送消息 ----------
 
 def send_to_phone(message: dict) -> bool:
@@ -132,10 +161,8 @@ def send_to_phone(message: dict) -> bool:
 
     async def _send():
         try:
-            await _manager.active_websocket.send_str(
-                json.dumps(message, ensure_ascii=False)
-            )
-            logger.debug(f"Pushed message to phone: {message}")
+            await _send_json(_manager.active_websocket, message)
+            logger.debug(f"Pushed message to phone: {message.get('type', 'unknown')}")
         except Exception as e:
             logger.warning(f"Failed to push message to phone: {e}")
 
@@ -167,12 +194,12 @@ async def _handle_auth(ws: web.WebSocketResponse) -> bool:
     2. 客户端回复 auth（method=token 或 pairing_code）
     3. 服务端验证，回复 auth_success 或 auth_failed
     """
-    await ws.send_str(json.dumps({"type": "auth_required"}))
+    await _send_json(ws, {"type": "auth_required"})
 
     try:
         msg = await asyncio.wait_for(ws.receive(), timeout=30.0)
     except asyncio.TimeoutError:
-        await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_timeout")}))
+        await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_timeout")})
         await ws.close()
         return False
     except Exception as e:
@@ -190,8 +217,12 @@ async def _handle_auth(ws: web.WebSocketResponse) -> bool:
         await ws.close()
         return False
 
+    # E2EE 启用时，客户端消息应该是加密的
+    if _e2ee_manager and _e2ee_manager.enabled and _e2ee_manager.is_encrypted(data):
+        data = _e2ee_manager.unwrap(data)
+
     if data.get("type") != "auth":
-        await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_expected")}))
+        await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_expected")})
         await ws.close()
         return False
 
@@ -201,7 +232,7 @@ async def _handle_auth(ws: web.WebSocketResponse) -> bool:
         token = data.get("token", "")
         if _token_manager.validate(token):
             logger.info("Token auth succeeded")
-            await ws.send_str(json.dumps({"type": "auth_success"}))
+            await _send_json(ws, {"type": "auth_success"})
             return True
 
     elif method == "pairing_code" and _pairing_manager and _token_manager:
@@ -209,12 +240,12 @@ async def _handle_auth(ws: web.WebSocketResponse) -> bool:
         if _pairing_manager.validate(code):
             token = _token_manager.generate_token()
             logger.info("Pairing code auth succeeded, token issued")
-            await ws.send_str(json.dumps({"type": "auth_success", "token": token}))
+            await _send_json(ws, {"type": "auth_success", "token": token})
             if _manager:
                 _manager.bridge.emit("pairing_success")
             return True
 
-    await ws.send_str(json.dumps({"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_failed")}))
+    await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_failed")})
     await ws.close()
     return False
 
@@ -291,6 +322,23 @@ def _create_app() -> web.Application:
                 if msg.type == WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
+
+                        # E2EE 启用时：解密收到的消息
+                        if _e2ee_manager and _e2ee_manager.enabled:
+                            if _e2ee_manager.is_encrypted(data):
+                                data = _e2ee_manager.unwrap(data)
+                            elif data.get("type") not in _E2EE_CONTROL_TYPES:
+                                # 收到明文消息但 E2EE 已开启 → 通知客户端切换
+                                await _send_json(ws, {
+                                    "type": "e2ee_required",
+                                    "message": "请重新扫码以启用加密"
+                                })
+                                continue
+                        elif data.get("type") == "encrypted":
+                            # E2EE 已禁用但收到加密消息 → 客户端尚未同步，忽略
+                            logger.debug("Received encrypted message while E2EE disabled, ignoring")
+                            continue
+
                         msg_type = data.get("type")
                         text = data.get("text", "")
 

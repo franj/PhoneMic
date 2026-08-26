@@ -55,6 +55,7 @@ class SettingsManager(QObject):
             "network_selection_mode": "ask",      # "auto", "last", "ask"
             "last_network_mac": None,             # 上次使用的网卡MAC
             "auto_start_silent": False,           # 开机自启时是否静默（不显示主窗口）
+            "e2ee_enabled": False,                # 端到端加密
         }
         print(f"default lan is {default['language']}")
         
