@@ -23,7 +23,8 @@
     "pairing_expired": "Pairing code expired, please regenerate",
     "cf_connecting": "Cloudflare tunnel connecting...",
     "switching": "Switching...",
-    "cf_info": "Secure HTTPS connection via Cloudflare tunnel, accessible over internet"
+    "cf_info": "Secure HTTPS connection via Cloudflare tunnel, accessible over internet",
+    "btn_e2ee": "End-to-End Encryption"
   },
   "tunnel": {
     "error_title": "Tunnel Error",

@@ -23,7 +23,8 @@
     "pairing_expired": "配对码已过期，请重新生成",
     "cf_connecting": "Cloudflare 隧道连接中...",
     "switching": "切换中...",
-    "cf_info": "通过 Cloudflare 隧道提供 HTTPS 安全连接，支持互联网访问"
+    "cf_info": "通过 Cloudflare 隧道提供 HTTPS 安全连接，支持互联网访问",
+    "btn_e2ee": "端到端加密"
   },
   "tunnel": {
     "error_title": "隧道错误",

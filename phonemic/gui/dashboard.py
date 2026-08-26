@@ -67,6 +67,8 @@ class Dashboard(QMainWindow):
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._generate_pairing_callback: Optional[Callable[[], str]] = None
+        self._e2ee_toggle_callback: Optional[Callable[[bool], None]] = None
+        self._e2ee_mgr = None  # E2EEManager 引用，由外部设置
         self._pairing_timer = QTimer(self)
         self._pairing_timer.setSingleShot(True)
         self._pairing_timer.timeout.connect(self._on_pairing_expired)
@@ -85,6 +87,14 @@ class Dashboard(QMainWindow):
     def set_generate_pairing_callback(self, callback: Callable[[], str]):
         """设置生成配对码回调函数，返回配对码字符串。"""
         self._generate_pairing_callback = callback
+
+    def set_e2ee_manager(self, mgr):
+        """设置 E2EE 管理器引用。"""
+        self._e2ee_mgr = mgr
+
+    def set_e2ee_toggle_callback(self, callback: Callable[[bool], None]):
+        """设置 E2EE 切换回调函数。"""
+        self._e2ee_toggle_callback = callback
 
     def _on_generate_pairing(self):
         """生成配对码并显示。"""
@@ -195,9 +205,7 @@ class Dashboard(QMainWindow):
             self.pairing_widget.setVisible(False)
             self.cf_info_label.setVisible(False)
             self.switch_network_action.setEnabled(True)
-            qr_url = f"http://{self._lan_ip}:{self._lan_port}"
-            self.qr_label.setPixmap(make_qr_pixmap(qr_url))
-            self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
+            self._refresh_qr()
         else:
             self.info_label.setVisible(False)
             self.pairing_widget.setVisible(True)
@@ -236,14 +244,44 @@ class Dashboard(QMainWindow):
         self._sync_menu_checks()
         self._apply_mode_ui()
 
+    def _on_e2ee_toggled(self, checked: bool) -> None:
+        """用户点击端到端加密菜单项。"""
+        if self._e2ee_toggle_callback:
+            self._e2ee_toggle_callback(checked)
+
+    def on_e2ee_changed(self, enabled: bool) -> None:
+        """E2EE 切换完成，更新 UI。"""
+        self.sm.set("e2ee_enabled", enabled)
+        self.act_e2ee.setChecked(enabled)
+        self._refresh_qr()
+
+    def _get_qr_url(self) -> str:
+        """获取当前 QR 码 URL（含 E2EE 密钥 fragment）。"""
+        if self._mode == TunnelMode.CLOUDFLARE and self._tunnel_url:
+            url = self._tunnel_url
+        else:
+            url = f"http://{self._lan_ip}:{self._lan_port}"
+        if self._e2ee_mgr and self._e2ee_mgr.enabled:
+            url = self._e2ee_mgr.append_to_url(url)
+        return url
+
+    def _refresh_qr(self) -> None:
+        """刷新 QR 码和地址栏。"""
+        if self._switching:
+            return
+        url = self._get_qr_url()
+        self.qr_label.setPixmap(make_qr_pixmap(url))
+        if self._mode == TunnelMode.CLOUDFLARE and self._tunnel_url:
+            self.ip_label.setText(self._tunnel_url)
+        else:
+            self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
+
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
         self._tunnel_url = url
         if self._mode == TunnelMode.CLOUDFLARE:
             if url:
-                pixmap = make_qr_pixmap(url)
-                self.qr_label.setPixmap(pixmap)
-                self.ip_label.setText(url)
+                self._refresh_qr()
             else:
                 self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
@@ -292,6 +330,15 @@ class Dashboard(QMainWindow):
         self.act_cf.triggered.connect(lambda: self._on_mode_clicked(TunnelMode.CLOUDFLARE))
         mode_group.addAction(self.act_cf)
         network_menu.addAction(self.act_cf)
+
+        network_menu.addSeparator()
+
+        # 端到端加密
+        self.act_e2ee = QAction(self.i18n.tr("dashboard.btn_e2ee"), self)
+        self.act_e2ee.setCheckable(True)
+        self.act_e2ee.setChecked(self.sm.get("e2ee_enabled", False))
+        self.act_e2ee.triggered.connect(self._on_e2ee_toggled)
+        network_menu.addAction(self.act_e2ee)
 
         network_menu.addSeparator()
 
