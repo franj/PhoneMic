@@ -161,7 +161,7 @@ def main():
 
     # E2EE 管理器
     e2ee_mgr = E2EEManager()
-    from phonemic.server.api import set_e2ee_manager
+    from phonemic.server.api import set_e2ee_manager, send_to_phone
     set_e2ee_manager(e2ee_mgr)
 
     if not wait_for_server(selected_ip, actual_port):
@@ -234,6 +234,24 @@ def main():
     )
     dashboard.set_mode_switch_callback(lambda mode: tunnel_mgr.switch_mode(mode))
     dashboard.set_generate_pairing_callback(lambda: tunnel_mgr.pairing.generate())
+
+    # E2EE 切换（无重启，仅状态切换 + 客户端通知）
+    dashboard.set_e2ee_manager(e2ee_mgr)
+
+    def _on_e2ee_toggled(enabled: bool):
+        if enabled:
+            e2ee_mgr.enable()
+            send_to_phone({"type": "e2ee_enabled"})
+        else:
+            send_to_phone({"type": "e2ee_disabled"})
+            e2ee_mgr.disable()
+        dashboard.on_e2ee_changed(enabled)
+
+    dashboard.set_e2ee_toggle_callback(_on_e2ee_toggled)
+
+    # 启动时同步 E2EE 状态
+    if sm.get("e2ee_enabled", False):
+        e2ee_mgr.enable()
 
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
