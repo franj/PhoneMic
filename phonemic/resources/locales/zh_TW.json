@@ -5,6 +5,8 @@
     "info": "請注意，手機和電腦必須處於同一區域網路中。\n手機掃碼或在瀏覽器中輸入服務位址以連線。\n為保障資料安全，請務必在信任網路環境中使用，切勿在公共網路使用。",
     "status_connected": "已連線",
     "status_disconnected": "未連線",
+    "status_encrypted": "加密",
+    "status_plaintext": "明文",
     "menu_program": "程式",
     "menu_network": "網路",
     "menu_action": "偏好設定",
@@ -22,7 +24,8 @@
     "pairing_expired": "配對碼已過期，請重新產生",
     "cf_connecting": "Cloudflare 隧道連線中...",
     "switching": "切換中...",
-    "cf_info": "透過 Cloudflare 隧道提供 HTTPS 安全連線，支援網際網路存取"
+    "cf_info": "透過 Cloudflare 隧道提供 HTTPS 安全連線，支援網際網路存取",
+    "btn_e2ee": "端對端加密"
   },
   "tunnel": {
     "error_title": "隧道錯誤",
