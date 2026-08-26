@@ -800,11 +800,15 @@ __I18N_JSON__
         }
         static _showRescanPrompt() {
             const sb = document.getElementById('status-bar');
-            if (sb) {
-                sb.style.display = 'block';
-                sb.style.background = '#fff3cd';
-                sb.style.color = '#856404';
-                sb.innerText = '服务端已启用加密，请重新扫码以获取密钥';
+            if (!sb) return;
+            const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
+            sb.style.display = 'block';
+            sb.style.background = '#fff3cd';
+            sb.style.color = '#856404';
+            if (isWeChat) {
+                sb.innerText = '微信浏览器可能丢失加密密钥，请在系统浏览器中打开此页面';
+            } else {
+                sb.innerText = '请重新扫码以获取密钥';
             }
         }
     }
@@ -1206,6 +1210,9 @@ __I18N_JSON__
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.log(window.i18n.log_config_updated + data.mobile_max_records);
+            }
+            if (data.e2ee_enabled && !wsClient.e2ee.hasKey) {
+                E2EEClient._showRescanPrompt();
             }
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
