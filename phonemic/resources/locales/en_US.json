@@ -6,6 +6,8 @@
     "info": "Phone and computer must be on the same Wi-Fi.\nScan QR code or enter address to connect.\nOnly use in trusted networks.",
     "status_connected": "Connected",
     "status_disconnected": "Disconnected",
+    "status_encrypted": "Encrypted",
+    "status_plaintext": "Plaintext",
     "menu_program": "Program",
     "menu_network": "Network",
     "menu_action": "Preferences",

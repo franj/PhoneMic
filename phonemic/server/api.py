@@ -119,7 +119,7 @@ _e2ee_manager: Optional[E2EEManager] = None
 
 # E2EE 控制消息，始终明文发送（不加密）
 _E2EE_CONTROL_TYPES = {
-    "e2ee_enabled", "e2ee_disabled", "e2ee_required",
+    "e2ee_required",
     "auth_required", "auth_success", "auth_failed",
     "config",
 }

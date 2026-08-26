@@ -67,7 +67,6 @@ class Dashboard(QMainWindow):
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._generate_pairing_callback: Optional[Callable[[], str]] = None
-        self._e2ee_toggle_callback: Optional[Callable[[bool], None]] = None
         self._e2ee_mgr = None  # E2EEManager 引用，由外部设置
         self._pairing_timer = QTimer(self)
         self._pairing_timer.setSingleShot(True)
@@ -91,10 +90,6 @@ class Dashboard(QMainWindow):
     def set_e2ee_manager(self, mgr):
         """设置 E2EE 管理器引用。"""
         self._e2ee_mgr = mgr
-
-    def set_e2ee_toggle_callback(self, callback: Callable[[bool], None]):
-        """设置 E2EE 切换回调函数。"""
-        self._e2ee_toggle_callback = callback
 
     def _on_generate_pairing(self):
         """生成配对码并显示。"""
@@ -211,7 +206,9 @@ class Dashboard(QMainWindow):
             self.pairing_widget.setVisible(True)
             self.cf_info_label.setVisible(True)
             self.switch_network_action.setEnabled(False)
-            if not self._tunnel_url:
+            if self._tunnel_url:
+                self._refresh_qr()
+            else:
                 self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
@@ -243,17 +240,6 @@ class Dashboard(QMainWindow):
         self.act_cf.setEnabled(True)
         self._sync_menu_checks()
         self._apply_mode_ui()
-
-    def _on_e2ee_toggled(self, checked: bool) -> None:
-        """用户点击端到端加密菜单项。"""
-        if self._e2ee_toggle_callback:
-            self._e2ee_toggle_callback(checked)
-
-    def on_e2ee_changed(self, enabled: bool) -> None:
-        """E2EE 切换完成，更新 UI。"""
-        self.sm.set("e2ee_enabled", enabled)
-        self.act_e2ee.setChecked(enabled)
-        self._refresh_qr()
 
     def _get_qr_url(self) -> str:
         """获取当前 QR 码 URL（含 E2EE 密钥 fragment）。"""
@@ -333,15 +319,6 @@ class Dashboard(QMainWindow):
 
         network_menu.addSeparator()
 
-        # 端到端加密
-        self.act_e2ee = QAction(self.i18n.tr("dashboard.btn_e2ee"), self)
-        self.act_e2ee.setCheckable(True)
-        self.act_e2ee.setChecked(self.sm.get("e2ee_enabled", False))
-        self.act_e2ee.triggered.connect(self._on_e2ee_toggled)
-        network_menu.addAction(self.act_e2ee)
-
-        network_menu.addSeparator()
-
         # 切换网络地址（仅局域网模式可用）
         self.switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
         self.switch_network_action.triggered.connect(self._on_switch_network)
@@ -401,7 +378,12 @@ class Dashboard(QMainWindow):
     def update_connection_status(self, connected: bool) -> None:
         self.connected = connected
         if connected:
-            self.status_label.setText('<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected"))
+            text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
+            if self._e2ee_mgr and self._e2ee_mgr.enabled:
+                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
+            else:
+                text += ' <span style="color:#999;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
+            self.status_label.setText(text)
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))
 

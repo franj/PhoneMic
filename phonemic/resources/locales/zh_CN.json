@@ -6,6 +6,8 @@
     "info": "请注意，手机和电脑必须处于同一局域网中。\n手机扫码或在浏览器中输入服务地址以连接。\n为保障数据安全，请务必在信任网络环境中使用，切勿在公共网络使用。",
     "status_connected": "已连接",
     "status_disconnected": "未连接",
+    "status_encrypted": "加密",
+    "status_plaintext": "明文",
     "menu_program": "程序",
     "menu_network": "网络",
     "menu_action": "偏好设置",

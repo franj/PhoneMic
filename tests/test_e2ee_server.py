@@ -191,6 +191,7 @@ class TestControlMessageNotEncrypted:
     """控制消息不应被加密，即使 E2EE 已启用。"""
 
     def test_send_to_phone_control_stays_plaintext(self, e2ee_server):
+        """e2ee_required 控制消息应保持明文，即使 E2EE 已启用。"""
         host, port, queue, mgr = e2ee_server
         mgr.enable()
 
@@ -198,11 +199,11 @@ class TestControlMessageNotEncrypted:
             assert_first_msg_connect(queue)
             ws.recv(timeout=2)
 
-            send_to_phone({"type": "e2ee_enabled"})
+            send_to_phone({"type": "e2ee_required", "message": "test"})
 
             msg = ws.recv(timeout=2)
             data = json.loads(msg)
-            assert data["type"] == "e2ee_enabled"
+            assert data["type"] == "e2ee_required"
             assert "data" not in data  # 不是加密信封
 
     def test_send_to_phone_data_gets_encrypted(self, e2ee_server):
