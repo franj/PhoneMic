@@ -21,6 +21,7 @@ from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server
+from phonemic.tunnel.e2ee import E2EEManager
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
@@ -157,6 +158,12 @@ def main():
     bridge = QueueEventBridge(multiprocessing.Queue()) if use_queue else QtEventBridge()
 
     start_server(selected_ip, actual_port, bridge)
+
+    # E2EE 管理器
+    e2ee_mgr = E2EEManager()
+    from phonemic.server.api import set_e2ee_manager
+    set_e2ee_manager(e2ee_mgr)
+
     if not wait_for_server(selected_ip, actual_port):
         QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.server_timeout", port=actual_port))
         sys.exit(1)
