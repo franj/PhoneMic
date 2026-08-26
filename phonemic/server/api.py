@@ -334,6 +334,10 @@ def _create_app() -> web.Application:
                                     "message": "请重新扫码以启用加密"
                                 })
                                 continue
+                        elif data.get("type") == "encrypted":
+                            # E2EE 已禁用但收到加密消息 → 客户端尚未同步，忽略
+                            logger.debug("Received encrypted message while E2EE disabled, ignoring")
+                            continue
 
                         msg_type = data.get("type")
                         text = data.get("text", "")
