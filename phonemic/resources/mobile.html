@@ -827,11 +827,15 @@ __I18N_JSON__
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
             try {
                 this.ws = new WebSocket(this.url);
-                this.ws.onopen = () => {
+                this.ws.onopen = async () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this._token) {
-                        this.ws.send(JSON.stringify({type: 'auth', method: 'token', token: this._token}));
+                        let msg = {type: 'auth', method: 'token', token: this._token};
+                        if (this.e2ee.shouldEncrypt()) {
+                            msg = await this.e2ee.encrypt(msg);
+                        }
+                        this.ws.send(JSON.stringify(msg));
                     }
                 };
                 this.ws.onmessage = async (event) => {
@@ -919,9 +923,13 @@ __I18N_JSON__
                 err.style.display = 'block';
             }
         }
-        sendPairingCode(code) {
+        async sendPairingCode(code) {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({type: 'auth', method: 'pairing_code', code: code}));
+                let msg = {type: 'auth', method: 'pairing_code', code: code};
+                if (this.e2ee.shouldEncrypt()) {
+                    msg = await this.e2ee.encrypt(msg);
+                }
+                this.ws.send(JSON.stringify(msg));
             }
         }
         async send(type, text) {
