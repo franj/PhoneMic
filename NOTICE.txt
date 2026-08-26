@@ -46,7 +46,7 @@
 
 11. pycryptodome
     许可证：Public Domain / BSD 2-Clause
-    主页：https://github.com/pycryptodome/pycryptodome
+    主页：https://github.com/Legrandin/pycryptodome/
     说明：用于 Cloudflare 隧道模式的端到端加密 (AES-256-GCM)
 
 12. Nuitka (仅打包使用，不包含在最终分发中)

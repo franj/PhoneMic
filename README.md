@@ -162,7 +162,7 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 - keyboard (MIT)
 - qrcode (BSD 3-Clause)
 - pyparsing (MIT)
-- pycryptodome (Public Domain / BSD 2-Clause) – [主页](https://github.com/pycryptodome/pycryptodome)
+- pycryptodome (Public Domain / BSD 2-Clause) – [主页](https://github.com/Legrandin/pycryptodome/)
 - cloudflared (Apache 2.0, 可选) – [主页](https://github.com/cloudflare/cloudflared)
 
 详细的版权和许可声明请参阅 [NOTICE.txt](NOTICE.txt) 文件。

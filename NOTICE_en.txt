@@ -45,7 +45,7 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
 
 11. pycryptodome
     License: Public Domain / BSD 2-Clause
-    Homepage: https://github.com/pycryptodome/pycryptodome
+    Homepage: https://github.com/Legrandin/pycryptodome/
     Note: Used for end-to-end encryption (AES-256-GCM) in Cloudflare tunnel mode
 
 12. Nuitka (used only for packaging, not included in final distribution)
