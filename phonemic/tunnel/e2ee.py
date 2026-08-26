@@ -11,10 +11,11 @@ import base64
 import json
 import os
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from Crypto.Cipher import AES
 
 _KEY_SIZE = 32  # AES-256
 _NONCE_SIZE = 12  # 96-bit nonce for GCM
+_TAG_SIZE = 16  # 128-bit GCM authentication tag
 
 
 class E2EEManager:
@@ -22,7 +23,6 @@ class E2EEManager:
 
     def __init__(self):
         self._key: bytes | None = None
-        self._aesgcm: AESGCM | None = None
         self._enabled = False
 
     @property
@@ -32,13 +32,11 @@ class E2EEManager:
     def enable(self) -> None:
         """生成新密钥并启用 E2EE"""
         self._key = os.urandom(_KEY_SIZE)
-        self._aesgcm = AESGCM(self._key)
         self._enabled = True
 
     def disable(self) -> None:
         """禁用 E2EE，清除密钥"""
         self._key = None
-        self._aesgcm = None
         self._enabled = False
 
     def get_key_b64(self) -> str:
@@ -59,14 +57,15 @@ class E2EEManager:
         """加密整个 JSON 消息，返回信封格式
 
         Returns:
-            {"type": "encrypted", "data": "<base64url(nonce + ciphertext)>"}
+            {"type": "encrypted", "data": "<base64url(nonce + ciphertext + tag)>"}
         """
         plaintext = json.dumps(message, ensure_ascii=False).encode("utf-8")
         nonce = os.urandom(_NONCE_SIZE)
-        ct = self._aesgcm.encrypt(nonce, plaintext, None)
+        cipher = AES.new(self._key, AES.MODE_GCM, nonce=nonce)
+        ct, tag = cipher.encrypt_and_digest(plaintext)
         return {
             "type": "encrypted",
-            "data": base64.urlsafe_b64encode(nonce + ct).decode().rstrip("="),
+            "data": base64.urlsafe_b64encode(nonce + ct + tag).decode().rstrip("="),
         }
 
     def unwrap(self, message: dict) -> dict:
@@ -86,8 +85,11 @@ class E2EEManager:
         if not data:
             raise ValueError("Encrypted message missing 'data' field")
         raw = base64.urlsafe_b64decode(data + "==")
-        nonce, ct = raw[:_NONCE_SIZE], raw[_NONCE_SIZE:]
-        plaintext = self._aesgcm.decrypt(nonce, ct, None).decode("utf-8")
+        nonce = raw[:_NONCE_SIZE]
+        ct = raw[_NONCE_SIZE:-_TAG_SIZE]
+        tag = raw[-_TAG_SIZE:]
+        cipher = AES.new(self._key, AES.MODE_GCM, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ct, tag).decode("utf-8")
         return json.loads(plaintext)
 
     def is_encrypted(self, message: dict) -> bool:
