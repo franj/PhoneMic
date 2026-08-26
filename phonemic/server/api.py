@@ -71,7 +71,8 @@ class ConnectionManager:
         try:
             await _send_json(ws, {
                 "type": "config",
-                "mobile_max_records": self.max_records
+                "mobile_max_records": self.max_records,
+                "e2ee_enabled": _e2ee_manager.enabled if _e2ee_manager else False,
             })
             logger.debug(f"Sent config to client: max_records={self.max_records}")
         except Exception as e:
@@ -117,7 +118,11 @@ def set_tunnel_auth(enabled: bool, pairing=None, tokens=None) -> None:
 _e2ee_manager: Optional[E2EEManager] = None
 
 # E2EE 控制消息，始终明文发送（不加密）
-_E2EE_CONTROL_TYPES = {"e2ee_enabled", "e2ee_disabled", "e2ee_required"}
+_E2EE_CONTROL_TYPES = {
+    "e2ee_enabled", "e2ee_disabled", "e2ee_required",
+    "auth_required", "auth_success", "auth_failed",
+    "config",
+}
 
 
 def set_e2ee_manager(mgr: E2EEManager) -> None:

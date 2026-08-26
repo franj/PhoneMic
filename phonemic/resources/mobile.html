@@ -713,6 +713,41 @@ __I18N_JSON__
     }
 
     // ========== 4. WebSocket 客户端 ==========
+    // ---- E2EE 辅助函数 (AES-256-GCM via Web Crypto API) ----
+    function base64urlDecode(str) {
+        str = str.replace(/-/g, '+').replace(/_/g, '/');
+        while (str.length % 4) str += '=';
+        const binary = atob(str);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return bytes;
+    }
+    function base64urlEncode(bytes) {
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+    async function importE2EEKey(b64url) {
+        const raw = base64urlDecode(b64url);
+        return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    }
+    async function e2eeEncrypt(key, message) {
+        const pt = new TextEncoder().encode(JSON.stringify(message));
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, key, pt);
+        const combined = new Uint8Array(nonce.length + ct.byteLength);
+        combined.set(nonce, 0);
+        combined.set(new Uint8Array(ct), nonce.length);
+        return { type: 'encrypted', data: base64urlEncode(combined) };
+    }
+    async function e2eeDecrypt(key, envelope) {
+        const raw = base64urlDecode(envelope.data);
+        const nonce = raw.slice(0, 12);
+        const ct = raw.slice(12);
+        const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: nonce}, key, ct);
+        return JSON.parse(new TextDecoder().decode(pt));
+    }
+
     class WSClient {
         constructor(url, configManager) {
             this.url = url;
@@ -724,6 +759,24 @@ __I18N_JSON__
             this.messageHandlers = new Map();
             this._token = null;
             try { this._token = localStorage.getItem('phonemic_token') || null; } catch(e) { this._token = null; }
+            // E2EE state
+            this._e2eeKey = null;
+            this._e2eeActive = false;
+            this._hasKey = false;
+            this._lastSentMessage = null;
+        }
+        async initE2EE() {
+            const hash = location.hash;
+            const match = hash.match(/[#&]k=([^&]+)/);
+            if (match) {
+                try {
+                    this._e2eeKey = await importE2EEKey(match[1]);
+                    this._hasKey = true;
+                    console.log('[E2EE] Key loaded from URL fragment');
+                } catch(e) {
+                    console.error('[E2EE] Failed to import key:', e);
+                }
+            }
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
         connect() {
@@ -738,9 +791,46 @@ __I18N_JSON__
                         this.ws.send(JSON.stringify({type: 'auth', method: 'token', token: this._token}));
                     }
                 };
-                this.ws.onmessage = (event) => {
+                this.ws.onmessage = async (event) => {
                     try {
-                        const data = JSON.parse(event.data);
+                        let data = JSON.parse(event.data);
+
+                        // 解密加密消息
+                        if (data.type === 'encrypted') {
+                            if (this._e2eeKey) {
+                                data = await e2eeDecrypt(this._e2eeKey, data);
+                            } else {
+                                this._showRescanPrompt();
+                                return;
+                            }
+                        }
+
+                        // E2EE 控制消息（始终明文）
+                        if (data.type === 'e2ee_enabled') {
+                            if (this._hasKey) {
+                                this._e2eeActive = true;
+                                console.log('[E2EE] Activated by server notification');
+                            } else {
+                                this._showRescanPrompt();
+                            }
+                            return;
+                        }
+                        if (data.type === 'e2ee_disabled') {
+                            this._e2eeActive = false;
+                            console.log('[E2EE] Deactivated by server notification');
+                            return;
+                        }
+                        if (data.type === 'e2ee_required') {
+                            if (this._hasKey) {
+                                this._e2eeActive = true;
+                                console.log('[E2EE] Required by server, resending encrypted');
+                                await this._resendLastMessage();
+                            } else {
+                                this._showRescanPrompt();
+                            }
+                            return;
+                        }
+
                         if (data.type === 'auth_required') {
                             if (!this._token) {
                                 this._showPairingUI();
@@ -762,6 +852,15 @@ __I18N_JSON__
                             if (!this.isConnected) {
                                 this.isConnected = true;
                                 this._notifyStatusChange(true);
+                            }
+                            // config 消息中包含 E2EE 状态
+                            if (data.type === 'config' && data.e2ee_enabled !== undefined) {
+                                if (data.e2ee_enabled && this._hasKey) {
+                                    this._e2eeActive = true;
+                                    console.log('[E2EE] Activated (from config)');
+                                } else if (!data.e2ee_enabled) {
+                                    this._e2eeActive = false;
+                                }
                             }
                             const handler = this.messageHandlers.get(data.type);
                             if (handler) handler(data);
@@ -814,10 +913,29 @@ __I18N_JSON__
                 this.ws.send(JSON.stringify({type: 'auth', method: 'pairing_code', code: code}));
             }
         }
-        send(type, text) {
+        async send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-            this.ws.send(JSON.stringify({ type, text }));
+            let msg = { type, text };
+            this._lastSentMessage = { type, text };
+            if (this._e2eeActive && this._e2eeKey) {
+                msg = await e2eeEncrypt(this._e2eeKey, msg);
+            }
+            this.ws.send(JSON.stringify(msg));
             return true;
+        }
+        async _resendLastMessage() {
+            if (!this._lastSentMessage || !this._e2eeKey || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            const msg = await e2eeEncrypt(this._e2eeKey, this._lastSentMessage);
+            this.ws.send(JSON.stringify(msg));
+        }
+        _showRescanPrompt() {
+            const statusBar = document.getElementById('status-bar');
+            if (statusBar) {
+                statusBar.style.display = 'block';
+                statusBar.style.background = '#fff3cd';
+                statusBar.style.color = '#856404';
+                statusBar.innerText = '服务端已启用加密，请重新扫码以获取密钥';
+            }
         }
         getConnected() { return this.isConnected; }
     }
@@ -1064,7 +1182,7 @@ __I18N_JSON__
     }
 
     // ========== 7. 主程序入口 ==========
-    window.onload = () => {
+    window.onload = async () => {
         const chatContainer = document.getElementById('chat-list');
         const inputBox = document.getElementById('input-box');
         const btnSend = document.getElementById('btn-send');
@@ -1077,9 +1195,9 @@ __I18N_JSON__
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsClient = new WSClient(`${wsProto}//${location.host}/ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
-        
+
         new MessageInteractionManager(chatContainer, uiController, wsClient);
-        
+
         wsClient.on('config', (data) => {
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
@@ -1106,6 +1224,9 @@ __I18N_JSON__
         pairingInput.addEventListener('input', () => {
             pairingInput.value = pairingInput.value.replace(/[^0-9]/g, '');
         });
+
+        // 从 URL fragment 提取 E2EE 密钥（不经过网络）
+        await wsClient.initE2EE();
 
         wsClient.connect();
         uiController.onConnectionChange(false);
