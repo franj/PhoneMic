@@ -260,11 +260,17 @@ class Dashboard(QMainWindow):
         self.ip_label.setText(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
-        """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
+        """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
+
+        收到有效 URL 意味着隧道已建立，自动结束切换状态。
+        """
         self._tunnel_url = url
         if self._mode == TunnelMode.CLOUDFLARE:
             if url:
-                self._refresh_qr()
+                if self._switching:
+                    self.on_switch_completed()
+                else:
+                    self._refresh_qr()
             else:
                 self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
