@@ -135,7 +135,7 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        ip_label = QLabel(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
+        ip_label = QLabel(f"http://{ip}:{port}")
         ip_label.setAlignment(Qt.AlignCenter)
         ip_label.setWordWrap(True)
         ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -257,10 +257,7 @@ class Dashboard(QMainWindow):
             return
         url = self._get_qr_url()
         self.qr_label.setPixmap(make_qr_pixmap(url))
-        if self._mode == TunnelMode.CLOUDFLARE and self._tunnel_url:
-            self.ip_label.setText(self._tunnel_url)
-        else:
-            self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {self._lan_ip}:{self._lan_port}")
+        self.ip_label.setText(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。"""
@@ -355,7 +352,7 @@ class Dashboard(QMainWindow):
         self.qr_label.setPixmap(pixmap)
 
         # 更新 IP 标签
-        self.ip_label.setText(self.i18n.tr("dashboard.ip_label") + f": {ip}:{port}")
+        self.ip_label.setText(f"http://{ip}:{port}")
 
     def show_about(self):
         version, commit, _ = get_build_info()
