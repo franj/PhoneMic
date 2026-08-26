@@ -51,6 +51,8 @@ class E2EEManager:
         """在 URL 后追加 #k=<key> fragment"""
         if not self._enabled:
             return url
+        if not url.endswith("/"):
+            url += "/"
         return f"{url}#k={self.get_key_b64()}"
 
     def wrap(self, message: dict) -> dict:

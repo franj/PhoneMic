@@ -53,7 +53,7 @@ class TestE2EEUrl:
         mgr.enable()
         url = "http://192.168.1.100:12000"
         result = mgr.append_to_url(url)
-        assert result.startswith(url + "#k=")
+        assert result.startswith(url + "/#k=")
         assert len(mgr.get_key_b64()) > 0
 
     def test_append_to_url_when_disabled(self):
@@ -67,7 +67,7 @@ class TestE2EEUrl:
         mgr.enable()
         url = "https://abc-def.trycloudflare.com"
         result = mgr.append_to_url(url)
-        assert result.startswith(url + "#k=")
+        assert result.startswith(url + "/#k=")
 
 
 class TestE2EEEncryptDecrypt:

@@ -2,7 +2,6 @@
   "name": "English",
   "dashboard": {
     "title": "PhoneMic - Main Window",
-    "ip_label": "Service address",
     "info": "Phone and computer must be on the same Wi-Fi.\nScan QR code or enter address to connect.\nOnly use in trusted networks.",
     "status_connected": "Connected",
     "status_disconnected": "Disconnected",
