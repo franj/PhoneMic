@@ -713,39 +713,100 @@ __I18N_JSON__
     }
 
     // ========== 4. WebSocket 客户端 ==========
-    // ---- E2EE 辅助函数 (AES-256-GCM via Web Crypto API) ----
-    function base64urlDecode(str) {
-        str = str.replace(/-/g, '+').replace(/_/g, '/');
-        while (str.length % 4) str += '=';
-        const binary = atob(str);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return bytes;
-    }
-    function base64urlEncode(bytes) {
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    }
-    async function importE2EEKey(b64url) {
-        const raw = base64urlDecode(b64url);
-        return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
-    }
-    async function e2eeEncrypt(key, message) {
-        const pt = new TextEncoder().encode(JSON.stringify(message));
-        const nonce = crypto.getRandomValues(new Uint8Array(12));
-        const ct = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, key, pt);
-        const combined = new Uint8Array(nonce.length + ct.byteLength);
-        combined.set(nonce, 0);
-        combined.set(new Uint8Array(ct), nonce.length);
-        return { type: 'encrypted', data: base64urlEncode(combined) };
-    }
-    async function e2eeDecrypt(key, envelope) {
-        const raw = base64urlDecode(envelope.data);
-        const nonce = raw.slice(0, 12);
-        const ct = raw.slice(12);
-        const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: nonce}, key, ct);
-        return JSON.parse(new TextDecoder().decode(pt));
+    // ---- E2EE 客户端：封装所有加解密逻辑，与 WSClient 解耦 ----
+    class E2EEClient {
+        constructor() {
+            this._key = null;       // CryptoKey
+            this._active = false;   // 是否正在加密
+            this._hasKey = false;   // 是否有密钥
+            this._lastMsg = null;   // 上一条消息（用于 e2ee_required 重发）
+        }
+        get hasKey() { return this._hasKey; }
+        get active() { return this._active; }
+        /** 从 URL fragment (#k=...) 提取密钥 */
+        async initFromUrl() {
+            const match = location.hash.match(/[#&]k=([^&]+)/);
+            if (!match) return;
+            try {
+                this._key = await E2EEClient._importKey(match[1]);
+                this._hasKey = true;
+                this._active = true;
+                console.log('[E2EE] Key loaded from URL');
+            } catch(e) {
+                console.error('[E2EE] Key import failed:', e);
+            }
+        }
+        shouldEncrypt() { return this._active && this._key; }
+        isEncrypted(data) { return data.type === 'encrypted'; }
+        async encrypt(msg) {
+            this._lastMsg = { ...msg };
+            return E2EEClient._encryptData(this._key, msg);
+        }
+        async decrypt(envelope) {
+            return E2EEClient._decryptData(this._key, envelope);
+        }
+        /** 处理 E2EE 控制消息，返回 true 表示已处理 */
+        async handleControl(data, ws) {
+            if (data.type === 'e2ee_required') {
+                if (this._hasKey) {
+                    this._active = true;
+                    console.log('[E2EE] Required by server, resending');
+                    await this._resendLast(ws);
+                } else {
+                    E2EEClient._showRescanPrompt();
+                }
+                return true;
+            }
+            return false;
+        }
+        async _resendLast(ws) {
+            if (!this._lastMsg || !this._key) return;
+            const encrypted = await E2EEClient._encryptData(this._key, this._lastMsg);
+            ws.send(JSON.stringify(encrypted));
+        }
+        // ---- 底层加解密 (AES-256-GCM via Web Crypto API) ----
+        static _b64urlDecode(str) {
+            str = str.replace(/-/g, '+').replace(/_/g, '/');
+            while (str.length % 4) str += '=';
+            const bin = atob(str);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return bytes;
+        }
+        static _b64urlEncode(bytes) {
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        }
+        static async _importKey(b64url) {
+            const raw = E2EEClient._b64urlDecode(b64url);
+            return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+        }
+        static async _encryptData(key, msg) {
+            const pt = new TextEncoder().encode(JSON.stringify(msg));
+            const nonce = crypto.getRandomValues(new Uint8Array(12));
+            const ct = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, key, pt);
+            const combined = new Uint8Array(nonce.length + ct.byteLength);
+            combined.set(nonce, 0);
+            combined.set(new Uint8Array(ct), nonce.length);
+            return { type: 'encrypted', data: E2EEClient._b64urlEncode(combined) };
+        }
+        static async _decryptData(key, envelope) {
+            const raw = E2EEClient._b64urlDecode(envelope.data);
+            const nonce = raw.slice(0, 12);
+            const ct = raw.slice(12);
+            const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: nonce}, key, ct);
+            return JSON.parse(new TextDecoder().decode(pt));
+        }
+        static _showRescanPrompt() {
+            const sb = document.getElementById('status-bar');
+            if (sb) {
+                sb.style.display = 'block';
+                sb.style.background = '#fff3cd';
+                sb.style.color = '#856404';
+                sb.innerText = '服务端已启用加密，请重新扫码以获取密钥';
+            }
+        }
     }
 
     class WSClient {
@@ -759,24 +820,7 @@ __I18N_JSON__
             this.messageHandlers = new Map();
             this._token = null;
             try { this._token = localStorage.getItem('phonemic_token') || null; } catch(e) { this._token = null; }
-            // E2EE state
-            this._e2eeKey = null;
-            this._e2eeActive = false;
-            this._hasKey = false;
-            this._lastSentMessage = null;
-        }
-        async initE2EE() {
-            const hash = location.hash;
-            const match = hash.match(/[#&]k=([^&]+)/);
-            if (match) {
-                try {
-                    this._e2eeKey = await importE2EEKey(match[1]);
-                    this._hasKey = true;
-                    console.log('[E2EE] Key loaded from URL fragment');
-                } catch(e) {
-                    console.error('[E2EE] Failed to import key:', e);
-                }
-            }
+            this.e2ee = new E2EEClient();
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
         connect() {
@@ -786,7 +830,6 @@ __I18N_JSON__
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    // 有令牌则立即发送，否则等待 auth_required
                     if (this._token) {
                         this.ws.send(JSON.stringify({type: 'auth', method: 'token', token: this._token}));
                     }
@@ -795,42 +838,20 @@ __I18N_JSON__
                     try {
                         let data = JSON.parse(event.data);
 
-                        // 解密加密消息
-                        if (data.type === 'encrypted') {
-                            if (this._e2eeKey) {
-                                data = await e2eeDecrypt(this._e2eeKey, data);
+                        // Step 1: 解密加密消息
+                        if (this.e2ee.isEncrypted(data)) {
+                            if (this.e2ee.hasKey) {
+                                data = await this.e2ee.decrypt(data);
                             } else {
-                                this._showRescanPrompt();
+                                E2EEClient._showRescanPrompt();
                                 return;
                             }
                         }
 
-                        // E2EE 控制消息（始终明文）
-                        if (data.type === 'e2ee_enabled') {
-                            if (this._hasKey) {
-                                this._e2eeActive = true;
-                                console.log('[E2EE] Activated by server notification');
-                            } else {
-                                this._showRescanPrompt();
-                            }
-                            return;
-                        }
-                        if (data.type === 'e2ee_disabled') {
-                            this._e2eeActive = false;
-                            console.log('[E2EE] Deactivated by server notification');
-                            return;
-                        }
-                        if (data.type === 'e2ee_required') {
-                            if (this._hasKey) {
-                                this._e2eeActive = true;
-                                console.log('[E2EE] Required by server, resending encrypted');
-                                await this._resendLastMessage();
-                            } else {
-                                this._showRescanPrompt();
-                            }
-                            return;
-                        }
+                        // Step 2: 处理 E2EE 控制消息
+                        if (await this.e2ee.handleControl(data, this.ws)) return;
 
+                        // Step 3: 正常流程（认证、config、preview/send 等）
                         if (data.type === 'auth_required') {
                             if (!this._token) {
                                 this._showPairingUI();
@@ -848,19 +869,9 @@ __I18N_JSON__
                             this._token = null;
                             try { localStorage.removeItem('phonemic_token'); } catch(e) {}
                         } else {
-                            // 非认证消息：LAN 模式下自动建立连接
                             if (!this.isConnected) {
                                 this.isConnected = true;
                                 this._notifyStatusChange(true);
-                            }
-                            // config 消息中包含 E2EE 状态
-                            if (data.type === 'config' && data.e2ee_enabled !== undefined) {
-                                if (data.e2ee_enabled && this._hasKey) {
-                                    this._e2eeActive = true;
-                                    console.log('[E2EE] Activated (from config)');
-                                } else if (!data.e2ee_enabled) {
-                                    this._e2eeActive = false;
-                                }
                             }
                             const handler = this.messageHandlers.get(data.type);
                             if (handler) handler(data);
@@ -916,26 +927,11 @@ __I18N_JSON__
         async send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
             let msg = { type, text };
-            this._lastSentMessage = { type, text };
-            if (this._e2eeActive && this._e2eeKey) {
-                msg = await e2eeEncrypt(this._e2eeKey, msg);
+            if (this.e2ee.shouldEncrypt()) {
+                msg = await this.e2ee.encrypt(msg);
             }
             this.ws.send(JSON.stringify(msg));
             return true;
-        }
-        async _resendLastMessage() {
-            if (!this._lastSentMessage || !this._e2eeKey || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-            const msg = await e2eeEncrypt(this._e2eeKey, this._lastSentMessage);
-            this.ws.send(JSON.stringify(msg));
-        }
-        _showRescanPrompt() {
-            const statusBar = document.getElementById('status-bar');
-            if (statusBar) {
-                statusBar.style.display = 'block';
-                statusBar.style.background = '#fff3cd';
-                statusBar.style.color = '#856404';
-                statusBar.innerText = '服务端已启用加密，请重新扫码以获取密钥';
-            }
         }
         getConnected() { return this.isConnected; }
     }
@@ -1226,7 +1222,7 @@ __I18N_JSON__
         });
 
         // 从 URL fragment 提取 E2EE 密钥（不经过网络）
-        await wsClient.initE2EE();
+        await wsClient.e2ee.initFromUrl();
 
         wsClient.connect();
         uiController.onConnectionChange(false);
