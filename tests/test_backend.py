@@ -726,3 +726,82 @@ def test_restart_server_preserves_bridge():
     stop_server()
     set_secure_channel(None)
     time.sleep(0.3)
+
+
+# ---------- 并发连接：认证后才抢占 ----------
+class TestConnectionPreemption:
+    """新连接必须先通过握手才能抢占活动连接。
+
+    握手中的连接不得改变活动连接的加密状态，否则攻击者可用一次
+    未认证的连接把通信降级为明文。
+    """
+
+    def _assert_still_encrypted(self, ws, phone, value):
+        """推送配置并断言活动连接收到的仍是加密信封。"""
+        assert push_config("mobile_max_records", value) is True
+        data = json.loads(ws.recv(timeout=2))
+        assert data["type"] == "data", f"活动连接被降级为明文: {data}"
+        assert phone.decrypt(data)["mobile_max_records"] == value
+
+    def test_silent_connection_does_not_downgrade_active(self, secure_server):
+        """新连接建连后不发 auth，活动连接保持加密。"""
+        host, port, queue, sc = secure_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            authenticate_and_verify(ws, phone)
+            consume_connect(queue)
+            consume_initial_config(ws, phone)
+
+            with ws_connect(f"ws://{host}:{port}/ws"):
+                self._assert_still_encrypted(ws, phone, 42)
+
+            time.sleep(0.3)
+            self._assert_still_encrypted(ws, phone, 7)
+
+    def test_rejected_auth_does_not_downgrade_active(self, secure_server):
+        """新连接认证失败，活动连接保持加密且不被抢占。"""
+        host, port, queue, sc = secure_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            authenticate_and_verify(ws, phone)
+            consume_connect(queue)
+            consume_initial_config(ws, phone)
+
+            with ws_connect(f"ws://{host}:{port}/ws") as intruder:
+                bogus = {"type": "auth", "algo": "xsalsa20", "data": "bogus"}
+                intruder.send(json.dumps(bogus))
+                ack = json.loads(intruder.recv(timeout=2))
+                assert ack.get("rejected") is True
+
+            time.sleep(0.3)
+            self._assert_still_encrypted(ws, phone, 13)
+
+    def test_authenticated_connection_replaces_active(self, secure_server):
+        """认证成功的新连接正常抢占，旧连接被关闭。"""
+        host, port, queue, sc = secure_server
+        phone_a = PhoneSimulator(sc.get_public_key_b64())
+
+        with ws_connect(f"ws://{host}:{port}/ws") as ws_a:
+            authenticate_and_verify(ws_a, phone_a)
+            consume_connect(queue)
+            consume_initial_config(ws_a, phone_a)
+
+            phone_b = PhoneSimulator(sc.get_public_key_b64())
+            with ws_connect(f"ws://{host}:{port}/ws") as ws_b:
+                authenticate_and_verify(ws_b, phone_b)
+
+                # 旧连接被抢占，先收到 disconnect 再收到新连接的 connect
+                msg_type, _ = queue.get(timeout=2)
+                assert msg_type == "disconnect"
+                consume_connect(queue)
+                consume_initial_config(ws_b, phone_b)
+
+                assert push_config("mobile_max_records", 99) is True
+                data = json.loads(ws_b.recv(timeout=2))
+                assert data["type"] == "data"
+                assert phone_b.decrypt(data)["mobile_max_records"] == 99
+
+            with pytest.raises(Exception):
+                ws_a.recv(timeout=2)

@@ -38,6 +38,7 @@ class ConnectionManager:
 
     def __init__(self, bridge: EventBridge):
         self.active_websocket = None
+        self.active_session = None
         self.bridge = bridge
 
         # 配置热重载支持
@@ -50,14 +51,21 @@ class ConnectionManager:
         logger.info(f"Mobile max records updated to {new_value}")
         push_config("mobile_max_records", self.max_records)
 
-    async def connect(self, ws: web.WebSocketResponse) -> None:
+    async def connect(self, ws: web.WebSocketResponse, session) -> None:
         """
         注册新的 WebSocket 连接。
-        如果已有连接，先关闭旧连接（保证同时只有一个手机连接）。
+
+        只应在该连接握手成功后调用：已认证的新连接才会抢占当前活动连接，
+        握手中或认证失败的连接不会踢掉旧连接，避免把活动连接降级为明文。
+
+        Args:
+            ws: 已通过握手的 WebSocket 连接
+            session: 该连接对应的 SecureSession，用于后续消息加解密
         """
         if self.active_websocket is not None:
             old_ws = self.active_websocket
             self.active_websocket = None
+            self.active_session = None
             try:
                 await old_ws.close(code=1000)
                 self.bridge.emit("disconnect")
@@ -66,6 +74,7 @@ class ConnectionManager:
                 logger.warning(f"Error closing old connection: {e}")
 
         self.active_websocket = ws
+        self.active_session = session
         self.bridge.emit("connect")
         logger.info("WebSocket connected, connection established")
 
@@ -79,6 +88,12 @@ class ConnectionManager:
         except Exception as e:
             logger.warning(f"Failed to send initial config: {e}")
 
+    def session_for(self, ws: web.WebSocketResponse):
+        """返回该连接对应的 SecureSession，非活动连接返回 None。"""
+        if self.active_websocket is ws:
+            return self.active_session
+        return None
+
     def disconnect(self, ws: web.WebSocketResponse) -> None:
         """
         清理连接状态，并通知主进程断开事件。
@@ -86,6 +101,7 @@ class ConnectionManager:
         """
         if self.active_websocket is ws:
             self.active_websocket = None
+            self.active_session = None
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -111,9 +127,14 @@ def set_secure_channel(sc: SecureChannel) -> None:
 
 
 async def _send_json(ws: web.WebSocketResponse, message: dict) -> None:
-    """发送 JSON 消息，认证后自动加密。"""
-    if _secure_channel and _secure_channel.is_authenticated:
-        message = _secure_channel.wrap(message)
+    """发送 JSON 消息，按该连接自身的会话状态决定是否加密。
+
+    加解密上下文取自连接自己的 SecureSession，而非共享对象，
+    因此处于握手中的新连接不会改变活动连接的加密状态。
+    """
+    session = _manager.session_for(ws) if _manager else None
+    if session is not None and session.is_authenticated:
+        message = session.wrap(message)
     await ws.send_str(json.dumps(message, ensure_ascii=False))
 
 
@@ -253,11 +274,11 @@ def _create_app() -> web.Application:
             await ws.close(code=1011, message=b"Server not ready")
             return ws
 
-        # 每个新连接重置安全通道状态
-        _secure_channel.on_new_connection()
+        # 该连接独立的握手上下文，与活动连接互不干扰
+        session = _secure_channel.new_session()
 
         # ---- S0: 等待 auth（仅在 needs_auth 时）----
-        if _secure_channel.needs_auth:
+        if session.needs_auth:
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
             except asyncio.TimeoutError:
@@ -285,21 +306,21 @@ def _create_app() -> web.Application:
                 await ws.close()
                 return ws
 
-            # 尝试认证
-            if not _secure_channel.receive_auth(data):
-                logger.warning(f"Auth failed: {_secure_channel.reject_reason}, closing")
-                ack = _secure_channel.make_auth_ack()
+            # 尝试认证；失败时不注册连接，活动连接保持原状
+            if not session.receive_auth(data):
+                logger.warning(f"Auth failed: {session.reject_reason}, closing")
+                ack = session.make_auth_ack()
                 await ws.send_str(json.dumps(ack, ensure_ascii=False))
                 await ws.close()
                 return ws
 
             # 握手成功：发送 auth_ack
-            ack = _secure_channel.make_auth_ack()
+            ack = session.make_auth_ack()
             await ws.send_str(json.dumps(ack, ensure_ascii=False))
             logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
 
-        # ---- S1: 注册连接 + 发送配置 ----
-        await _manager.connect(ws)
+        # ---- S1: 注册连接（认证后才抢占旧连接）+ 发送配置 ----
+        await _manager.connect(ws, session)
 
         # ---- S1: 处理后续消息 ----
         try:
@@ -314,14 +335,14 @@ def _create_app() -> web.Application:
                             await ws.close()
                             break
 
-                        if _secure_channel.is_encrypted:
+                        if session.is_encrypted:
                             # 加密模式：仅接受 data 信封
                             if data.get("type") != "data":
                                 logger.warning(f"Expected data, got: {data.get('type')}, closing")
                                 await ws.close()
                                 break
 
-                            inner = _secure_channel.unwrap(data)
+                            inner = session.unwrap(data)
                             if inner is None:
                                 logger.warning("Decryption failed, closing")
                                 await ws.close()

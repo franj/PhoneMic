@@ -145,8 +145,9 @@ def _process_auth(page, channel):
 def secure_pair(page, request):
     """参数化 fixture：Python SecureChannel + JS SecureClient（已认证）。"""
     algo = request.param
-    channel = SecureChannel(algorithm=algo)
-    html = _prepare_html(channel, algo)
+    pc = SecureChannel(algorithm=algo)
+    channel = pc.new_session()
+    html = _prepare_html(pc, algo)
     page.set_content(html)
     _process_auth(page, channel)
     yield page, channel, algo
@@ -321,8 +322,9 @@ class TestRoundtrip:
 class TestAlgorithmRejection:
     def test_none_rejected(self, page):
         """none 算法被 PC 端拒绝，JS 断开连接。"""
-        channel = SecureChannel(algorithm="xsalsa20")
-        html = _prepare_html(channel, "xsalsa20", force_none_algo=True)
+        pc = SecureChannel(algorithm="xsalsa20")
+        channel = pc.new_session()
+        html = _prepare_html(pc, "xsalsa20", force_none_algo=True)
         page.set_content(html)
 
         auth_msg = _wait_auth(page)
@@ -363,8 +365,9 @@ class TestDisconnect:
 @pytest.fixture
 def none_lan_pair(page):
     """none+LAN 模式：无认证，明文 JSON。"""
-    channel = SecureChannel(algorithm="none", mode="lan")
-    html = _prepare_html(channel, "none")
+    pc = SecureChannel(algorithm="none", mode="lan")
+    channel = pc.new_session()
+    html = _prepare_html(pc, "none")
     page.set_content(html)
     page.wait_for_function("() => window.__wsClient && window.__wsClient.isConnected")
     yield page, channel
@@ -449,17 +452,18 @@ class TestNoneLAN:
 @pytest.fixture
 def none_cf_pair(page):
     """none+Cloudflare 模式：token 认证，明文 JSON。"""
-    channel = SecureChannel(algorithm="none", mode="cloudflare")
-    html = _prepare_html(channel, "none")
+    pc = SecureChannel(algorithm="none", mode="cloudflare")
+    channel = pc.new_session()
+    html = _prepare_html(pc, "none")
     page.set_content(html)
     _process_auth(page, channel)
-    yield page, channel
+    yield page, channel, pc
 
 
 class TestNoneCloudflare:
     def test_token_auth_success(self, none_cf_pair):
         """none+CF: token 认证成功。"""
-        page, channel = none_cf_pair
+        page, channel, pc = none_cf_pair
         assert channel.needs_auth
         assert not channel.is_encrypted
         assert channel.is_authenticated
@@ -467,17 +471,17 @@ class TestNoneCloudflare:
 
     def test_auth_uses_token(self, none_cf_pair):
         """none+CF: auth 消息包含 token。"""
-        page, channel = none_cf_pair
+        page, channel, pc = none_cf_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
         assert auth_msg["algo"] == "none"
-        token = channel.get_public_key_b64()
+        token = pc.get_public_key_b64()
         assert auth_msg["data"] == token
 
     def test_send_plaintext_after_auth(self, none_cf_pair):
         """none+CF: 认证后明文消息（JS → Python）。"""
-        page, channel = none_cf_pair
+        page, channel, pc = none_cf_pair
         page.locator("#mode-toggle").click()
         page.locator("#input-box").fill("cf plaintext")
         page.locator("#btn-send").click()
@@ -492,7 +496,7 @@ class TestNoneCloudflare:
 
     def test_receive_plaintext_config(self, none_cf_pair):
         """none+CF: Python → JS 明文 config。"""
-        page, channel = none_cf_pair
+        page, channel, pc = none_cf_pair
         msg = channel.wrap({"type": "config", "mobile_max_records": 8})
         page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
         page.wait_for_timeout(50)
@@ -500,7 +504,7 @@ class TestNoneCloudflare:
 
     def test_bidirectional_plaintext(self, none_cf_pair):
         """none+CF: 双向明文通信。"""
-        page, channel = none_cf_pair
+        page, channel, pc = none_cf_pair
 
         # Python → JS
         msg = channel.wrap({"type": "config", "mobile_max_records": 15})
@@ -522,8 +526,9 @@ class TestNoneCloudflare:
 class TestNoneCloudflareRejection:
     def test_wrong_token_rejected(self, page):
         """none+CF: 错误 token 被拒绝。"""
-        channel = SecureChannel(algorithm="none", mode="cloudflare")
-        html = _prepare_html(channel, "none", force_none_algo=True)
+        pc = SecureChannel(algorithm="none", mode="cloudflare")
+        channel = pc.new_session()
+        html = _prepare_html(pc, "none", force_none_algo=True)
         page.set_content(html)
 
         auth_msg = _wait_auth(page)
