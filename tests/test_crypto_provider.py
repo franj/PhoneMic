@@ -6,6 +6,7 @@
 
 import base64
 import json
+from hashlib import blake2b
 
 import pytest
 from nacl.bindings import crypto_scalarmult
@@ -197,9 +198,9 @@ class TestXChaCha20Provider:
         ack_b64 = pc.make_auth_ack_data()
         assert ack_b64 is not None
 
-        # 手机端：ECDH 得到共享密钥，用 Aead 解密
+        # 手机端：ECDH + BLAKE2b KDF 得到会话密钥，用 Aead 解密
         shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(shared)
+        aead = Aead(blake2b(shared, digest_size=32).digest())
         raw = _from_b64(ack_b64)
         pt = aead.decrypt(raw)
         ack_msg = json.loads(pt)
@@ -221,9 +222,9 @@ class TestXChaCha20Provider:
         plaintext = b'{"type":"preview","text":"hello"}'
         encrypted = pc.encrypt(plaintext)
 
-        # 手机端解密
+        # 手机端解密（ECDH + BLAKE2b KDF）
         shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(shared)
+        aead = Aead(blake2b(shared, digest_size=32).digest())
         decrypted = aead.decrypt(encrypted)
         assert decrypted == plaintext
 
@@ -238,9 +239,9 @@ class TestXChaCha20Provider:
         sb = SealedBox(pc_pub)
         pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
 
-        # 手机端加密
+        # 手机端加密（ECDH + BLAKE2b KDF）
         shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(shared)
+        aead = Aead(blake2b(shared, digest_size=32).digest())
         plaintext = b'{"type":"send","text":"world"}'
         encrypted = bytes(aead.encrypt(plaintext))
 

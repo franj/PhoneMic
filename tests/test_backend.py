@@ -59,6 +59,7 @@ class PhoneSimulator:
         self._phone_private = PrivateKey.generate()
         self._phone_public = self._phone_private.public_key
         self._box = Box(self._phone_private, self._pc_public)
+        self._seq = 0
 
     def make_auth(self, algo: str = "xsalsa20") -> dict:
         sb = SealedBox(self._pc_public)
@@ -70,7 +71,11 @@ class PhoneSimulator:
         }
 
     def encrypt(self, msg: dict) -> dict:
-        pt = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+        # 与手机端 JS 一致：明文中注入递增 seq 供服务端防重放
+        payload = dict(msg)
+        payload["seq"] = self._seq
+        self._seq += 1
+        pt = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         nonce = random_bytes(Box.NONCE_SIZE)
         encrypted = self._box.encrypt(pt, nonce)
         return {

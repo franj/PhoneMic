@@ -27,9 +27,11 @@
   消息:
     none:  明文 JSON { type:"send", text:"..." }
     加密:  { type:"data", data:"<b64(nonce+ciphertext)>" }
+           明文中携带递增 seq 字段，接收方校验单调递增以防重放
 """
 
 import base64
+import hmac
 import json
 import os
 import time
@@ -56,6 +58,9 @@ class SecureSession:
         self._connected_at = time.monotonic()
         self._rejected = False
         self._reject_reason = ""
+        # 防重放：每方向独立递增的序列号，初始 -1 表示尚未收到任何消息
+        self._send_seq = 0
+        self._recv_seq = -1
 
     # ---- 属性 ----
 
@@ -105,7 +110,10 @@ class SecureSession:
             return False
 
         if algorithm == "none":
-            if auth_msg.get("data") == self._channel.token:
+            received = auth_msg.get("data") or ""
+            expected = self._channel.token or ""
+            # 常数时间比较，避免逐字节短路造成的时序侧信道
+            if hmac.compare_digest(received.encode("utf-8"), expected.encode("utf-8")):
                 self._authenticated = True
                 return True
             self._rejected = True
@@ -145,10 +153,16 @@ class SecureSession:
     # ---- 数据加解密 ----
 
     def wrap(self, message: dict) -> dict:
-        """加密并包装消息。none 模式直接返回明文 JSON。"""
+        """加密并包装消息。none 模式直接返回明文 JSON。
+
+        加密模式在明文中注入递增 seq，供对端做防重放校验。
+        """
         if not self.is_encrypted:
             return message
-        plaintext = json.dumps(message, ensure_ascii=False).encode("utf-8")
+        payload = dict(message)
+        payload["seq"] = self._send_seq
+        self._send_seq += 1
+        plaintext = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         encrypted = self._provider.encrypt(plaintext)
         return {
             "type": "data",
@@ -156,13 +170,23 @@ class SecureSession:
         }
 
     def unwrap(self, envelope: dict) -> Optional[dict]:
-        """解密消息。none 模式直接返回明文 JSON。"""
+        """解密消息。none 模式直接返回明文 JSON。
+
+        加密模式下校验明文中的 seq：必须严格递增，
+        重放或乱序的消息返回 None（视为解密失败）。
+        seq 是传输层字段，返回前从消息中剥离。
+        """
         if not self.is_encrypted:
             return envelope
         try:
             raw = base64.urlsafe_b64decode(envelope["data"] + "==")
             plaintext = self._provider.decrypt(raw)
-            return json.loads(plaintext)
+            inner = json.loads(plaintext)
+            seq = inner.pop("seq", None)
+            if not isinstance(seq, int) or seq <= self._recv_seq:
+                return None
+            self._recv_seq = seq
+            return inner
         except Exception:
             return None
 

@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>📱🎙️PhoneMic💬💻</title>
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <script src="sodium.js"></script>
-    <script src="crypto_providers.js"></script>
+    <script src="sodium.js" defer></script>
+    <script src="crypto_providers.js" defer></script>
     <style>
         /* ========== 基础样式 ========== */
         :root {
@@ -714,6 +714,9 @@ __I18N_JSON__
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
+            // 防重放：每方向独立递增的序列号
+            this._sendSeq = 0;
+            this._recvSeq = -1;
         }
         get needsAuth() { return this._pcPublicKeyB64 !== null; }
         get isEncrypted() { return this._selectedAlgo !== 'none'; }
@@ -773,6 +776,8 @@ __I18N_JSON__
                 const raw = this._fromB64(ackMsg.data);
                 if (this._provider.handleAuthAck(raw)) {
                     this._authenticated = true;
+                    this._sendSeq = 0;
+                    this._recvSeq = -1;
                     console.log('[SEC] Authenticated by server');
                     return true;
                 }
@@ -786,7 +791,8 @@ __I18N_JSON__
 
         encrypt(msg) {
             if (!this.isEncrypted) return msg;
-            const pt = sodium.from_string(JSON.stringify(msg));
+            const payload = Object.assign({}, msg, { seq: this._sendSeq++ });
+            const pt = sodium.from_string(JSON.stringify(payload));
             const encrypted = this._provider.encrypt(pt);
             return { type: 'data', data: this._toB64(encrypted) };
         }
@@ -795,7 +801,13 @@ __I18N_JSON__
             if (!this.isEncrypted) return envelope;
             const raw = this._fromB64(envelope.data);
             const pt = this._provider.decrypt(raw);
-            return JSON.parse(sodium.to_string(pt));
+            const inner = JSON.parse(sodium.to_string(pt));
+            // 防重放：seq 必须严格递增，重放/乱序直接抛错由调用方处理
+            if (typeof inner.seq !== 'number' || inner.seq <= this._recvSeq) {
+                throw new Error('[SEC] replay detected');
+            }
+            this._recvSeq = inner.seq;
+            return inner;
         }
     }
 

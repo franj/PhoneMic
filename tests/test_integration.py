@@ -87,8 +87,8 @@ def _prepare_html(channel, algo, force_none_algo=False):
     html = (RES_DIR / "mobile.html").read_text(encoding="utf-8")
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
-    html = html.replace('<script src="sodium.js"></script>', f"<script>{sodium_js}</script>")
-    html = html.replace('<script src="crypto_providers.js"></script>', f"<script>{crypto_js}</script>")
+    html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
+    html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
     html = html.replace("__I18N_JSON__", "")
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
 

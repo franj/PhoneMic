@@ -49,7 +49,7 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
     Note: Used for end-to-end encryption (NaCl crypto_box: X25519 + XSalsa20-Poly1305).
           PC-side key generation, sealed box decryption, message encryption/decryption.
 
-11b. libsodium.js
+11. libsodium.js
     License: ISC
     Homepage: https://github.com/jedisct1/libsodium.js/
     Note: Mobile-side crypto library (WASM binding of libsodium), used for key

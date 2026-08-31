@@ -201,6 +201,39 @@ class TestSecureChannelEncryptDecrypt:
         with pytest.raises(AttributeError):
             session.wrap({"type": "preview", "text": "test"})
 
+    def test_replay_envelope_rejected(self):
+        """同一信封重放：seq 未递增，返回 None。"""
+        sc, _ = self._setup_authenticated()
+        envelope = sc.wrap({"type": "preview", "text": "hello"})
+        assert sc.unwrap(envelope) == {"type": "preview", "text": "hello"}
+        # 重放同一密文：防重放拒绝
+        assert sc.unwrap(envelope) is None
+
+    def test_out_of_order_rejected(self):
+        """乱序消息（先 seq=1 再 seq=0）：拒绝。"""
+        sc, _ = self._setup_authenticated()
+        e1 = sc.wrap({"type": "preview", "text": "a"})
+        e2 = sc.wrap({"type": "preview", "text": "b"})
+        assert sc.unwrap(e2) == {"type": "preview", "text": "b"}
+        assert sc.unwrap(e1) is None
+
+    def test_seq_stripped_from_inner(self):
+        """seq 是传输层字段，unwrap 后不暴露给业务层。"""
+        sc, _ = self._setup_authenticated()
+        inner = sc.unwrap(sc.wrap({"type": "send", "text": "x"}))
+        assert inner == {"type": "send", "text": "x"}
+        assert "seq" not in inner
+
+    def test_missing_seq_rejected(self):
+        """密文中没有 seq 字段：按防重放失败处理。"""
+        sc, _ = self._setup_authenticated()
+        # 直接加密不含 seq 的明文
+        raw_pt = b'{"type":"send","text":"x"}'
+        encrypted = sc._provider.encrypt(raw_pt)
+        import base64
+        envelope = {"type": "data", "data": base64.urlsafe_b64encode(encrypted).decode().rstrip("=")}
+        assert sc.unwrap(envelope) is None
+
 
 class TestSecureChannelStateMachine:
     """测试状态机行为。"""

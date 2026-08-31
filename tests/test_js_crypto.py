@@ -14,6 +14,7 @@ JS CryptoProvider 单元测试
 
 import base64
 import json
+from hashlib import blake2b
 from pathlib import Path
 
 import pytest
@@ -297,12 +298,13 @@ class TestXChaCha20Provider:
                 const pt = sodium.from_string('{"type":"send","text":"xchacha-rt"}');
                 const encrypted = phone.encrypt(pt);
 
-                // PC 端：ECDH + XChaCha20 解密
+                // PC 端：ECDH + BLAKE2b KDF + XChaCha20 解密
                 const shared = sodium.crypto_scalarmult(pcKp.privateKey, phone._phonePublicKey);
+                const key = sodium.crypto_generichash(32, shared);
                 const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
                 const nonce = encrypted.slice(0, nonceSize);
                 const ct = encrypted.slice(nonceSize);
-                const decrypted = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, null, nonce, shared);
+                const decrypted = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, null, nonce, key);
                 return sodium.to_string(decrypted);
             }
         """)
@@ -329,7 +331,7 @@ class TestXChaCha20Provider:
 
         phone_pub = PublicKey(_from_b64(js_result["phonePubB64"]))
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
-        aead = Aead(shared)
+        aead = Aead(blake2b(shared, digest_size=32).digest())
         plaintext = aead.decrypt(_from_b64(js_result["encryptedB64"]))
         assert json.loads(plaintext)["text"] == "xchacha-js2py"
 
@@ -349,10 +351,10 @@ class TestXChaCha20Provider:
             }
         """, pc_pub_b64)
 
-        # Step 2: Python ECDH + XChaCha20 加密
+        # Step 2: Python ECDH + BLAKE2b KDF + XChaCha20 加密
         phone_pub = PublicKey(_from_b64(js_setup))
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
-        aead = Aead(shared)
+        aead = Aead(blake2b(shared, digest_size=32).digest())
         plaintext = b'{"type":"preview","text":"xchacha-py2js"}'
         encrypted = bytes(aead.encrypt(plaintext))
         encrypted_b64 = _to_b64(encrypted)

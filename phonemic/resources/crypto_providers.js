@@ -72,7 +72,9 @@ class XChaCha20Provider {
         return sodium.crypto_box_seal(this._phonePublicKey, this._pcPublicKey);
     }
     _deriveSharedKey() {
-        this._sharedKey = sodium.crypto_scalarmult(this._phonePrivate, this._pcPublicKey);
+        const shared = sodium.crypto_scalarmult(this._phonePrivate, this._pcPublicKey);
+        // 标准 KDF：BLAKE2b 派生会话密钥（与 Python 端 blake2b 一致）
+        this._sharedKey = sodium.crypto_generichash(32, shared);
     }
     handleAuthAck(rawBytes) {
         try {

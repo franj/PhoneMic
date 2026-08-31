@@ -1,12 +1,14 @@
 """XChaCha20-Poly1305 加密提供者。
 
 使用 X25519 密钥对进行 ECDH 密钥交换，
-然后用共享密钥通过 XChaCha20-Poly1305 (AEAD) 进行认证加密。
+共享密钥经 BLAKE2b（标准 KDF）派生后，
+通过 XChaCha20-Poly1305 (AEAD) 进行认证加密。
 """
 
 import base64
 import json
 import time
+from hashlib import blake2b
 from typing import Optional
 
 from nacl.bindings import crypto_scalarmult
@@ -32,7 +34,8 @@ class XChaCha20Provider(CryptoProvider):
     1. PC 生成 X25519 密钥对，公钥通过 QR 码带外传输
     2. 手机生成 X25519 密钥对，用 sealed box 密封公钥发送给 PC
     3. 双方通过 crypto_scalarmult 计算 ECDH 共享密钥
-    4. 使用共享密钥通过 XChaCha20-Poly1305 加密通信
+    4. 共享密钥经 BLAKE2b (32 字节) 派生为 AEAD 会话密钥
+    5. 使用会话密钥通过 XChaCha20-Poly1305 加密通信
     """
 
     def __init__(self, pc_private: Optional[PrivateKey] = None):
@@ -56,7 +59,9 @@ class XChaCha20Provider(CryptoProvider):
             phone_pub_bytes = sb.decrypt(sealed)
             phone_public = PublicKey(phone_pub_bytes)
             shared = crypto_scalarmult(bytes(self._pc_private), bytes(phone_public))
-            self._aead = Aead(shared)
+            # 标准 KDF：BLAKE2b 派生会话密钥，避免原始 ECDH 输出直接作对称密钥
+            session_key = blake2b(shared, digest_size=32).digest()
+            self._aead = Aead(session_key)
             return True
         except Exception:
             return False
