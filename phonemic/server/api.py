@@ -181,6 +181,118 @@ def push_config(key: str, value) -> bool:
     return send_to_phone({"type": "config", key: value})
 
 
+# ---------- WebSocket 连接处理 ----------
+
+async def _handle_auth(ws: web.WebSocketResponse, session) -> bool:
+    """
+    S0：处理认证握手。
+
+    仅在 session.needs_auth 时等待并校验首条 auth 消息。
+    认证失败或消息非法时关闭连接并返回 False，此时连接未注册，
+    不会影响活动连接的加密状态。
+
+    Returns:
+        True 表示认证通过（或该模式无需认证），可进入 S1
+    """
+    if not session.needs_auth:
+        return True
+
+    try:
+        msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
+    except asyncio.TimeoutError:
+        logger.warning("Auth timeout (10s), closing connection")
+        await ws.close()
+        return False
+    except Exception as e:
+        logger.warning(f"Auth receive error: {e}")
+        await ws.close()
+        return False
+
+    if msg.type != WSMsgType.TEXT:
+        await ws.close()
+        return False
+
+    try:
+        data = json.loads(msg.data)
+    except json.JSONDecodeError:
+        await ws.close()
+        return False
+
+    if data.get("type") != "auth":
+        logger.warning(f"Expected auth, got: {data.get('type')}, closing")
+        await ws.close()
+        return False
+
+    if not session.receive_auth(data):
+        logger.warning(f"Auth failed: {session.reject_reason}, closing")
+        await ws.send_str(json.dumps(session.make_auth_ack(), ensure_ascii=False))
+        await ws.close()
+        return False
+
+    ack = session.make_auth_ack()
+    await ws.send_str(json.dumps(ack, ensure_ascii=False))
+    logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
+    return True
+
+
+async def _handle_client_message(ws: web.WebSocketResponse, session, raw: str) -> bool:
+    """
+    S1：处理认证后的单条文本消息。
+
+    校验消息形态（拒绝重复 auth；加密模式只接受 data 信封），
+    解密后把内部消息转发到事件桥。
+
+    Returns:
+        True 表示继续接收下一条；False 表示需要关闭连接
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON: {raw}, error: {e}")
+        return True
+
+    # 拒绝重复 auth
+    if data.get("type") == "auth":
+        logger.warning("Received auth after authentication, closing")
+        await ws.close()
+        return False
+
+    if session.is_encrypted:
+        if data.get("type") != "data":
+            logger.warning(f"Expected data, got: {data.get('type')}, closing")
+            await ws.close()
+            return False
+        inner = session.unwrap(data)
+        if inner is None:
+            logger.warning("Decryption failed, closing")
+            await ws.close()
+            return False
+    else:
+        inner = data
+
+    msg_type = inner.get("type")
+    text = inner.get("text", "")
+    if msg_type in ("preview", "send"):
+        _manager.bridge.emit(msg_type, text)
+        logger.debug(f"Received {msg_type}: {text[:50]}...")
+    else:
+        logger.warning(f"Unknown inner message type: {msg_type}")
+    return True
+
+
+async def _serve_messages(ws: web.WebSocketResponse, session) -> None:
+    """S1：循环接收并处理消息，直到连接关闭或出错。"""
+    async for msg in ws:
+        if msg.type == WSMsgType.TEXT:
+            if not await _handle_client_message(ws, session, msg.data):
+                break
+        elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+            logger.info(f"WebSocket closing, type={msg.type}")
+            break
+        elif msg.type == WSMsgType.ERROR:
+            logger.error(f"WebSocket error: {ws.exception()}")
+
+
 def _create_app() -> web.Application:
     """
     创建 aiohttp Application 实例并注册路由。
@@ -260,7 +372,7 @@ def _create_app() -> web.Application:
         )
 
     async def websocket_endpoint(request):
-        """WebSocket 端点：状态机强制握手流程。"""
+        """WebSocket 端点：认证通过后才注册连接并进入消息循环。"""
         ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
 
@@ -277,97 +389,14 @@ def _create_app() -> web.Application:
         # 该连接独立的握手上下文，与活动连接互不干扰
         session = _secure_channel.new_session()
 
-        # ---- S0: 等待 auth（仅在 needs_auth 时）----
-        if session.needs_auth:
-            try:
-                msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.warning("Auth timeout (10s), closing connection")
-                await ws.close()
-                return ws
-            except Exception as e:
-                logger.warning(f"Auth receive error: {e}")
-                await ws.close()
-                return ws
+        # S0：认证握手（失败时连接已关闭，且不影响活动连接）
+        if not await _handle_auth(ws, session):
+            return ws
 
-            if msg.type != WSMsgType.TEXT:
-                await ws.close()
-                return ws
-
-            try:
-                data = json.loads(msg.data)
-            except json.JSONDecodeError:
-                await ws.close()
-                return ws
-
-            # S0: 第一条消息必须是 auth
-            if data.get("type") != "auth":
-                logger.warning(f"Expected auth, got: {data.get('type')}, closing")
-                await ws.close()
-                return ws
-
-            # 尝试认证；失败时不注册连接，活动连接保持原状
-            if not session.receive_auth(data):
-                logger.warning(f"Auth failed: {session.reject_reason}, closing")
-                ack = session.make_auth_ack()
-                await ws.send_str(json.dumps(ack, ensure_ascii=False))
-                await ws.close()
-                return ws
-
-            # 握手成功：发送 auth_ack
-            ack = session.make_auth_ack()
-            await ws.send_str(json.dumps(ack, ensure_ascii=False))
-            logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
-
-        # ---- S1: 注册连接（认证后才抢占旧连接）+ 发送配置 ----
-        await _manager.connect(ws, session)
-
-        # ---- S1: 处理后续消息 ----
+        # S1：注册连接（认证后才抢占旧连接）+ 消息循环
         try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-
-                        # S1: 拒绝重复 auth
-                        if data.get("type") == "auth":
-                            logger.warning("Received auth after authentication, closing")
-                            await ws.close()
-                            break
-
-                        if session.is_encrypted:
-                            # 加密模式：仅接受 data 信封
-                            if data.get("type") != "data":
-                                logger.warning(f"Expected data, got: {data.get('type')}, closing")
-                                await ws.close()
-                                break
-
-                            inner = session.unwrap(data)
-                            if inner is None:
-                                logger.warning("Decryption failed, closing")
-                                await ws.close()
-                                break
-                        else:
-                            # none 模式：直接处理明文 JSON
-                            inner = data
-
-                        # 处理内部消息
-                        msg_type = inner.get("type")
-                        text = inner.get("text", "")
-
-                        if msg_type in ("preview", "send"):
-                            _manager.bridge.emit(msg_type, text)
-                            logger.debug(f"Received {msg_type}: {text[:50]}...")
-                        else:
-                            logger.warning(f"Unknown inner message type: {msg_type}")
-
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON: {msg.data}, error: {e}")
-                elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
-                    logger.info(f"WebSocket closing, type={msg.type}")
-                    break
-                elif msg.type == WSMsgType.ERROR:
-                    logger.error(f"WebSocket error: {ws.exception()}")
+            await _manager.connect(ws, session)
+            await _serve_messages(ws, session)
         except Exception as e:
             logger.exception(f"Unexpected error in receive_loop: {e}")
         finally:
