@@ -711,14 +711,13 @@ __I18N_JSON__
             this._provider = null;
             this._pcPublicKeyB64 = null;
             this._pcPublicKeyRaw = null;
-            this._availableAlgos = [];
-            this._preferredAlgo = 'xsalsa20';
-            this._selectedAlgo = null;
+            this._selectedAlgo = 'none';
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
         }
-        get hasKey() { return this._selectedAlgo === 'none' || this._pcPublicKeyB64 !== null; }
+        get needsAuth() { return this._pcPublicKeyB64 !== null; }
+        get isEncrypted() { return this._selectedAlgo !== 'none'; }
         get isAuthenticated() { return this._authenticated; }
 
         async init() {
@@ -726,7 +725,6 @@ __I18N_JSON__
             this._ready = true;
             this._b64Variant = sodium.base64_VARIANT_URLSAFE_NO_PADDING;
             this._parseUrlFragment();
-            this._selectAlgorithm();
             this._createProvider();
             if (this._provider.initKeypair) this._provider.initKeypair();
             if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
@@ -738,27 +736,18 @@ __I18N_JSON__
             const kMatch = hash.match(/[#&]k=([^&]+)/);
             if (kMatch) this._pcPublicKeyB64 = kMatch[1];
             const aMatch = hash.match(/[#&]a=([^&]+)/);
-            this._availableAlgos = aMatch ? aMatch[1].split(',') : ['xsalsa20'];
-            const pMatch = hash.match(/[#&]p=([^&]+)/);
-            if (pMatch) this._preferredAlgo = pMatch[1];
-        }
-
-        _selectAlgorithm() {
-            const supported = ['none'];
-            if (typeof sodium.crypto_box_easy === 'function') supported.push('xsalsa20');
-            if (typeof sodium.crypto_aead_xchacha20poly1305_ietf_encrypt === 'function') supported.push('xchacha20');
-            if (supported.includes(this._preferredAlgo) && this._availableAlgos.includes(this._preferredAlgo)) {
-                this._selectedAlgo = this._preferredAlgo;
-            } else {
-                this._selectedAlgo = this._availableAlgos.find(a => supported.includes(a)) || 'none';
-            }
+            this._selectedAlgo = aMatch ? aMatch[1] : 'none';
         }
 
         _createProvider() {
             const Cls = PROVIDER_CLASSES[this._selectedAlgo];
             this._provider = new Cls();
             if (this._pcPublicKeyB64) {
-                this._pcPublicKeyRaw = sodium.from_base64(this._pcPublicKeyB64, this._b64Variant);
+                if (this._selectedAlgo === 'none') {
+                    this._provider.setToken(this._pcPublicKeyB64);
+                } else {
+                    this._pcPublicKeyRaw = sodium.from_base64(this._pcPublicKeyB64, this._b64Variant);
+                }
             }
         }
 
@@ -768,7 +757,11 @@ __I18N_JSON__
         makeAuth() {
             const auth = { type: 'auth', algo: this._selectedAlgo };
             const authData = this._provider.makeAuthData();
-            if (authData) auth.data = this._toB64(authData);
+            if (authData instanceof Uint8Array) {
+                auth.data = this._toB64(authData);
+            } else if (authData) {
+                auth.data = authData;
+            }
             return auth;
         }
 
@@ -786,18 +779,21 @@ __I18N_JSON__
                 }
             } else {
                 this._authenticated = true;
+                console.log('[SEC] Authenticated by server');
                 return true;
             }
             return false;
         }
 
         encrypt(msg) {
+            if (!this.isEncrypted) return msg;
             const pt = sodium.from_string(JSON.stringify(msg));
             const encrypted = this._provider.encrypt(pt);
             return { type: 'data', data: this._toB64(encrypted) };
         }
 
         decrypt(envelope) {
+            if (!this.isEncrypted) return envelope;
             const raw = this._fromB64(envelope.data);
             const pt = this._provider.decrypt(raw);
             return JSON.parse(sodium.to_string(pt));
@@ -824,12 +820,13 @@ __I18N_JSON__
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    if (this.secure.hasKey) {
+                    if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
                         this.ws.send(JSON.stringify(authMsg));
                         console.log('[SEC] Auth sent, algo:', authMsg.algo);
                     } else {
-                        this._showNoKeyWarning();
+                        this.isConnected = true;
+                        this._notifyStatusChange(true);
                     }
                 };
                 this.ws.onmessage = (event) => {
@@ -847,21 +844,32 @@ __I18N_JSON__
                             return;
                         }
 
-                        if (data.type === 'data') {
-                            let inner;
-                            try {
-                                inner = this.secure.decrypt(data);
-                            } catch (e) {
-                                console.error('[SEC] Decrypt failed:', e);
+                        if (this.secure.isEncrypted) {
+                            if (data.type === 'data') {
+                                let inner;
+                                try {
+                                    inner = this.secure.decrypt(data);
+                                } catch (e) {
+                                    console.error('[SEC] Decrypt failed:', e);
+                                    return;
+                                }
+                                if (!this.isConnected) {
+                                    this.isConnected = true;
+                                    this._notifyStatusChange(true);
+                                }
+                                const handler = this.messageHandlers.get(inner.type);
+                                if (handler) handler(inner);
+                                else console.warn(window.i18n.log_ws_unknown_type, inner.type);
                                 return;
                             }
+                        } else {
                             if (!this.isConnected) {
                                 this.isConnected = true;
                                 this._notifyStatusChange(true);
                             }
-                            const handler = this.messageHandlers.get(inner.type);
-                            if (handler) handler(inner);
-                            else console.warn(window.i18n.log_ws_unknown_type, inner.type);
+                            const handler = this.messageHandlers.get(data.type);
+                            if (handler) handler(data);
+                            else console.warn(window.i18n.log_ws_unknown_type, data.type);
                             return;
                         }
 

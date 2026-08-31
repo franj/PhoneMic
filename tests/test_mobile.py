@@ -28,10 +28,15 @@ window.__mockWS = {
 
     triggerMessage: function(data) {
         if (this.current && this.current.onmessage) {
-            // 包装为 data 信封（与加密协议一致）
-            var pt = sodium.from_string(JSON.stringify(data));
-            var b64 = sodium.to_base64(pt, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
-            this.current.onmessage({ data: JSON.stringify({type: 'data', data: b64}) });
+            if (window.__wsClient && window.__wsClient.secure.isEncrypted) {
+                // 加密模式：包装为 data 信封
+                var pt = sodium.from_string(JSON.stringify(data));
+                var b64 = sodium.to_base64(pt, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                this.current.onmessage({ data: JSON.stringify({type: 'data', data: b64}) });
+            } else {
+                // none 模式：明文 JSON
+                this.current.onmessage({ data: JSON.stringify(data) });
+            }
         }
     },
     triggerClose: function() {
@@ -64,15 +69,6 @@ window.WebSocket = function(url) {
         try {
             var msg = JSON.parse(data);
             window.__mockWS.sentMessages.push(msg);
-            // 自动回复 auth_ack
-            if (msg.type === 'auth') {
-                var self = this;
-                setTimeout(function() {
-                    if (self.onmessage) {
-                        self.onmessage({ data: JSON.stringify({type: 'auth_ack', algo: msg.algo}) });
-                    }
-                }, 0);
-            }
         } catch(e) { window.__mockWS.sentMessages.push({ raw: data }); }
         return true;
     };
@@ -111,14 +107,15 @@ def mobile_page(page):
     html = html.replace('<script src="crypto_providers.js"></script>', f"<script>{crypto_js}</script>")
     html = html.replace("__I18N_JSON__", "")
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
+    # 暴露 wsClient 供 mock 检查 isEncrypted
+    html = html.replace(
+        "wsClient.connect();",
+        "wsClient.connect(); window.__wsClient = wsClient;",
+    )
     # 注入 patch：在主脚本之后、onload 之前，强制使用不加密模式
     patch = (
         "<script>"
         "SecureClient.prototype._parseUrlFragment = function() {"
-        "  this._availableAlgos = ['none'];"
-        "  this._preferredAlgo = 'none';"
-        "};"
-        "SecureClient.prototype._selectAlgorithm = function() {"
         "  this._selectedAlgo = 'none';"
         "};"
         "</script>"
@@ -128,9 +125,9 @@ def mobile_page(page):
     page.wait_for_function(
         "() => window.__mockWS && window.__mockWS.current && window.__mockWS.current.readyState === 1"
     )
-    # 等待 auth 握手完成
+    # none+LAN 模式：无需 auth，等待连接建立
     page.wait_for_function(
-        "() => window.__mockWS.sentMessages.some(m => m.type === 'auth')"
+        "() => window.__wsClient && window.__wsClient.isConnected"
     )
     page.wait_for_timeout(50)
     # 模拟服务端发送 config 消息

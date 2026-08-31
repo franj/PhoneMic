@@ -108,9 +108,11 @@ class XChaCha20Provider {
 
 class PlainProvider {
     static get algorithmName() { return 'none'; }
+    constructor() { this._token = null; }
     initKeypair() {}
     setPcPublicKey(rawBytes) {}
-    makeAuthData() { return null; }
+    setToken(token) { this._token = token; }
+    makeAuthData() { return this._token; }
     handleAuthAck(rawBytes) { return true; }
     encrypt(plaintextBytes) { return plaintextBytes; }
     decrypt(ciphertextBytes) { return ciphertextBytes; }

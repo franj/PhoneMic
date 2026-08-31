@@ -98,13 +98,13 @@ def _prepare_html(channel, algo, force_none_algo=False):
         "<script>"
         "SecureClient.prototype._parseUrlFragment = function() {"
         f"  this._pcPublicKeyB64 = '{pc_pubkey_b64}';"
-        "  this._availableAlgos = ['xsalsa20', 'xchacha20'];"
-        f"  this._preferredAlgo = '{algo}';"
+        f"  this._selectedAlgo = '{algo}';"
         "};"
     )
     if force_none_algo:
         patch += (
-            "SecureClient.prototype._selectAlgorithm = function() {"
+            "SecureClient.prototype._parseUrlFragment = function() {"
+            "  this._pcPublicKeyB64 = 'fake_token';"
             "  this._selectedAlgo = 'none';"
             "};"
         )
