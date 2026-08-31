@@ -806,7 +806,6 @@ __I18N_JSON__
             this.ws = null;
             this.isConnected = false;
             this.reconnectInterval = 2000;
-            this.maxReconnectInterval = 15000;
             this.reconnectTimer = null;
             this.authRejected = false;
             this.messageHandlers = new Map();
@@ -827,7 +826,6 @@ __I18N_JSON__
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    this.reconnectInterval = 2000; // 连接成功，重置重连退避
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
                         this.ws.send(JSON.stringify(authMsg));
@@ -903,8 +901,6 @@ __I18N_JSON__
         _scheduleReconnect() {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
             this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
-            // 指数退避，避免断连后高频重试；连接成功后在 onopen 中重置
-            this.reconnectInterval = Math.min(this.reconnectInterval * 2, this.maxReconnectInterval);
         }
         _notifyStatusChange(connected, message) {
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));

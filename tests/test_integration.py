@@ -590,18 +590,14 @@ class TestAuthFailureUX:
         assert "重新扫码" in text
         assert page.locator("#input-box").is_disabled()
 
-    def test_reconnect_backoff_and_reset(self, secure_pair):
-        """断连重连采用指数退避，连接成功后退避重置。"""
+    def test_reconnect_fixed_interval(self, secure_pair):
+        """断连重连保持固定间隔：保证后台切回前台时快速重连。"""
         page, channel, algo = secure_pair
         assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
 
-        # 两次断连：2000 → 4000 → 8000
+        # 多次断连后间隔仍保持 2000，不递增
         page.evaluate("() => window.__mockWS.triggerClose()")
-        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 4000
-        page.evaluate("() => window.__mockWS.triggerClose()")
-        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 8000
-        assert page.evaluate("() => window.__wsClient.reconnectTimer") is not None
-
-        # 连接成功后退避重置
-        page.evaluate("() => window.__wsClient.ws.onopen()")
         assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+        page.evaluate("() => window.__mockWS.triggerClose()")
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+        assert page.evaluate("() => window.__wsClient.reconnectTimer") is not None
