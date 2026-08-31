@@ -73,12 +73,41 @@ class TestPlainProvider:
         """)
         assert result == [1, 2, 3, 4, 5]
 
-    def test_make_auth_data_returns_none(self, crypto_page):
+    def test_make_auth_data_returns_none_without_token(self, crypto_page):
         result = crypto_page.evaluate("() => new PlainProvider().makeAuthData()")
         assert result is None
 
+    def test_set_token_make_auth_data(self, crypto_page):
+        """setToken 后 makeAuthData 返回 token（CF 模式）。"""
+        result = crypto_page.evaluate("""
+            () => {
+                const p = new PlainProvider();
+                p.setToken('my_test_token');
+                return p.makeAuthData();
+            }
+        """)
+        assert result == "my_test_token"
+
+    def test_init_keypair_noop(self, crypto_page):
+        """initKeypair 是空操作，不报错。"""
+        crypto_page.evaluate("() => new PlainProvider().initKeypair()")
+
+    def test_set_pc_public_key_noop(self, crypto_page):
+        """setPcPublicKey 是空操作，不报错。"""
+        crypto_page.evaluate("""
+            () => {
+                const p = new PlainProvider();
+                p.setPcPublicKey(new Uint8Array(32));
+            }
+        """)
+
     def test_handle_auth_ack_always_true(self, crypto_page):
         result = crypto_page.evaluate("() => new PlainProvider().handleAuthAck(new Uint8Array(0))")
+        assert result is True
+
+    def test_handle_auth_ack_null(self, crypto_page):
+        """handleAuthAck 接收 null 也不报错（none+CF 的 auth_ack 无 data）。"""
+        result = crypto_page.evaluate("() => new PlainProvider().handleAuthAck(null)")
         assert result is True
 
 
