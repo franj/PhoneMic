@@ -66,11 +66,7 @@ class Dashboard(QMainWindow):
         self._lan_port = port
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
-        self._generate_pairing_callback: Optional[Callable[[], str]] = None
-        self._e2ee_mgr = None  # E2EEManager 引用，由外部设置
-        self._pairing_timer = QTimer(self)
-        self._pairing_timer.setSingleShot(True)
-        self._pairing_timer.timeout.connect(self._on_pairing_expired)
+        self._secure_channel = None  # SecureChannel 引用，由外部设置
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
@@ -83,34 +79,10 @@ class Dashboard(QMainWindow):
         """设置模式切换回调函数"""
         self._mode_switch_callback = callback
 
-    def set_generate_pairing_callback(self, callback: Callable[[], str]):
-        """设置生成配对码回调函数，返回配对码字符串。"""
-        self._generate_pairing_callback = callback
-
-    def set_e2ee_manager(self, mgr):
-        """设置 E2EE 管理器引用。"""
-        self._e2ee_mgr = mgr
-
-    def _on_generate_pairing(self):
-        """生成配对码并显示。"""
-        if self._generate_pairing_callback:
-            code = self._generate_pairing_callback()
-            self.pairing_label.setText(self.i18n.tr("dashboard.pairing_code", code=code))
-            self.pairing_label.setStyleSheet(
-                "QPushButton { border: none; font-size: 18px; font-weight: bold; "
-                "color: #07c160; text-align: center; padding: 2px; }"
-                "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
-            )
-            self._pairing_timer.start(60000)
-
-    def _on_pairing_expired(self):
-        """配对码过期回调。"""
-        self.pairing_label.setText(self.i18n.tr("dashboard.pairing_hint"))
-        self.pairing_label.setStyleSheet(
-            "QPushButton { border: none; font-size: 16px; font-weight: bold; "
-            "color: #999; text-align: center; padding: 4px; }"
-            "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
-        )
+    def set_secure_channel(self, sc):
+        """设置安全通道引用，并刷新 QR 码以包含公钥。"""
+        self._secure_channel = sc
+        self._refresh_qr()
 
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
@@ -140,23 +112,6 @@ class Dashboard(QMainWindow):
         ip_label.setWordWrap(True)
         ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(ip_label)
-
-        # ----- 配对码区域（仅 Cloudflare 模式可见）-----
-        self.pairing_widget = QWidget()
-        pairing_layout = QHBoxLayout(self.pairing_widget)
-        pairing_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.pairing_label = QPushButton(self.i18n.tr("dashboard.pairing_hint"))
-        self.pairing_label.setStyleSheet(
-            "QPushButton { border: none; font-size: 14px; font-weight: bold; color: #07c160; "
-            "text-align: center; padding: 2px; }"
-            "QPushButton:hover { color: #06ad56; text-decoration: underline; }"
-        )
-        self.pairing_label.setCursor(Qt.PointingHandCursor)
-        self.pairing_label.clicked.connect(self._on_generate_pairing)
-        pairing_layout.addWidget(self.pairing_label)
-
-        layout.addWidget(self.pairing_widget)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
@@ -197,13 +152,11 @@ class Dashboard(QMainWindow):
 
         if self._mode == TunnelMode.LAN:
             self.info_label.setVisible(True)
-            self.pairing_widget.setVisible(False)
             self.cf_info_label.setVisible(False)
             self.switch_network_action.setEnabled(True)
             self._refresh_qr()
         else:
             self.info_label.setVisible(False)
-            self.pairing_widget.setVisible(True)
             self.cf_info_label.setVisible(True)
             self.switch_network_action.setEnabled(False)
             if self._tunnel_url:
@@ -242,13 +195,13 @@ class Dashboard(QMainWindow):
         self._apply_mode_ui()
 
     def _get_qr_url(self) -> str:
-        """获取当前 QR 码 URL（含 E2EE 密钥 fragment）。"""
+        """获取当前 QR 码 URL（含 PC 公钥 fragment）。"""
         if self._mode == TunnelMode.CLOUDFLARE and self._tunnel_url:
             url = self._tunnel_url
         else:
             url = f"http://{self._lan_ip}:{self._lan_port}"
-        if self._e2ee_mgr and self._e2ee_mgr.enabled:
-            url = self._e2ee_mgr.append_to_url(url)
+        if self._secure_channel:
+            url = self._secure_channel.append_to_url(url)
         return url
 
     def _refresh_qr(self) -> None:
@@ -352,13 +305,9 @@ class Dashboard(QMainWindow):
 
     def update_network(self, ip: str, port: int):
         """更新主界面的 IP 和二维码显示"""
-        # 更新二维码
-        qr_url = f"http://{ip}:{port}"
-        pixmap = make_qr_pixmap(qr_url)
-        self.qr_label.setPixmap(pixmap)
-
-        # 更新 IP 标签
-        self.ip_label.setText(f"http://{ip}:{port}")
+        self._lan_ip = ip
+        self._lan_port = port
+        self._refresh_qr()
 
     def show_about(self):
         version, commit, _ = get_build_info()
@@ -382,10 +331,7 @@ class Dashboard(QMainWindow):
         self.connected = connected
         if connected:
             text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
-            if self._e2ee_mgr and self._e2ee_mgr.enabled:
-                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
-            else:
-                text += ' <span style="color:#999;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
+            text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
             self.status_label.setText(text)
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))

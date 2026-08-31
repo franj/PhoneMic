@@ -43,10 +43,18 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
     License: MIT
     Homepage: https://github.com/pyparsing/pyparsing
 
-11. pycryptodome
-    License: Public Domain / BSD 2-Clause
-    Homepage: https://github.com/Legrandin/pycryptodome/
-    Note: Used for end-to-end encryption (AES-256-GCM) in Cloudflare tunnel mode
+11. PyNaCl
+    License: BSD 3-Clause
+    Homepage: https://github.com/pyca/pynacl
+    Note: Used for end-to-end encryption (NaCl crypto_box: X25519 + XSalsa20-Poly1305).
+          PC-side key generation, sealed box decryption, message encryption/decryption.
+
+11b. libsodium.js
+    License: ISC
+    Homepage: https://github.com/jedisct1/libsodium.js/
+    Note: Mobile-side crypto library (WASM binding of libsodium), used for key
+          generation, sealed box encryption, message encryption/decryption.
+          Interoperable with PC-side PyNaCl.
 
 12. Nuitka (used only for packaging, not included in final distribution)
     License: Apache 2.0

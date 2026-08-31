@@ -9,13 +9,15 @@ PhoneMic 后端服务模块
 import asyncio
 import json
 import logging
+import os
 import threading
+import time
 from typing import Optional
 
 from aiohttp import web, WSMsgType
 
 from phonemic.bridge_interface import EventBridge
-from phonemic.tunnel.e2ee import E2EEManager
+from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
@@ -67,12 +69,11 @@ class ConnectionManager:
         self.bridge.emit("connect")
         logger.info("WebSocket connected, connection established")
 
-        # 发送当前配置（手机端初始化使用）
+        # 发送当前配置（加密传输）
         try:
             await _send_json(ws, {
                 "type": "config",
                 "mobile_max_records": self.max_records,
-                "e2ee_enabled": _e2ee_manager.enabled if _e2ee_manager else False,
             })
             logger.debug(f"Sent config to client: max_records={self.max_records}")
         except Exception as e:
@@ -92,10 +93,8 @@ class ConnectionManager:
 # 全局通信管理（用于与主进程通信）
 _manager: Optional[ConnectionManager] = None
 
-# 隧道认证状态（Cloudflare 模式下启用）
-_tunnel_auth_enabled = False
-_pairing_manager = None
-_token_manager = None
+# 安全通道（所有模式共用，PC 密钥对在启动时生成一次）
+_secure_channel: Optional[SecureChannel] = None
 
 
 def set_bridge(bridge: EventBridge) -> None:
@@ -105,39 +104,16 @@ def set_bridge(bridge: EventBridge) -> None:
     logger.info("Message bridge set for backend service")
 
 
-def set_tunnel_auth(enabled: bool, pairing=None, tokens=None) -> None:
-    """设置隧道认证状态。Cloudflare 模式下需要配对码或令牌认证。"""
-    global _tunnel_auth_enabled, _pairing_manager, _token_manager
-    _tunnel_auth_enabled = enabled
-    _pairing_manager = pairing
-    _token_manager = tokens
-    logger.info(f"Tunnel auth {'enabled' if enabled else 'disabled'}")
-
-
-# E2EE 状态（所有模式可用）
-_e2ee_manager: Optional[E2EEManager] = None
-
-# E2EE 控制消息，始终明文发送（不加密）
-_E2EE_CONTROL_TYPES = {
-    "e2ee_required",
-    "auth_required", "auth_success", "auth_failed",
-    "config",
-}
-
-
-def set_e2ee_manager(mgr: E2EEManager) -> None:
-    """设置 E2EE 管理器引用。"""
-    global _e2ee_manager
-    _e2ee_manager = mgr
+def set_secure_channel(sc: SecureChannel) -> None:
+    """设置安全通道引用。"""
+    global _secure_channel
+    _secure_channel = sc
 
 
 async def _send_json(ws: web.WebSocketResponse, message: dict) -> None:
-    """发送 JSON 消息，E2EE 启用时自动加密（控制消息除外）。
-
-    在事件循环内调用（async 上下文），直接 await 发送。
-    """
-    if _e2ee_manager and _e2ee_manager.enabled and message.get("type") not in _E2EE_CONTROL_TYPES:
-        message = _e2ee_manager.wrap(message)
+    """发送 JSON 消息，认证后自动加密。"""
+    if _secure_channel and _secure_channel.is_authenticated:
+        message = _secure_channel.wrap(message)
     await ws.send_str(json.dumps(message, ensure_ascii=False))
 
 
@@ -184,72 +160,6 @@ def push_config(key: str, value) -> bool:
     return send_to_phone({"type": "config", key: value})
 
 
-async def _handle_auth(ws: web.WebSocketResponse) -> bool:
-    """
-    处理 WebSocket 认证流程。
-    Cloudflare 模式下，客户端需发送配对码或令牌才能建立连接。
-
-    流程：
-    1. 服务端发送 auth_required
-    2. 客户端回复 auth（method=token 或 pairing_code）
-    3. 服务端验证，回复 auth_success 或 auth_failed
-    """
-    await _send_json(ws, {"type": "auth_required"})
-
-    try:
-        msg = await asyncio.wait_for(ws.receive(), timeout=30.0)
-    except asyncio.TimeoutError:
-        await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_timeout")})
-        await ws.close()
-        return False
-    except Exception as e:
-        logger.warning(f"Auth receive error: {e}")
-        await ws.close()
-        return False
-
-    if msg.type != WSMsgType.TEXT:
-        await ws.close()
-        return False
-
-    try:
-        data = json.loads(msg.data)
-    except json.JSONDecodeError:
-        await ws.close()
-        return False
-
-    # E2EE 启用时，客户端消息应该是加密的
-    if _e2ee_manager and _e2ee_manager.enabled and _e2ee_manager.is_encrypted(data):
-        data = _e2ee_manager.unwrap(data)
-
-    if data.get("type") != "auth":
-        await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_expected")})
-        await ws.close()
-        return False
-
-    method = data.get("method")
-
-    if method == "token" and _token_manager:
-        token = data.get("token", "")
-        if _token_manager.validate(token):
-            logger.info("Token auth succeeded")
-            await _send_json(ws, {"type": "auth_success"})
-            return True
-
-    elif method == "pairing_code" and _pairing_manager and _token_manager:
-        code = data.get("code", "")
-        if _pairing_manager.validate(code):
-            token = _token_manager.generate_token()
-            logger.info("Pairing code auth succeeded, token issued")
-            await _send_json(ws, {"type": "auth_success", "token": token})
-            if _manager:
-                _manager.bridge.emit("pairing_success")
-            return True
-
-    await _send_json(ws, {"type": "auth_failed", "message": I18n.instance().tr("tunnel.auth_failed")})
-    await ws.close()
-    return False
-
-
 def _create_app() -> web.Application:
     """
     创建 aiohttp Application 实例并注册路由。
@@ -277,6 +187,7 @@ def _create_app() -> web.Application:
                 status=404,
                 content_type='text/html'
             )
+
     async def test(request):
         """
         返回手机输入测试页面（test.html）。
@@ -300,8 +211,27 @@ def _create_app() -> web.Application:
         favicon_path = get_res_path("favicon.ico")
         return web.FileResponse(favicon_path, headers={'Content-Type': 'image/x-icon'})
 
+    async def sodium_js(request):
+        """返回 libsodium.js（浏览器端加密库），支持 gzip"""
+        accept_encoding = request.headers.get("Accept-Encoding", "")
+        if "gzip" in accept_encoding:
+            gz_path = get_res_path("sodium.js.gz")
+            if os.path.exists(gz_path):
+                return web.FileResponse(
+                    gz_path,
+                    headers={
+                        'Content-Type': 'application/javascript',
+                        'Content-Encoding': 'gzip',
+                    }
+                )
+        sodium_path = get_res_path("sodium.js")
+        return web.FileResponse(
+            sodium_path,
+            headers={'Content-Type': 'application/javascript'}
+        )
+
     async def websocket_endpoint(request):
-        """WebSocket 端点，处理手机端的实时消息。"""
+        """WebSocket 端点：状态机强制握手流程。"""
         ws = web.WebSocketResponse(heartbeat=15.0)
         await ws.prepare(request)
 
@@ -310,46 +240,94 @@ def _create_app() -> web.Application:
             await ws.close(code=1011, message=b"Server not ready")
             return ws
 
-        # Cloudflare 模式下需要认证
-        if _tunnel_auth_enabled:
-            if not await _handle_auth(ws):
-                return ws
+        if _secure_channel is None:
+            logger.error("Secure channel not initialized.")
+            await ws.close(code=1011, message=b"Server not ready")
+            return ws
 
+        # 每个新连接重置安全通道状态
+        _secure_channel.on_new_connection()
+
+        # ---- S0: 等待 auth（10 秒超时）----
+        try:
+            msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("Auth timeout (10s), closing connection")
+            await ws.close()
+            return ws
+        except Exception as e:
+            logger.warning(f"Auth receive error: {e}")
+            await ws.close()
+            return ws
+
+        if msg.type != WSMsgType.TEXT:
+            await ws.close()
+            return ws
+
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            await ws.close()
+            return ws
+
+        # S0: 第一条消息必须是 auth
+        if data.get("type") != "auth":
+            logger.warning(f"Expected auth, got: {data.get('type')}, closing")
+            await ws.close()
+            return ws
+
+        # 尝试解密封装盒
+        if not _secure_channel.receive_auth(data.get("data", "")):
+            logger.warning("Auth failed: invalid sealed box, closing")
+            await ws.close()
+            return ws
+
+        # ---- 握手成功：发送 auth_ack ----
+        ack = _secure_channel.make_auth_ack()
+        await ws.send_str(json.dumps(ack, ensure_ascii=False))
+        logger.info("Auth succeeded, auth_ack sent")
+
+        # ---- S1: 注册连接 + 发送配置 ----
         await _manager.connect(ws)
 
+        # ---- S1: 处理后续消息（仅接受 data）----
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     try:
                         data = json.loads(msg.data)
 
-                        # E2EE 启用时：解密收到的消息
-                        if _e2ee_manager and _e2ee_manager.enabled:
-                            if _e2ee_manager.is_encrypted(data):
-                                data = _e2ee_manager.unwrap(data)
-                            elif data.get("type") not in _E2EE_CONTROL_TYPES:
-                                # 收到明文消息但 E2EE 已开启 → 通知客户端切换
-                                await _send_json(ws, {
-                                    "type": "e2ee_required",
-                                    "message": "请重新扫码以启用加密"
-                                })
-                                continue
-                        elif data.get("type") == "encrypted":
-                            # E2EE 已禁用但收到加密消息 → 客户端尚未同步，忽略
-                            logger.debug("Received encrypted message while E2EE disabled, ignoring")
-                            continue
+                        # S1: 拒绝重复 auth
+                        if data.get("type") == "auth":
+                            logger.warning("Received auth after authentication, closing")
+                            await ws.close()
+                            break
 
-                        msg_type = data.get("type")
-                        text = data.get("text", "")
+                        # S1: 仅接受 data
+                        if data.get("type") != "data":
+                            logger.warning(f"Expected data, got: {data.get('type')}, closing")
+                            await ws.close()
+                            break
+
+                        # 解密
+                        inner = _secure_channel.unwrap(data)
+                        if inner is None:
+                            logger.warning("Decryption failed, closing")
+                            await ws.close()
+                            break
+
+                        # 处理内部消息
+                        msg_type = inner.get("type")
+                        text = inner.get("text", "")
 
                         if msg_type in ("preview", "send"):
                             _manager.bridge.emit(msg_type, text)
                             logger.debug(f"Received {msg_type}: {text[:50]}...")
                         else:
-                            logger.warning(f"Unknown message type: {msg_type}")
+                            logger.warning(f"Unknown inner message type: {msg_type}")
+
                     except json.JSONDecodeError as e:
-                        logger.error(f"Invalid JSON: {msg.data}, error: {e}")
-                        # 不关闭连接，继续接收下一条
+                        logger.warning(f"Invalid JSON: {msg.data}, error: {e}")
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
                     logger.info(f"WebSocket closing, type={msg.type}")
                     break
@@ -366,6 +344,7 @@ def _create_app() -> web.Application:
     if not is_frozen():
         app.router.add_get('/test', test)
     app.router.add_get('/favicon.ico', favicon)
+    app.router.add_get('/sodium.js', sodium_js)
     app.router.add_get('/ws', websocket_endpoint)
 
     return app
@@ -384,6 +363,9 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
     global _server_thread, _event_loop, _serve_task, _runner, _running_app
     set_bridge(bridge)
     _running_app = _create_app()
+    _event_loop = None
+    _serve_task = None
+    _runner = None
 
     def _run():
         global _event_loop, _serve_task, _runner
@@ -431,16 +413,23 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
 
 def stop_server() -> None:
     """停止后台服务。"""
-    global _event_loop, _serve_task
+    global _event_loop, _serve_task, _server_thread
     if _event_loop and _serve_task:
-        _event_loop.call_soon_threadsafe(_serve_task.cancel)
+        try:
+            _event_loop.call_soon_threadsafe(_serve_task.cancel)
+        except RuntimeError:
+            pass
     if _server_thread:
         _server_thread.join(timeout=5.0)
+    _event_loop = None
+    _serve_task = None
+    _server_thread = None
 
 
 def restart_server(host: str, port: int, bridge: EventBridge) -> None:
     """重启服务端，切换绑定地址。"""
     stop_server()
+    time.sleep(0.5)
     start_server(host, port, bridge)
 
 
