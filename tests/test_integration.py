@@ -92,15 +92,13 @@ def _prepare_html(channel, algo, force_none_algo=False):
     html = html.replace("__I18N_JSON__", "")
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
 
-    # patch _parseUrlFragment：注入 PC 公钥和算法参数
+    # patch _parseUrlFragment：注入 PC 公钥/token 和算法参数
     pc_pubkey_b64 = channel.get_public_key_b64()
-    patch = (
-        "<script>"
-        "SecureClient.prototype._parseUrlFragment = function() {"
-        f"  this._pcPublicKeyB64 = '{pc_pubkey_b64}';"
-        f"  this._selectedAlgo = '{algo}';"
-        "};"
-    )
+    patch = "<script>SecureClient.prototype._parseUrlFragment = function() {"
+    if pc_pubkey_b64:
+        patch += f"  this._pcPublicKeyB64 = '{pc_pubkey_b64}';"
+    patch += f"  this._selectedAlgo = '{algo}';"
+    patch += "};"
     if force_none_algo:
         patch += (
             "SecureClient.prototype._parseUrlFragment = function() {"
@@ -357,4 +355,90 @@ class TestDisconnect:
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
         assert page.locator("#btn-send").is_disabled()
+        assert page.evaluate("() => window.__wsClient.isConnected") is False
+
+
+# ---------- none+LAN 模式 ----------
+
+@pytest.fixture
+def none_lan_pair(page):
+    """none+LAN 模式：无认证，明文 JSON。"""
+    channel = SecureChannel(algorithm="none", mode="lan")
+    html = _prepare_html(channel, "none")
+    page.set_content(html)
+    page.wait_for_function("() => window.__wsClient && window.__wsClient.isConnected")
+    yield page, channel
+
+
+class TestNoneLAN:
+    def test_no_auth_needed(self, none_lan_pair):
+        """none+LAN: 无需 auth，直接连接。"""
+        page, channel = none_lan_pair
+        assert not channel.needs_auth
+        assert not channel.is_encrypted
+        assert channel.is_authenticated
+        assert page.evaluate("() => window.__wsClient.isConnected") is True
+
+    def test_no_auth_message_sent(self, none_lan_pair):
+        """none+LAN: JS 不发送 auth 消息。"""
+        page, channel = none_lan_pair
+        auth_msgs = page.evaluate(
+            "() => window.__mockWS.sentMessages.filter(m => m.type === 'auth')"
+        )
+        assert len(auth_msgs) == 0
+
+    def test_send_plaintext_message(self, none_lan_pair):
+        """none+LAN: JS → Python 明文消息。"""
+        page, channel = none_lan_pair
+        page.locator("#mode-toggle").click()
+        page.locator("#input-box").fill("hello plaintext")
+        page.locator("#btn-send").click()
+
+        sent = page.evaluate("() => window.__mockWS.sentMessages")
+        send_msgs = [m for m in sent if m["type"] == "send"]
+        assert len(send_msgs) >= 1
+        assert send_msgs[-1]["text"] == "hello plaintext"
+
+        unwrapped = channel.unwrap(send_msgs[-1])
+        assert unwrapped["text"] == "hello plaintext"
+
+    def test_receive_plaintext_config(self, none_lan_pair):
+        """none+LAN: Python → JS 明文 config。"""
+        page, channel = none_lan_pair
+        msg = channel.wrap({"type": "config", "mobile_max_records": 7})
+        assert msg["type"] == "config"
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        page.wait_for_timeout(50)
+        assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 7
+
+    def test_bidirectional_plaintext(self, none_lan_pair):
+        """none+LAN: 双向明文通信。"""
+        page, channel = none_lan_pair
+
+        # Python → JS
+        msg = channel.wrap({"type": "config", "mobile_max_records": 3})
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        page.wait_for_timeout(50)
+        assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 3
+
+        # JS → Python
+        page.locator("#mode-toggle").click()
+        page.locator("#input-box").fill("lan roundtrip")
+        page.locator("#btn-send").click()
+
+        sent = page.evaluate("() => window.__mockWS.sentMessages")
+        send_msgs = [m for m in sent if m["type"] == "send"]
+        assert len(send_msgs) >= 1
+        assert send_msgs[-1]["text"] == "lan roundtrip"
+
+    def test_disconnect_updates_ui(self, none_lan_pair):
+        """none+LAN: 断线后 UI 显示断线状态。"""
+        page, channel = none_lan_pair
+        assert page.locator("#input-box").is_enabled()
+
+        page.evaluate("() => window.__mockWS.triggerClose()")
+        page.wait_for_timeout(100)
+
+        assert page.locator("#status-bar").is_visible()
+        assert page.locator("#input-box").is_disabled()
         assert page.evaluate("() => window.__wsClient.isConnected") is False
