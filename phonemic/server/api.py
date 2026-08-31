@@ -230,6 +230,14 @@ def _create_app() -> web.Application:
             headers={'Content-Type': 'application/javascript'}
         )
 
+    async def crypto_providers_js(request):
+        """返回 crypto_providers.js（加密提供者类）"""
+        path = get_res_path("crypto_providers.js")
+        return web.FileResponse(
+            path,
+            headers={'Content-Type': 'application/javascript'}
+        )
+
     async def websocket_endpoint(request):
         """WebSocket 端点：状态机强制握手流程。"""
         ws = web.WebSocketResponse(heartbeat=15.0)
@@ -348,6 +356,7 @@ def _create_app() -> web.Application:
         app.router.add_get('/test', test)
     app.router.add_get('/favicon.ico', favicon)
     app.router.add_get('/sodium.js', sodium_js)
+    app.router.add_get('/crypto_providers.js', crypto_providers_js)
     app.router.add_get('/ws', websocket_endpoint)
 
     return app
