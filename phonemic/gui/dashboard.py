@@ -67,6 +67,8 @@ class Dashboard(QMainWindow):
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._secure_channel = None  # SecureChannel 引用，由外部设置
+        self._algorithm: str = self.sm.get("e2ee_algorithm", "none")
+        self._algorithm_change_callback: Optional[Callable[[str], None]] = None
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
@@ -83,6 +85,10 @@ class Dashboard(QMainWindow):
         """设置安全通道引用，并刷新 QR 码以包含公钥。"""
         self._secure_channel = sc
         self._refresh_qr()
+
+    def set_algorithm_change_callback(self, callback: Callable[[str], None]):
+        """设置算法变更回调函数。"""
+        self._algorithm_change_callback = callback
 
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
@@ -186,6 +192,17 @@ class Dashboard(QMainWindow):
         if self._mode_switch_callback:
             self._mode_switch_callback(target_mode)
 
+    def _on_algorithm_clicked(self, algo: str) -> None:
+        """点击算法选择菜单项。"""
+        if algo == self._algorithm:
+            return
+        self._algorithm = algo
+        self.sm.set("e2ee_algorithm", algo)
+        if self._algorithm_change_callback:
+            self._algorithm_change_callback(algo)
+        self._refresh_qr()
+        self.update_connection_status(self.connected)
+
     def on_switch_completed(self) -> None:
         """模式切换完成（成功或失败），恢复菜单可用状态。"""
         self._switching = False
@@ -281,6 +298,34 @@ class Dashboard(QMainWindow):
         self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
         network_menu.addAction(self.switch_network_action)
 
+        network_menu.addSeparator()
+
+        # 加密方式子菜单
+        enc_menu = network_menu.addMenu(self.i18n.tr("dashboard.menu_encryption"))
+        algo_group = QActionGroup(self)
+        algo_group.setExclusive(True)
+
+        self.act_algo_none = QAction(self.i18n.tr("dashboard.algo_none"), self)
+        self.act_algo_none.setCheckable(True)
+        self.act_algo_none.setChecked(self._algorithm == "none")
+        self.act_algo_none.triggered.connect(lambda: self._on_algorithm_clicked("none"))
+        algo_group.addAction(self.act_algo_none)
+        enc_menu.addAction(self.act_algo_none)
+
+        self.act_algo_xsalsa20 = QAction(self.i18n.tr("dashboard.algo_xsalsa20"), self)
+        self.act_algo_xsalsa20.setCheckable(True)
+        self.act_algo_xsalsa20.setChecked(self._algorithm == "xsalsa20")
+        self.act_algo_xsalsa20.triggered.connect(lambda: self._on_algorithm_clicked("xsalsa20"))
+        algo_group.addAction(self.act_algo_xsalsa20)
+        enc_menu.addAction(self.act_algo_xsalsa20)
+
+        self.act_algo_xchacha20 = QAction(self.i18n.tr("dashboard.algo_xchacha20"), self)
+        self.act_algo_xchacha20.setCheckable(True)
+        self.act_algo_xchacha20.setChecked(self._algorithm == "xchacha20")
+        self.act_algo_xchacha20.triggered.connect(lambda: self._on_algorithm_clicked("xchacha20"))
+        algo_group.addAction(self.act_algo_xchacha20)
+        enc_menu.addAction(self.act_algo_xchacha20)
+
         # 帮助菜单
         help_action = QAction(self.i18n.tr("dashboard.menu_help_guide"), self)
         help_action.triggered.connect(self.open_user_guide)
@@ -331,7 +376,11 @@ class Dashboard(QMainWindow):
         self.connected = connected
         if connected:
             text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
-            text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
+            if self._algorithm == "none":
+                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
+            else:
+                algo_display = self.i18n.tr(f"dashboard.algo_{self._algorithm}")
+                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted_algo", algo=algo_display) + '</span>'
             self.status_label.setText(text)
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))
