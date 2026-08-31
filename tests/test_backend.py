@@ -130,7 +130,7 @@ def secure_server():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -154,7 +154,7 @@ def server_no_sc():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -315,7 +315,7 @@ def test_send_to_phone_when_disconnected():
     """没有连接时 send_to_phone 应返回 False"""
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     result = send_to_phone({"type": "test"})
@@ -553,7 +553,7 @@ def test_real_server_with_websocket_client():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -605,7 +605,7 @@ def test_server_start_stop():
     host = "127.0.0.1"
     port = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -627,7 +627,7 @@ def test_server_restart_cycle():
     port2 = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -662,7 +662,7 @@ def test_restart_server_with_different_host():
     port = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     lan_host = get_bind_address(TunnelMode.LAN)
@@ -696,7 +696,7 @@ def test_restart_server_preserves_bridge():
     port2 = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server("127.0.0.1", port, bridge)

@@ -96,7 +96,7 @@ def secure_server():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel()
+    sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -131,8 +131,11 @@ class TestAuthHandshake:
         host, port, queue, sc = secure_server
 
         with ws_connect(f"ws://{host}:{port}/ws") as ws:
-            ws.send(json.dumps({"type": "auth", "data": "garbage!!!"}))
-            # 连接应被关闭
+            ws.send(json.dumps({"type": "auth", "algo": "xsalsa20", "data": "garbage!!!"}))
+            # 服务端先发送拒绝消息再关闭
+            ack = json.loads(ws.recv(timeout=3))
+            assert ack["type"] == "auth_ack"
+            assert ack.get("rejected") is True
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
 

@@ -147,7 +147,7 @@ def _process_auth(page, channel):
 def secure_pair(page, request):
     """参数化 fixture：Python SecureChannel + JS SecureClient（已认证）。"""
     algo = request.param
-    channel = SecureChannel()
+    channel = SecureChannel(algorithm=algo)
     html = _prepare_html(channel, algo)
     page.set_content(html)
     _process_auth(page, channel)
@@ -323,7 +323,7 @@ class TestRoundtrip:
 class TestAlgorithmRejection:
     def test_none_rejected(self, page):
         """none 算法被 PC 端拒绝，JS 断开连接。"""
-        channel = SecureChannel()
+        channel = SecureChannel(algorithm="xsalsa20")
         html = _prepare_html(channel, "xsalsa20", force_none_algo=True)
         page.set_content(html)
 
