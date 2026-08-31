@@ -20,10 +20,10 @@ from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
-from phonemic.server.api import start_server, stop_server
+from phonemic.server.api import start_server, stop_server, set_secure_channel
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
-from phonemic.tunnel.mode import TunnelMode, set_mode
+from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
 from phonemic.utils.paths import get_res_path
 from phonemic.utils.i18n import I18n
@@ -160,8 +160,9 @@ def main():
     start_server(selected_ip, actual_port, bridge)
 
     # 安全通道
-    secure_channel = SecureChannel()
-    from phonemic.server.api import set_secure_channel
+    algorithm = sm.get("e2ee_algorithm", "none")
+    tunnel_mode = get_mode()
+    secure_channel = SecureChannel(algorithm=algorithm, mode=tunnel_mode.value)
     set_secure_channel(secure_channel)
 
     if not wait_for_server(selected_ip, actual_port):
@@ -237,6 +238,15 @@ def main():
     # 安全通道
     dashboard.set_secure_channel(secure_channel)
 
+    def _recreate_secure_channel(algo: str):
+        """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。"""
+        mode = dashboard.get_mode()
+        new_sc = SecureChannel(algorithm=algo, mode=mode.value)
+        set_secure_channel(new_sc)
+        dashboard.set_secure_channel(new_sc)
+
+    dashboard.set_algorithm_change_callback(_recreate_secure_channel)
+
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
         dashboard._switching = True
@@ -271,6 +281,10 @@ def main():
             mode = TunnelMode(payload)
             dashboard._mode = mode
             set_mode(mode)
+            # 模式变更后重建 SecureChannel（mode 影响 needs_auth 和 token 生成）
+            new_sc = SecureChannel(algorithm=sm.get("e2ee_algorithm", "none"), mode=mode.value)
+            set_secure_channel(new_sc)
+            dashboard.set_secure_channel(new_sc)
             dashboard._apply_mode_ui()
             dashboard.update_connection_status(dashboard.connected)
             if mode == TunnelMode.LAN:
