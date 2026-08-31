@@ -291,6 +291,39 @@ class TestNoneMode:
         msg = {"type": "send", "text": "hello"}
         assert sc.wrap(msg) == msg
 
+    def test_none_cf_unwrap_passthrough(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        msg = {"type": "send", "text": "hello"}
+        assert sc.unwrap(msg) == msg
+
+    def test_none_cf_tokens_unique(self):
+        sc1 = SecureChannel(algorithm="none", mode="cloudflare")
+        sc2 = SecureChannel(algorithm="none", mode="cloudflare")
+        assert sc1.get_public_key_b64() != sc2.get_public_key_b64()
+
+    def test_none_lan_on_new_connection_still_authenticated(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.is_authenticated is True
+        sc.on_new_connection()
+        assert sc.is_authenticated is True
+
+    def test_none_cf_on_new_connection_resets_auth(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        token = sc.get_public_key_b64()
+        sc.receive_auth({"type": "auth", "algo": "none", "data": token})
+        assert sc.is_authenticated is True
+        sc.on_new_connection()
+        assert sc.is_authenticated is False
+        assert sc.is_rejected is False
+
+    def test_none_cf_auth_wrong_algo_rejected(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        token = sc.get_public_key_b64()
+        auth_msg = {"type": "auth", "algo": "xsalsa20", "data": token}
+        assert sc.receive_auth(auth_msg) is False
+        assert sc.is_rejected is True
+        assert "not allowed" in sc.reject_reason
+
     def test_none_default_is_lan(self):
         sc = SecureChannel()
         assert sc.algorithm == "none"
