@@ -35,8 +35,8 @@ class XChaCha20Provider(CryptoProvider):
     4. 使用共享密钥通过 XChaCha20-Poly1305 加密通信
     """
 
-    def __init__(self):
-        self._pc_private = PrivateKey.generate()
+    def __init__(self, pc_private: Optional[PrivateKey] = None):
+        self._pc_private = pc_private or PrivateKey.generate()
         self._pc_public = self._pc_private.public_key
         self._aead: Optional[Aead] = None
 

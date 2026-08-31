@@ -32,8 +32,8 @@ class NaClBoxProvider(CryptoProvider):
     之后双向通信使用 crypto_box 加密。
     """
 
-    def __init__(self):
-        self._pc_private = PrivateKey.generate()
+    def __init__(self, pc_private: Optional[PrivateKey] = None):
+        self._pc_private = pc_private or PrivateKey.generate()
         self._pc_public = self._pc_private.public_key
         self._phone_public: Optional[PublicKey] = None
         self._box: Optional[Box] = None

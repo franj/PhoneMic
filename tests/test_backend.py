@@ -60,11 +60,12 @@ class PhoneSimulator:
         self._phone_public = self._phone_private.public_key
         self._box = Box(self._phone_private, self._pc_public)
 
-    def make_auth(self) -> dict:
+    def make_auth(self, algo: str = "xsalsa20") -> dict:
         sb = SealedBox(self._pc_public)
         sealed = sb.encrypt(bytes(self._phone_public))
         return {
             "type": "auth",
+            "algo": algo,
             "data": base64.urlsafe_b64encode(sealed).decode().rstrip("="),
         }
 

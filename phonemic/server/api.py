@@ -276,16 +276,19 @@ def _create_app() -> web.Application:
             await ws.close()
             return ws
 
-        # 尝试解密封装盒
-        if not _secure_channel.receive_auth(data.get("data", "")):
-            logger.warning("Auth failed: invalid sealed box, closing")
+        # 尝试认证（包含算法协商）
+        if not _secure_channel.receive_auth(data):
+            logger.warning(f"Auth failed: {_secure_channel.reject_reason}, closing")
+            # 发送拒绝消息
+            ack = _secure_channel.make_auth_ack()
+            await ws.send_str(json.dumps(ack, ensure_ascii=False))
             await ws.close()
             return ws
 
         # ---- 握手成功：发送 auth_ack ----
         ack = _secure_channel.make_auth_ack()
         await ws.send_str(json.dumps(ack, ensure_ascii=False))
-        logger.info("Auth succeeded, auth_ack sent")
+        logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
 
         # ---- S1: 注册连接 + 发送配置 ----
         await _manager.connect(ws)
