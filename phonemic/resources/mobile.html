@@ -701,86 +701,215 @@ __I18N_JSON__
         }
     }
 
-    // ========== 4. WebSocket 客户端 ==========
-    // ---- SecureClient：基于 libsodium 的 crypto_box 双向加密 ----
+    // ========== 4. 加密提供者 + WebSocket 客户端 ==========
+
+    // ---- CryptoProvider：加密算法提供者接口 ----
+    // 子类实现：initKeypair / setPcPublicKey / makeAuthData / handleAuthAck / encrypt / decrypt
+    // SecureClient 负责协调：URL 解析、算法选择、base64 编码、消息组装
+
+    class NaClBoxProvider {
+        static get algorithmName() { return 'xsalsa20'; }
+        constructor() {
+            this._phonePrivate = null;
+            this._phonePublicKey = null;
+            this._pcPublicKey = null;   // Uint8Array
+        }
+        initKeypair() {
+            const kp = sodium.crypto_box_keypair();
+            this._phonePrivate = kp.privateKey;
+            this._phonePublicKey = kp.publicKey;
+        }
+        setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
+        makeAuthData() {
+            if (!this._pcPublicKey) return null;
+            return sodium.crypto_box_seal(this._phonePublicKey, this._pcPublicKey);
+        }
+        handleAuthAck(rawBytes) {
+            try {
+                const nonce = rawBytes.slice(0, sodium.crypto_box_NONCEBYTES);
+                const ct = rawBytes.slice(sodium.crypto_box_NONCEBYTES);
+                const pt = sodium.crypto_box_open_easy(ct, nonce, this._pcPublicKey, this._phonePrivate);
+                const msg = JSON.parse(sodium.to_string(pt));
+                return msg.status === 'OK';
+            } catch (e) {
+                console.error('[SEC] auth_ack decrypt failed:', e);
+                return false;
+            }
+        }
+        encrypt(plaintextBytes) {
+            const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
+            const ct = sodium.crypto_box_easy(plaintextBytes, nonce, this._pcPublicKey, this._phonePrivate);
+            const combined = new Uint8Array(nonce.length + ct.length);
+            combined.set(nonce, 0);
+            combined.set(ct, nonce.length);
+            return combined;
+        }
+        decrypt(ciphertextBytes) {
+            const nonce = ciphertextBytes.slice(0, sodium.crypto_box_NONCEBYTES);
+            const ct = ciphertextBytes.slice(sodium.crypto_box_NONCEBYTES);
+            return sodium.crypto_box_open_easy(ct, nonce, this._pcPublicKey, this._phonePrivate);
+        }
+    }
+
+    class XChaCha20Provider {
+        static get algorithmName() { return 'xchacha20'; }
+        constructor() {
+            this._phonePrivate = null;
+            this._phonePublicKey = null;
+            this._pcPublicKey = null;
+            this._sharedKey = null;
+        }
+        initKeypair() {
+            const kp = sodium.crypto_box_keypair();
+            this._phonePrivate = kp.privateKey;
+            this._phonePublicKey = kp.publicKey;
+        }
+        setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
+        makeAuthData() {
+            if (!this._pcPublicKey) return null;
+            return sodium.crypto_box_seal(this._phonePublicKey, this._pcPublicKey);
+        }
+        _deriveSharedKey() {
+            this._sharedKey = sodium.crypto_scalarmult(this._phonePrivate, this._pcPublicKey);
+        }
+        handleAuthAck(rawBytes) {
+            try {
+                this._deriveSharedKey();
+                const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+                const nonce = rawBytes.slice(0, nonceSize);
+                const ct = rawBytes.slice(nonceSize);
+                const pt = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(ct, null, nonce, this._sharedKey);
+                const msg = JSON.parse(sodium.to_string(pt));
+                return msg.status === 'OK';
+            } catch (e) {
+                console.error('[SEC] auth_ack decrypt failed:', e);
+                return false;
+            }
+        }
+        encrypt(plaintextBytes) {
+            if (!this._sharedKey) this._deriveSharedKey();
+            const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+            const ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintextBytes, null, nonce, this._sharedKey);
+            const combined = new Uint8Array(nonce.length + ct.length);
+            combined.set(nonce, 0);
+            combined.set(ct, nonce.length);
+            return combined;
+        }
+        decrypt(ciphertextBytes) {
+            const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+            const nonce = ciphertextBytes.slice(0, nonceSize);
+            const ct = ciphertextBytes.slice(nonceSize);
+            return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(ct, null, nonce, this._sharedKey);
+        }
+    }
+
+    class PlainProvider {
+        static get algorithmName() { return 'none'; }
+        initKeypair() {}
+        setPcPublicKey(rawBytes) {}
+        makeAuthData() { return null; }
+        handleAuthAck(rawBytes) { return true; }
+        encrypt(plaintextBytes) { return plaintextBytes; }
+        decrypt(ciphertextBytes) { return ciphertextBytes; }
+    }
+
+    const PROVIDER_CLASSES = { 'none': PlainProvider, 'xsalsa20': NaClBoxProvider, 'xchacha20': XChaCha20Provider };
+
+    // ---- SecureClient：加密协调器 ----
     class SecureClient {
         constructor() {
-            this._pcPublicKey = null;   // Uint8Array(32) - 从 QR 码获取
-            this._phonePrivate = null;   // Uint8Array(32)
-            this._phonePublicKey = null;  // Uint8Array(32)
+            this._provider = null;
+            this._pcPublicKeyB64 = null;
+            this._pcPublicKeyRaw = null;
+            this._availableAlgos = [];
+            this._preferredAlgo = 'xsalsa20';
+            this._selectedAlgo = null;
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
         }
-        get hasKey() { return this._pcPublicKey !== null; }
+        get hasKey() { return this._selectedAlgo === 'none' || this._pcPublicKeyB64 !== null; }
         get isAuthenticated() { return this._authenticated; }
 
         async init() {
             await sodium.ready;
             this._ready = true;
             this._b64Variant = sodium.base64_VARIANT_URLSAFE_NO_PADDING;
-            // 从 URL fragment (#k=...) 提取 PC 公钥
-            const match = location.hash.match(/[#&]k=([^&]+)/);
-            if (match) {
-                try {
-                    this._pcPublicKey = this._fromB64(match[1]);
-                } catch (e) {
-                    console.error('[SEC] Failed to decode PC public key:', e);
-                }
+            this._parseUrlFragment();
+            this._selectAlgorithm();
+            this._createProvider();
+            if (this._provider.initKeypair) this._provider.initKeypair();
+            if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
+            console.log('[SEC] sodium ready, algorithm:', this._selectedAlgo);
+        }
+
+        _parseUrlFragment() {
+            const hash = location.hash;
+            const kMatch = hash.match(/[#&]k=([^&]+)/);
+            if (kMatch) this._pcPublicKeyB64 = kMatch[1];
+            const aMatch = hash.match(/[#&]a=([^&]+)/);
+            this._availableAlgos = aMatch ? aMatch[1].split(',') : ['xsalsa20'];
+            const pMatch = hash.match(/[#&]p=([^&]+)/);
+            if (pMatch) this._preferredAlgo = pMatch[1];
+        }
+
+        _selectAlgorithm() {
+            const supported = ['none'];
+            if (typeof sodium.crypto_box_easy === 'function') supported.push('xsalsa20');
+            if (typeof sodium.crypto_aead_xchacha20poly1305_ietf_encrypt === 'function') supported.push('xchacha20');
+            if (supported.includes(this._preferredAlgo) && this._availableAlgos.includes(this._preferredAlgo)) {
+                this._selectedAlgo = this._preferredAlgo;
+            } else {
+                this._selectedAlgo = this._availableAlgos.find(a => supported.includes(a)) || 'none';
             }
-            // 生成手机端密钥对
-            const kp = sodium.crypto_box_keypair();
-            this._phonePrivate = kp.privateKey;
-            this._phonePublicKey = kp.publicKey;
-            console.log('[SEC] sodium ready, phone keypair generated');
+        }
+
+        _createProvider() {
+            const Cls = PROVIDER_CLASSES[this._selectedAlgo];
+            this._provider = new Cls();
+            if (this._pcPublicKeyB64) {
+                this._pcPublicKeyRaw = sodium.from_base64(this._pcPublicKeyB64, this._b64Variant);
+            }
         }
 
         _toB64(bytes) { return sodium.to_base64(bytes, this._b64Variant); }
         _fromB64(str) { return sodium.from_base64(str, this._b64Variant); }
 
-        /** 生成 auth 消息：用 crypto_box_seal 密封手机公钥 */
         makeAuth() {
-            if (!this._pcPublicKey) return null;
-            const sealed = sodium.crypto_box_seal(this._phonePublicKey, this._pcPublicKey);
-            return { type: 'auth', data: this._toB64(sealed) };
+            const auth = { type: 'auth', algo: this._selectedAlgo };
+            const authData = this._provider.makeAuthData();
+            if (authData) auth.data = this._toB64(authData);
+            return auth;
         }
 
-        /** 处理 auth_ack：用 crypto_box 解密确认消息 */
-        handleAuthAck(data) {
-            try {
-                const raw = this._fromB64(data);
-                const nonce = raw.slice(0, sodium.crypto_box_NONCEBYTES);
-                const ct = raw.slice(sodium.crypto_box_NONCEBYTES);
-                const pt = sodium.crypto_box_open_easy(ct, nonce, this._pcPublicKey, this._phonePrivate);
-                const msg = JSON.parse(sodium.to_string(pt));
-                if (msg.status === 'OK') {
+        handleAuthAck(ackMsg) {
+            if (ackMsg.rejected) {
+                console.error('[SEC] Auth rejected:', ackMsg.reason);
+                return false;
+            }
+            if (ackMsg.data) {
+                const raw = this._fromB64(ackMsg.data);
+                if (this._provider.handleAuthAck(raw)) {
                     this._authenticated = true;
                     console.log('[SEC] Authenticated by server');
                     return true;
                 }
-            } catch (e) {
-                console.error('[SEC] auth_ack decrypt failed:', e);
+            } else {
+                this._authenticated = true;
+                return true;
             }
             return false;
         }
 
-        /** 加密消息：crypto_box → { type: 'data', data: nonce+ct } */
         encrypt(msg) {
             const pt = sodium.from_string(JSON.stringify(msg));
-            const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
-            const ct = sodium.crypto_box_easy(pt, nonce, this._pcPublicKey, this._phonePrivate);
-            const combined = new Uint8Array(nonce.length + ct.length);
-            combined.set(nonce, 0);
-            combined.set(ct, nonce.length);
-            return { type: 'data', data: this._toB64(combined) };
+            const encrypted = this._provider.encrypt(pt);
+            return { type: 'data', data: this._toB64(encrypted) };
         }
 
-        /** 解密服务端消息 */
         decrypt(envelope) {
             const raw = this._fromB64(envelope.data);
-            const nonce = raw.slice(0, sodium.crypto_box_NONCEBYTES);
-            const ct = raw.slice(sodium.crypto_box_NONCEBYTES);
-            const pt = sodium.crypto_box_open_easy(ct, nonce, this._pcPublicKey, this._phonePrivate);
+            const pt = this._provider.decrypt(raw);
             return JSON.parse(sodium.to_string(pt));
         }
     }
@@ -805,13 +934,10 @@ __I18N_JSON__
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    // 立即发送 auth：密封手机公钥
                     if (this.secure.hasKey) {
                         const authMsg = this.secure.makeAuth();
-                        if (authMsg) {
-                            this.ws.send(JSON.stringify(authMsg));
-                            console.log('[SEC] Auth sent');
-                        }
+                        this.ws.send(JSON.stringify(authMsg));
+                        console.log('[SEC] Auth sent, algo:', authMsg.algo);
                     } else {
                         this._showNoKeyWarning();
                     }
@@ -820,9 +946,8 @@ __I18N_JSON__
                     try {
                         const data = JSON.parse(event.data);
 
-                        // auth_ack：握手确认
                         if (data.type === 'auth_ack') {
-                            if (this.secure.handleAuthAck(data.data)) {
+                            if (this.secure.handleAuthAck(data)) {
                                 this.isConnected = true;
                                 this._notifyStatusChange(true);
                             } else {
@@ -832,7 +957,6 @@ __I18N_JSON__
                             return;
                         }
 
-                        // data：解密后处理
                         if (data.type === 'data') {
                             let inner;
                             try {
