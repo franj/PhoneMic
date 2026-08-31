@@ -256,52 +256,52 @@ def _create_app() -> web.Application:
         # 每个新连接重置安全通道状态
         _secure_channel.on_new_connection()
 
-        # ---- S0: 等待 auth（10 秒超时）----
-        try:
-            msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
-        except asyncio.TimeoutError:
-            logger.warning("Auth timeout (10s), closing connection")
-            await ws.close()
-            return ws
-        except Exception as e:
-            logger.warning(f"Auth receive error: {e}")
-            await ws.close()
-            return ws
+        # ---- S0: 等待 auth（仅在 needs_auth 时）----
+        if _secure_channel.needs_auth:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("Auth timeout (10s), closing connection")
+                await ws.close()
+                return ws
+            except Exception as e:
+                logger.warning(f"Auth receive error: {e}")
+                await ws.close()
+                return ws
 
-        if msg.type != WSMsgType.TEXT:
-            await ws.close()
-            return ws
+            if msg.type != WSMsgType.TEXT:
+                await ws.close()
+                return ws
 
-        try:
-            data = json.loads(msg.data)
-        except json.JSONDecodeError:
-            await ws.close()
-            return ws
+            try:
+                data = json.loads(msg.data)
+            except json.JSONDecodeError:
+                await ws.close()
+                return ws
 
-        # S0: 第一条消息必须是 auth
-        if data.get("type") != "auth":
-            logger.warning(f"Expected auth, got: {data.get('type')}, closing")
-            await ws.close()
-            return ws
+            # S0: 第一条消息必须是 auth
+            if data.get("type") != "auth":
+                logger.warning(f"Expected auth, got: {data.get('type')}, closing")
+                await ws.close()
+                return ws
 
-        # 尝试认证（包含算法协商）
-        if not _secure_channel.receive_auth(data):
-            logger.warning(f"Auth failed: {_secure_channel.reject_reason}, closing")
-            # 发送拒绝消息
+            # 尝试认证
+            if not _secure_channel.receive_auth(data):
+                logger.warning(f"Auth failed: {_secure_channel.reject_reason}, closing")
+                ack = _secure_channel.make_auth_ack()
+                await ws.send_str(json.dumps(ack, ensure_ascii=False))
+                await ws.close()
+                return ws
+
+            # 握手成功：发送 auth_ack
             ack = _secure_channel.make_auth_ack()
             await ws.send_str(json.dumps(ack, ensure_ascii=False))
-            await ws.close()
-            return ws
-
-        # ---- 握手成功：发送 auth_ack ----
-        ack = _secure_channel.make_auth_ack()
-        await ws.send_str(json.dumps(ack, ensure_ascii=False))
-        logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
+            logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
 
         # ---- S1: 注册连接 + 发送配置 ----
         await _manager.connect(ws)
 
-        # ---- S1: 处理后续消息（仅接受 data）----
+        # ---- S1: 处理后续消息 ----
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -314,18 +314,21 @@ def _create_app() -> web.Application:
                             await ws.close()
                             break
 
-                        # S1: 仅接受 data
-                        if data.get("type") != "data":
-                            logger.warning(f"Expected data, got: {data.get('type')}, closing")
-                            await ws.close()
-                            break
+                        if _secure_channel.is_encrypted:
+                            # 加密模式：仅接受 data 信封
+                            if data.get("type") != "data":
+                                logger.warning(f"Expected data, got: {data.get('type')}, closing")
+                                await ws.close()
+                                break
 
-                        # 解密
-                        inner = _secure_channel.unwrap(data)
-                        if inner is None:
-                            logger.warning("Decryption failed, closing")
-                            await ws.close()
-                            break
+                            inner = _secure_channel.unwrap(data)
+                            if inner is None:
+                                logger.warning("Decryption failed, closing")
+                                await ws.close()
+                                break
+                        else:
+                            # none 模式：直接处理明文 JSON
+                            inner = data
 
                         # 处理内部消息
                         msg_type = inner.get("type")

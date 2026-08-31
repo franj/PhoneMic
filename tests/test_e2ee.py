@@ -191,6 +191,10 @@ class TestSecureChannelStateMachine:
         sc = SecureChannel(algorithm=ALGO)
         assert sc.is_authenticated is False
 
+    def test_none_lan_auto_authenticated(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.is_authenticated is True
+
     def test_on_new_connection_resets_state(self):
         sc = SecureChannel(algorithm=ALGO)
         sc._authenticated = True

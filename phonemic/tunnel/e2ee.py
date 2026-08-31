@@ -59,7 +59,7 @@ class SecureChannel:
 
     def _reset_connection(self):
         self._provider = None
-        self._authenticated = False
+        self._authenticated = not self.needs_auth
         self._connected_at = time.monotonic()
         self._rejected = False
         self._reject_reason = ""
