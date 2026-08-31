@@ -546,3 +546,62 @@ class TestNoneCloudflareRejection:
         assert page.evaluate("() => window.__wsClient.isConnected") is False
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
+
+
+# ---------- 认证失败：用户提示与重连策略 ----------
+
+class TestAuthFailureUX:
+    """认证失败后：明确提示用户、停止无意义重连；密钥缺失时不发起连接。"""
+
+    def test_rejected_ack_shows_warning_and_stops_reconnect(self, page):
+        """模拟旧二维码：服务端拒绝认证后提示重新扫码，且不再自动重连。"""
+        pc = SecureChannel(algorithm="xsalsa20")
+        html = _prepare_html(pc, "xsalsa20")
+        page.set_content(html)
+        _wait_auth(page)
+
+        # 服务端拒绝（对应二维码过期 / 密钥不匹配）
+        page.evaluate(
+            "(msg) => window.__mockWS.triggerMessage(msg)",
+            json.dumps({"type": "auth_ack", "rejected": True, "reason": "auth data processing failed"}),
+        )
+
+        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
+        # 状态栏提示重新扫码，输入框禁用
+        text = page.locator("#status-bar").inner_text()
+        assert "重新扫码" in text
+        assert page.locator("#input-box").is_disabled()
+        # 不再安排重连
+        assert page.evaluate("() => window.__wsClient.reconnectTimer") is None
+
+    def test_missing_key_does_not_connect(self, page):
+        """加密算法但 URL 无密钥（如浏览器丢失 hash）：直接提示，不建立连接。"""
+        pc = SecureChannel(algorithm="xsalsa20")
+        html = _prepare_html(pc, "xsalsa20")
+        # 去掉注入的公钥，模拟 hash 丢失
+        html = html.replace(f"this._pcPublicKeyB64 = '{pc.get_public_key_b64()}';", "")
+
+        page.set_content(html)
+        page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready", timeout=5000)
+
+        # 未创建 WebSocket，状态栏提示重新扫码
+        assert page.evaluate("() => window.__mockWS.current") is None
+        text = page.locator("#status-bar").inner_text()
+        assert "重新扫码" in text
+        assert page.locator("#input-box").is_disabled()
+
+    def test_reconnect_backoff_and_reset(self, secure_pair):
+        """断连重连采用指数退避，连接成功后退避重置。"""
+        page, channel, algo = secure_pair
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+
+        # 两次断连：2000 → 4000 → 8000
+        page.evaluate("() => window.__mockWS.triggerClose()")
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 4000
+        page.evaluate("() => window.__mockWS.triggerClose()")
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 8000
+        assert page.evaluate("() => window.__wsClient.reconnectTimer") is not None
+
+        # 连接成功后退避重置
+        page.evaluate("() => window.__wsClient.ws.onopen()")
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000

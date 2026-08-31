@@ -126,10 +126,9 @@
     "log_ws_unknown_type": "[WS] 未处理的消息类型:",
     "log_ws_parse_error": "[WS] 解析消息失败",
     "log_config_updated": "[Config] 更新 maxHistory = ",
-    "auth_title": "设备配对",
-    "auth_pairing_hint": "请在电脑端查看配对码并输入",
-    "auth_submit": "确认配对",
-    "auth_failed": "认证失败"
+    "auth_rejected_text": "认证失败，请重新扫码",
+    "auth_nokey_text": "页面缺少密钥，请重新扫码",
+    "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
   },
   "commands": {
     "title": "命令管理",

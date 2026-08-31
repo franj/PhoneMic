@@ -126,10 +126,9 @@
     "log_ws_unknown_type": "[WS] 未處理的訊息類型:",
     "log_ws_parse_error": "[WS] 解析訊息失敗",
     "log_config_updated": "[Config] 更新 maxHistory = ",
-    "auth_title": "裝置配對",
-    "auth_pairing_hint": "請在電腦端查看配對碼並輸入",
-    "auth_submit": "確認配對",
-    "auth_failed": "認證失敗"
+    "auth_rejected_text": "認證失敗，請重新掃碼",
+    "auth_nokey_text": "頁面缺少密鑰，請重新掃碼",
+    "auth_wechat_hint": "微信瀏覽器可能無法保留密鑰，請用系統瀏覽器開啟此頁面"
   },
   "commands": {
     "title": "命令管理",

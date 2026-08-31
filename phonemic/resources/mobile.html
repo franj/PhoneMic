@@ -299,10 +299,9 @@ __I18N_JSON__
         "log_ws_unknown_type": "[WS] 未处理的消息类型:",
         "log_ws_parse_error": "[WS] 解析消息失败",
         "log_config_updated": "[Config] 更新 maxHistory = ",
-        "auth_title": "设备配对",
-        "auth_pairing_hint": "请在电脑端查看配对码并输入",
-        "auth_submit": "确认配对",
-        "auth_failed": "认证失败"
+        "auth_rejected_text": "认证失败，请重新扫码",
+        "auth_nokey_text": "页面缺少密钥，请重新扫码",
+        "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
     };
 
     var i18nData = {};
@@ -807,19 +806,28 @@ __I18N_JSON__
             this.ws = null;
             this.isConnected = false;
             this.reconnectInterval = 2000;
+            this.maxReconnectInterval = 15000;
             this.reconnectTimer = null;
+            this.authRejected = false;
             this.messageHandlers = new Map();
             this.secure = new SecureClient();
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
 
         async connect() {
+            if (this.authRejected) return;
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+            // 加密模式但 URL 中没有密钥（如浏览器丢失 hash）：重连无法恢复，直接提示重新扫码
+            if (this.secure.isEncrypted && !this.secure.needsAuth) {
+                this._showAuthRejected(false);
+                return;
+            }
             try {
                 this.ws = new WebSocket(this.url);
                 this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                    this.reconnectInterval = 2000; // 连接成功，重置重连退避
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
                         this.ws.send(JSON.stringify(authMsg));
@@ -838,7 +846,9 @@ __I18N_JSON__
                                 this.isConnected = true;
                                 this._notifyStatusChange(true);
                             } else {
-                                console.error('[SEC] auth_ack failed, reconnecting');
+                                // 密钥不匹配（如旧二维码），重试结果相同：停止自动重连并提示重新扫码
+                                this.authRejected = true;
+                                this._showAuthRejected(true);
                                 this.ws.close();
                             }
                             return;
@@ -880,6 +890,7 @@ __I18N_JSON__
                     console.log(window.i18n.log_ws_disconnected);
                     this.isConnected = false;
                     this.secure._authenticated = false;
+                    if (this.authRejected) return; // 保持认证失败提示，不再自动重连
                     this._notifyStatusChange(false);
                     this._scheduleReconnect();
                 };
@@ -892,22 +903,17 @@ __I18N_JSON__
         _scheduleReconnect() {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
             this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
+            // 指数退避，避免断连后高频重试；连接成功后在 onopen 中重置
+            this.reconnectInterval = Math.min(this.reconnectInterval * 2, this.maxReconnectInterval);
         }
-        _notifyStatusChange(connected) {
-            document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected } }));
+        _notifyStatusChange(connected, message) {
+            document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
         }
-        _showNoKeyWarning() {
-            const sb = document.getElementById('status-bar');
-            if (!sb) return;
+        _showAuthRejected(hasKey) {
             const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
-            sb.style.display = 'block';
-            sb.style.background = '#fff3cd';
-            sb.style.color = '#856404';
-            if (isWeChat) {
-                sb.innerText = '微信浏览器可能丢失加密密钥，请在系统浏览器中打开此页面';
-            } else {
-                sb.innerText = '请重新扫码以获取密钥';
-            }
+            let text = hasKey ? window.i18n.auth_rejected_text : window.i18n.auth_nokey_text;
+            if (isWeChat) text += '。' + window.i18n.auth_wechat_hint;
+            this._notifyStatusChange(false, text);
         }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
@@ -1068,7 +1074,7 @@ __I18N_JSON__
                 setTimeout(() => this.chatManager.scrollToBottom(), 300);
             });
 
-            document.addEventListener('ws-status', (e) => this.onConnectionChange(e.detail.connected));
+            document.addEventListener('ws-status', (e) => this.onConnectionChange(e.detail.connected, e.detail.message));
             this.setupScrollFix();
         }
 
@@ -1115,7 +1121,7 @@ __I18N_JSON__
             }
             this.modeToggle.style.display = (this.inputBox.value.trim() === '') ? 'block' : 'none';
         }
-        onConnectionChange(connected) {
+        onConnectionChange(connected, message) {
             const statusBar = document.getElementById('status-bar');
             const chatListDiv = document.getElementById('chat-list');
             if (connected) {
@@ -1129,7 +1135,7 @@ __I18N_JSON__
                 this.updateModeToggleVisibility();
             } else {
                 statusBar.style.display = 'block';
-                statusBar.innerText = window.i18n.status_disconnected_text;
+                statusBar.innerText = message || window.i18n.status_disconnected_text;
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
@@ -1187,8 +1193,8 @@ __I18N_JSON__
         // 初始化安全通道（从 URL 提取 PC 公钥 + 生成手机密钥对）
         await wsClient.secure.init();
 
-        wsClient.connect();
         uiController.onConnectionChange(false);
+        wsClient.connect();
         chatManager.scrollToBottom();
         if (inputBox.value === '') modeToggle.style.display = 'block';
     };

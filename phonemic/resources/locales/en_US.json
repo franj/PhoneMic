@@ -125,10 +125,9 @@
     "log_ws_unknown_type": "[WS] Unknown message type:",
     "log_ws_parse_error": "[WS] Failed to parse message",
     "log_config_updated": "[Config] Updated maxHistory = ",
-    "auth_title": "Device Pairing",
-    "auth_pairing_hint": "Check the pairing code on your computer and enter it",
-    "auth_submit": "Confirm Pairing",
-    "auth_failed": "Authentication failed"
+    "auth_rejected_text": "Authentication failed. Please scan the QR code again",
+    "auth_nokey_text": "Key missing from this page. Please scan the QR code again",
+    "auth_wechat_hint": "WeChat built-in browser may lose the key. Please open this page in a system browser"
   },
   "commands": {
     "title": "Command Manager",
