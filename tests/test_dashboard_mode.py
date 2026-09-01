@@ -121,6 +121,54 @@ class TestUrlDisplay:
         dashboard.update_tunnel_url("https://example.trycloudflare.com")
         assert "example.trycloudflare.com" in dashboard.url_text.toPlainText()
 
+    def test_url_text_is_centered(self, dashboard):
+        """地址栏文本必须居中（通过 helper 方法应用 block 居中格式）。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextCursor
+        # PySide6: QTextCursor.SelectionType.Document（不是 QTextCursor.Document）
+        cursor = dashboard.url_text.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+
+    def test_set_url_text_helper_keeps_centering(self, dashboard):
+        """多次通过 helper 设置文本后仍居中。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextCursor
+        dashboard._set_url_text("https://a.trycloudflare.com")
+        cursor = dashboard.url_text.textCursor()
+        cursor.select(QTextCursor.Document)
+        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+        dashboard._set_url_text("https://b.trycloudflare.com")
+        cursor = dashboard.url_text.textCursor()
+        cursor.select(QTextCursor.Document)
+        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+
+    def test_url_text_supports_long_wrapping(self, dashboard):
+        """长 URL 走自动换行，多行居中。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QTextEdit
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextCursor
+        long_url = "https://very-long-subdomain-name-that-will-wrap.trycloudflare.com:8443"
+        dashboard._set_url_text(long_url)
+        # QTextEdit 在只读 + NoWrap 时不换行，WidgetWidth 才换行
+        assert dashboard.url_text.lineWrapMode() == QTextEdit.WidgetWidth
+        # 单段落居中（自动换行是视觉上的，不增加段落）
+        cursor = dashboard.url_text.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+
+    def test_url_text_updates_keep_centering(self, dashboard):
+        """多次更新 URL 后仍居中（默认段落格式不应被覆盖）。"""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextCursor
+        dashboard._set_url_text("https://a.trycloudflare.com")
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard._set_url_text("https://b.trycloudflare.com")
+        cursor = dashboard.url_text.textCursor()
+        cursor.select(QTextCursor.Document)
+        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+
 
 class TestEncryptionModeRestriction:
     """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际使用 xchacha20。"""

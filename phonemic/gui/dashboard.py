@@ -90,6 +90,20 @@ class Dashboard(QMainWindow):
         """设置算法变更回调函数。"""
         self._algorithm_change_callback = callback
 
+    def _set_url_text(self, text: str) -> None:
+        """写地址栏文本并居中。
+
+        QTextEdit 没有全局 alignment 属性，setAlignment 只影响当前段落，
+        而空文档 setAlignment 后 setPlainText 会用默认左对齐。
+        统一在这里设置文本 + 应用 block 居中格式。
+        """
+        self.url_text.setPlainText(text)
+        cursor = self.url_text.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        fmt = cursor.blockFormat()
+        fmt.setAlignment(Qt.AlignCenter)
+        cursor.mergeBlockFormat(fmt)
+
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -124,8 +138,8 @@ class Dashboard(QMainWindow):
         self.url_text.setStyleSheet(
             "QTextEdit { background: transparent; border: none; padding: 2px; }"
         )
-        self.url_text.setAlignment(Qt.AlignCenter)
-        self.url_text.setPlainText(f"http://{ip}:{port}")
+        # 居中由 _set_url_text helper 在每次写文本时通过 cursor.mergeBlockFormat 完成
+        self._set_url_text(f"http://{ip}:{port}")
         layout.addWidget(self.url_text)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
@@ -176,7 +190,7 @@ class Dashboard(QMainWindow):
             if self._tunnel_url:
                 self._refresh_qr()
             else:
-                self.url_text.setPlainText(self.i18n.tr("dashboard.cf_connecting"))
+                self._set_url_text(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
@@ -200,7 +214,7 @@ class Dashboard(QMainWindow):
         self._switching = True
         self.act_lan.setEnabled(False)
         self.act_cf.setEnabled(False)
-        self.url_text.setPlainText(self.i18n.tr("dashboard.switching"))
+        self._set_url_text(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
         self._apply_mode_ui()
@@ -248,7 +262,7 @@ class Dashboard(QMainWindow):
             return
         url = self._get_qr_url()
         self.qr_label.setPixmap(make_qr_pixmap(url))
-        self.url_text.setPlainText(url)
+        self._set_url_text(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
@@ -263,7 +277,7 @@ class Dashboard(QMainWindow):
                 else:
                     self._refresh_qr()
             else:
-                self.url_text.setPlainText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
+                self._set_url_text("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
     def get_mode(self) -> TunnelMode:
         """返回当前模式。"""
