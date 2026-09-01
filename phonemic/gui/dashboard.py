@@ -113,13 +113,13 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        # 地址栏：只读 QTextEdit，用户可以横向滚动、框选、复制
-        # QLabel 文本超出可视区域无法滚动选中和完整复制，QR 长 URL 经常被截断
+        # 地址栏：只读 QTextEdit，自动换行、多行时垂直滚动条可见
+        # 用户可以框选/复制完整 URL（QLabel 长文本无法滚动选中，复制会被截断）
         self.url_text = QTextEdit()
         self.url_text.setReadOnly(True)
-        self.url_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.url_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.url_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.url_text.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.url_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.url_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.url_text.setMaximumHeight(60)
         self.url_text.setStyleSheet(
             "QTextEdit { background: transparent; border: none; padding: 2px; }"
