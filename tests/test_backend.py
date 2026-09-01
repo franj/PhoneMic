@@ -109,10 +109,11 @@ def authenticate_and_verify(ws, phone):
     return inner
 
 
-def consume_connect(queue):
-    """消费 connect 事件。"""
-    msg_type, _ = queue.get(timeout=2)
+def consume_connect(queue, algo="xsalsa20"):
+    """消费 connect 事件，并断言事件携带协商出的算法。"""
+    msg_type, payload = queue.get(timeout=2)
     assert msg_type == "connect"
+    assert payload == algo
 
 
 def consume_initial_config(ws, phone):

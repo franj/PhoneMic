@@ -8,15 +8,23 @@ import pytest
 
 from phonemic.gui.dashboard import Dashboard
 from phonemic.tunnel.mode import TunnelMode
+from phonemic.utils.settings_manager import SettingsManager
 
 
 @pytest.fixture
-def dashboard(qtbot):
-    with patch("phonemic.gui.dashboard.get_mode", return_value=TunnelMode.LAN):
-        d = Dashboard("192.168.1.100", 12000)
-        d._is_force_quitting = True  # prevent closeEvent tray access
-        qtbot.addWidget(d)
-        yield d
+def dashboard(qtbot, tmp_path, monkeypatch):
+    # 隔离配置：指向临时目录并重置单例，避免读写真实用户配置
+    import phonemic.utils.settings_manager as sm_mod
+    monkeypatch.setattr(sm_mod, "get_config_dir", lambda: tmp_path)
+    SettingsManager._instance = None
+    try:
+        with patch("phonemic.gui.dashboard.get_mode", return_value=TunnelMode.LAN):
+            d = Dashboard("192.168.1.100", 12000)
+            d._is_force_quitting = True  # prevent closeEvent tray access
+            qtbot.addWidget(d)
+            yield d
+    finally:
+        SettingsManager._instance = None
 
 
 class TestModeToggle:
@@ -217,9 +225,34 @@ class TestEncryptionToggle:
         assert dashboard.sm.get("e2ee_algorithm") == "none"
         assert dashboard.act_algo_none.isChecked() is True
 
-    def test_status_shows_encrypted_not_algorithm(self, dashboard):
-        """状态栏只显示 加密/明文，不显示具体算法名。"""
+    def test_status_shows_negotiated_algorithm(self, dashboard):
+        """加密连接时状态栏显示协商出的具体算法（信息透明，菜单不让用户选）。"""
+        dashboard._algorithm = "auto"
+        dashboard.update_connection_status(True, "xchacha20")
+        assert "XChaCha20" in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_encrypted_algo", algo="XChaCha20") \
+            in dashboard.status_label.text()
+
+    def test_status_encrypted_without_negotiated_algo(self, dashboard):
+        """未携带协商算法（如模式切换后刷新）时退化为通用 加密 文案。"""
         dashboard._algorithm = "auto"
         dashboard.update_connection_status(True)
         assert "XChaCha20" not in dashboard.status_label.text()
         assert dashboard.i18n.tr("dashboard.status_encrypted") in dashboard.status_label.text()
+
+    def test_status_negotiated_algo_cleared_on_disconnect(self, dashboard):
+        """断开后清空协商结果，明文模式不显示算法。"""
+        dashboard._algorithm = "auto"
+        dashboard.update_connection_status(True, "xchacha20")
+        assert dashboard._negotiated_algo == "xchacha20"
+        dashboard.update_connection_status(False)
+        assert dashboard._negotiated_algo is None
+        dashboard._algorithm = "none"
+        dashboard.update_connection_status(True)
+        assert "XChaCha20" not in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_plaintext") in dashboard.status_label.text()
+
+    def test_algo_display_name_fallback_for_unknown_algo(self, dashboard):
+        """locale 缺失的算法名回退为原始算法名（未来新增算法无需先加 locale）。"""
+        assert dashboard._algo_display_name("xchacha20") == "XChaCha20"
+        assert dashboard._algo_display_name("aes-256-gcm") == "aes-256-gcm"

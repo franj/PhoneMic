@@ -94,6 +94,16 @@ class SecureSession:
     def reject_reason(self) -> str:
         return self._reject_reason
 
+    @property
+    def negotiated_algorithm(self) -> str:
+        """本次握手实际协商出的算法（客户端从 a= 列表中回传的选择）。
+
+        未握手或 none 模式返回 "none"，加密模式返回 provider 的算法名。
+        """
+        if self._provider is None:
+            return "none"
+        return self._provider.algorithm_name()
+
     # ---- 握手 ----
 
     def receive_auth(self, auth_msg: dict) -> bool:

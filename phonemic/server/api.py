@@ -75,8 +75,12 @@ class ConnectionManager:
 
         self.active_websocket = ws
         self.active_session = session
-        self.bridge.emit("connect")
-        logger.info("WebSocket connected, connection established")
+        # connect 事件携带本次握手协商出的算法，供状态栏透明展示
+        self.bridge.emit("connect", session.negotiated_algorithm)
+        logger.info(
+            f"WebSocket connected, connection established "
+            f"(algorithm={session.negotiated_algorithm})"
+        )
 
         # 发送当前配置（加密传输）
         try:

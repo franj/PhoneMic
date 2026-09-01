@@ -267,7 +267,9 @@ def main():
                 flash_insert(payload)
             hud.hide()
         elif event_type == "connect":
-            dashboard.update_connection_status(True)
+            # payload 为本次握手协商出的算法名（明文模式为 "none"）
+            algo = payload if isinstance(payload, str) else None
+            dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
         elif event_type == "disconnect":
             dashboard.update_connection_status(False)

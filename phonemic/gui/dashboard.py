@@ -68,6 +68,7 @@ class Dashboard(QMainWindow):
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._secure_channel = None  # SecureChannel 引用，由外部设置
         self._algorithm: str = self.sm.get("e2ee_algorithm", "none")
+        self._negotiated_algo: Optional[str] = None  # 本次连接握手协商出的算法，由 connect 事件携带
         self._algorithm_change_callback: Optional[Callable[[str], None]] = None
         self._setup_ui(ip, port)
         self._setup_menu()
@@ -378,14 +379,30 @@ class Dashboard(QMainWindow):
             QMessageBox.warning(self, self.i18n.tr("help.warning"),
                                 self.i18n.tr("help.file_not_found"))
 
-    def update_connection_status(self, connected: bool) -> None:
+    def _algo_display_name(self, algo: str) -> str:
+        """算法显示名：优先取 locale，缺失时回退为原始算法名。"""
+        key = f"dashboard.algo_{algo}"
+        tr = self.i18n.tr(key)
+        return tr if tr != key else algo
+
+    def update_connection_status(self, connected: bool, algorithm: Optional[str] = None) -> None:
         self.connected = connected
+        # algorithm 仅在 connect 事件中携带；断开时清空协商结果
+        if connected and algorithm is not None:
+            self._negotiated_algo = algorithm
+        elif not connected:
+            self._negotiated_algo = None
         if connected:
             text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
             if effective_algorithm(self._algorithm, self._mode) == "none":
                 text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
+            elif self._negotiated_algo and self._negotiated_algo != "none":
+                # 算法由客户端协商决定，状态栏透明展示实际算法
+                algo_display = self._algo_display_name(self._negotiated_algo)
+                text += ' <span style="color:#666;">| ' + self.i18n.tr(
+                    "dashboard.status_encrypted_algo", algo=algo_display) + '</span>'
             else:
-                # 具体算法由客户端协商，状态栏只显示加密/明文
+                # 尚未收到协商结果（如模式切换后状态刷新）时退化为通用文案
                 text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
             self.status_label.setText(text)
         else:

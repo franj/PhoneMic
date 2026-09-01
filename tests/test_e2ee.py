@@ -116,6 +116,15 @@ class TestSecureChannelAuth:
         assert session.is_authenticated is True
         # auth_ack 回显协商出的算法
         assert session.make_auth_ack()["algo"] == phone_algo
+        # 协商结果可通过属性查询（供状态栏展示）
+        assert session.negotiated_algorithm == phone_algo
+
+    def test_negotiated_algorithm_none_before_handshake(self):
+        """未握手或 none 模式下协商结果为 none。"""
+        sc = SecureChannel(algorithm="auto")
+        assert sc.new_session().negotiated_algorithm == "none"
+        sc_none = SecureChannel(algorithm="none", mode="lan")
+        assert sc_none.new_session().negotiated_algorithm == "none"
 
     def test_offered_algorithms_priority_order(self):
         """加密模式下 a= 列表按优先级排序，xchacha20 优先。"""
