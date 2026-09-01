@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>📱🎙️PhoneMic💬💻</title>
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
     <script src="sodium.js" defer></script>
     <script src="crypto_providers.js" defer></script>
     <style>
@@ -1205,7 +1205,8 @@ __I18N_JSON__
         window.chatManagerInstance = chatManager;
 
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsClient = new WSClient(`${wsProto}//${location.host}/ws`, appConfig);
+        // 跟随当前页面路径：加密模式页面在 /{secret}/ 下 → /{secret}/ws；明文模式在 / 下 → /ws
+        const wsClient = new WSClient(`${wsProto}//${location.host}${location.pathname}ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);

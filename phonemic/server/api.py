@@ -408,13 +408,49 @@ def _create_app() -> web.Application:
 
         return ws
 
-    app.router.add_get('/', index)
+    # 明文模式放行的白名单（根路径入口）
+    public_paths = {"/", "/favicon.ico", "/sodium.js", "/crypto_providers.js", "/ws"}
     if not is_frozen():
-        app.router.add_get('/test', test)
-    app.router.add_get('/favicon.ico', favicon)
-    app.router.add_get('/sodium.js', sodium_js)
-    app.router.add_get('/crypto_providers.js', crypto_providers_js)
-    app.router.add_get('/ws', websocket_endpoint)
+        public_paths.add("/test")
+
+    async def dispatcher(request):
+        """统一入口：校验路径合法性后分发到具体 handler。
+
+        加密模式：请求路径必须带 /{secret_path} 前缀（防扫描，根路由 404）；
+        明文模式：只放行白名单内的已知路径。
+        secret 每次现读，算法切换时改值即时生效，无需重启服务器。
+        """
+        path = request.path
+        secret = _secure_channel.secret_path if _secure_channel else ""
+
+        # ---- 入口校验 + 路径归一化 ----
+        if secret:
+            if path == "/" + secret or path == "/" + secret + "/":
+                path = "/"                      # 首页：带/不带尾斜杠均归一化
+            elif path.startswith("/" + secret + "/"):
+                path = path[len(secret) + 1:]   # 子资源：剥掉 /{secret} 前缀
+            else:
+                return web.Response(status=404)
+        elif path not in public_paths:
+            return web.Response(status=404)
+
+        # ---- 分发 ----
+        if path == "/":
+            return await index(request)
+        if path == "/ws":
+            return await websocket_endpoint(request)
+        if path == "/sodium.js":
+            return await sodium_js(request)
+        if path == "/crypto_providers.js":
+            return await crypto_providers_js(request)
+        if path == "/favicon.ico":
+            return await favicon(request)
+        if not is_frozen() and path == "/test":
+            return await test(request)
+        return web.Response(status=404)
+
+    # 统一入口：GET 专用，POST 等非 GET 方法由路由层直接返回 405
+    app.router.add_get('/{tail:.*}', dispatcher)
 
     return app
 

@@ -36,18 +36,38 @@ def get_test_port():
     return _test_port_counter
 
 
-def wait_for_server_ready(host, port, timeout=5.0):
-    url = f"http://{host}:{port}/"
+def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
+    """探测服务器就绪：请求入口路径（加密模式带 /{secret} 前缀），200/404 均视为已响应。"""
+    prefix = f"/{secret_path}" if secret_path else ""
+    url = f"http://{host}:{port}{prefix}/"
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = urllib.request.urlopen(url, timeout=0.5)
             if resp.status in (200, 404):
                 return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return True
         except (urllib.error.URLError, OSError):
             pass
         time.sleep(0.1)
     return False
+
+
+def _path_prefix(sc):
+    """加密模式的随机路径前缀（明文模式为空串 → 根路径）。"""
+    return f"/{sc.secret_path}" if sc.secret_path else ""
+
+
+def ws_url(host, port, sc):
+    """WebSocket 地址：加密模式带 /{secret} 前缀。"""
+    return f"ws://{host}:{port}{_path_prefix(sc)}/ws"
+
+
+def http_url(host, port, sc, path="/"):
+    """HTTP 地址：加密模式带 /{secret} 前缀。"""
+    return f"http://{host}:{port}{_path_prefix(sc)}{path}"
 
 
 class PhoneSimulator:
@@ -141,7 +161,7 @@ def secure_server():
 
     start_server(host, port, bridge)
 
-    if not wait_for_server_ready(host, port):
+    if not wait_for_server_ready(host, port, sc.secret_path):
         stop_server()
         pytest.fail("Server did not start within timeout")
 
@@ -165,11 +185,11 @@ def server_no_sc():
 
     start_server(host, port, bridge)
 
-    if not wait_for_server_ready(host, port):
+    if not wait_for_server_ready(host, port, sc.secret_path):
         stop_server()
         pytest.fail("Server did not start within timeout")
 
-    yield host, port, bridge
+    yield host, port, bridge, sc
 
     stop_server()
     set_secure_channel(None)
@@ -182,7 +202,7 @@ def test_websocket_message_parsing(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
         consume_initial_config(ws, phone)
@@ -203,7 +223,7 @@ def test_websocket_invalid_json(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
         consume_initial_config(ws, phone)
@@ -219,7 +239,7 @@ def test_connection_lifecycle(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         event, _ = queue.get(timeout=2)
         assert event == "connect"
@@ -233,14 +253,14 @@ def test_only_one_active_connection(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    ws1 = ws_connect(f"ws://{host}:{port}/ws")
+    ws1 = ws_connect(ws_url(host, port, sc))
     ws1.send(json.dumps(phone.make_auth()))
     ws1.recv(timeout=5)  # auth_ack
     event, _ = queue.get(timeout=2)
     assert event == "connect"
     ws1.recv(timeout=2)  # config
 
-    ws2 = ws_connect(f"ws://{host}:{port}/ws")
+    ws2 = ws_connect(ws_url(host, port, sc))
     # 新连接会替换旧连接
     ws2.send(json.dumps(phone.make_auth()))
     ws2.recv(timeout=5)  # auth_ack
@@ -261,7 +281,7 @@ def test_config_message_on_connect(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
 
@@ -280,7 +300,7 @@ def test_push_config_to_connected_phone(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
         consume_initial_config(ws, phone)
@@ -301,7 +321,7 @@ def test_send_to_phone_custom_message(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
         consume_initial_config(ws, phone)
@@ -335,7 +355,7 @@ def test_unknown_inner_type_tolerance(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(queue)
         consume_initial_config(ws, phone)
@@ -357,7 +377,7 @@ def test_full_e2e_flow(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         # 1. 发送 auth
         ws.send(json.dumps(phone.make_auth()))
 
@@ -406,7 +426,7 @@ def test_auth_ack_decryption(secure_server):
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port}/ws") as ws:
+    with ws_connect(ws_url(host, port, sc)) as ws:
         ws.send(json.dumps(phone.make_auth()))
         msg = ws.recv(timeout=5)
         data = json.loads(msg)
@@ -428,7 +448,7 @@ def test_reconnection_cycle(secure_server):
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     # ---- 第一次连接 ----
-    with ws_connect(f"ws://{host}:{port}/ws") as ws1:
+    with ws_connect(ws_url(host, port, sc)) as ws1:
         authenticate_and_verify(ws1, phone)
         consume_connect(queue)
         consume_initial_config(ws1, phone)
@@ -443,7 +463,7 @@ def test_reconnection_cycle(secure_server):
     assert event == "disconnect"
 
     # ---- 第二次连接（重连）----
-    with ws_connect(f"ws://{host}:{port}/ws") as ws2:
+    with ws_connect(ws_url(host, port, sc)) as ws2:
         authenticate_and_verify(ws2, phone)
         consume_connect(queue)
         consume_initial_config(ws2, phone)
@@ -463,7 +483,7 @@ def test_rapid_reconnect(secure_server):
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     for i in range(3):
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             authenticate_and_verify(ws, phone)
             consume_connect(queue)
             consume_initial_config(ws, phone)
@@ -479,11 +499,11 @@ def test_rapid_reconnect(secure_server):
         assert event == "disconnect"
 
 
-# ---------- 测试 HTTP 路由 ----------
+# ---------- 测试 HTTP 路由（加密模式带 /{secret} 前缀）----------
 def test_get_root_returns_html(server_no_sc):
-    """GET / 应返回 HTML 响应"""
-    host, port, _ = server_no_sc
-    url = f"http://{host}:{port}/"
+    """GET /{secret}/ 应返回 HTML 响应"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/")
     resp = urllib.request.urlopen(url, timeout=2)
     assert resp.status == 200
     assert "text/html" in resp.headers.get("content-type", "")
@@ -492,9 +512,9 @@ def test_get_root_returns_html(server_no_sc):
 
 
 def test_root_html_i18n_replaced(server_no_sc):
-    """GET / 返回的 HTML 中 __I18N_JSON__ 占位符应被替换为有效 JSON"""
-    host, port, _ = server_no_sc
-    url = f"http://{host}:{port}/"
+    """GET /{secret}/ 返回的 HTML 中 __I18N_JSON__ 占位符应被替换为有效 JSON"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/")
     resp = urllib.request.urlopen(url, timeout=2)
     body = resp.read().decode("utf-8")
 
@@ -511,9 +531,9 @@ def test_root_html_i18n_replaced(server_no_sc):
 
 
 def test_favicon_route(server_no_sc):
-    """GET /favicon.ico 应返回图标文件"""
-    host, port, _ = server_no_sc
-    url = f"http://{host}:{port}/favicon.ico"
+    """GET /{secret}/favicon.ico 应返回图标文件"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/favicon.ico")
     resp = urllib.request.urlopen(url, timeout=2)
     assert resp.status == 200
     content_type = resp.headers.get("content-type", "")
@@ -523,10 +543,10 @@ def test_favicon_route(server_no_sc):
 
 
 def test_sodium_js_route(server_no_sc):
-    """GET /sodium.js 应返回完整的 JS 文件（非 gzip）"""
-    host, port, _ = server_no_sc
+    """GET /{secret}/sodium.js 应返回完整的 JS 文件（非 gzip）"""
+    host, port, _, sc = server_no_sc
     req = urllib.request.Request(
-        f"http://{host}:{port}/sodium.js",
+        http_url(host, port, sc, "/sodium.js"),
         headers={"Accept-Encoding": "identity"},
     )
     resp = urllib.request.urlopen(req, timeout=5)
@@ -537,10 +557,10 @@ def test_sodium_js_route(server_no_sc):
 
 
 def test_sodium_js_gzip_route(server_no_sc):
-    """GET /sodium.js 带 gzip 应返回压缩文件"""
-    host, port, _ = server_no_sc
+    """GET /{secret}/sodium.js 带 gzip 应返回压缩文件"""
+    host, port, _, sc = server_no_sc
     req = urllib.request.Request(
-        f"http://{host}:{port}/sodium.js",
+        http_url(host, port, sc, "/sodium.js"),
         headers={"Accept-Encoding": "gzip"},
     )
     resp = urllib.request.urlopen(req, timeout=5)
@@ -564,7 +584,7 @@ def test_real_server_with_websocket_client():
 
     start_server(host, port, bridge)
 
-    if not wait_for_server_ready(host, port):
+    if not wait_for_server_ready(host, port, sc.secret_path):
         stop_server()
         pytest.fail("Server did not start within timeout")
 
@@ -587,7 +607,7 @@ def test_real_server_with_websocket_client():
     ]
 
     try:
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             authenticate(ws, phone)
             consume_connect(queue)
             consume_initial_config(ws, phone)
@@ -616,7 +636,7 @@ def test_server_start_stop():
 
     start_server(host, port, bridge)
 
-    assert wait_for_server_ready(host, port), "Server did not start"
+    assert wait_for_server_ready(host, port, sc.secret_path), "Server did not start"
 
     stop_server()
     set_secure_channel(None)
@@ -637,17 +657,17 @@ def test_server_restart_cycle():
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
-    assert wait_for_server_ready(host, port), "First start failed"
+    assert wait_for_server_ready(host, port, sc.secret_path), "First start failed"
 
     stop_server()
     time.sleep(0.5)
 
     start_server(host, port2, bridge)
-    assert wait_for_server_ready(host, port2), "Restart failed"
+    assert wait_for_server_ready(host, port2, sc.secret_path), "Restart failed"
 
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://{host}:{port2}/ws") as ws:
+    with ws_connect(ws_url(host, port2, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(bridge.queue)
         consume_initial_config(ws, phone)
@@ -673,15 +693,15 @@ def test_restart_server_with_different_host():
 
     lan_host = get_bind_address(TunnelMode.LAN)
     start_server(lan_host, port, bridge)
-    assert wait_for_server_ready("127.0.0.1", port), "LAN mode start failed"
+    assert wait_for_server_ready("127.0.0.1", port, sc.secret_path), "LAN mode start failed"
 
     cf_host = get_bind_address(TunnelMode.CLOUDFLARE)
     restart_server(cf_host, port, bridge)
-    assert wait_for_server_ready("127.0.0.1", port), "Cloudflare mode restart failed"
+    assert wait_for_server_ready("127.0.0.1", port, sc.secret_path), "Cloudflare mode restart failed"
 
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://127.0.0.1:{port}/ws") as ws:
+    with ws_connect(ws_url("127.0.0.1", port, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(bridge.queue)
         consume_initial_config(ws, phone)
@@ -706,16 +726,16 @@ def test_restart_server_preserves_bridge():
     set_secure_channel(sc)
 
     start_server("127.0.0.1", port, bridge)
-    assert wait_for_server_ready("127.0.0.1", port)
+    assert wait_for_server_ready("127.0.0.1", port, sc.secret_path)
 
     stop_server()
     time.sleep(0.5)
     start_server("127.0.0.1", port2, bridge)
-    assert wait_for_server_ready("127.0.0.1", port2)
+    assert wait_for_server_ready("127.0.0.1", port2, sc.secret_path)
 
     phone = PhoneSimulator(sc.get_public_key_b64())
 
-    with ws_connect(f"ws://127.0.0.1:{port2}/ws") as ws:
+    with ws_connect(ws_url("127.0.0.1", port2, sc)) as ws:
         authenticate(ws, phone)
         consume_connect(bridge.queue)
         consume_initial_config(ws, phone)
@@ -754,12 +774,12 @@ class TestConnectionPreemption:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             authenticate_and_verify(ws, phone)
             consume_connect(queue)
             consume_initial_config(ws, phone)
 
-            with ws_connect(f"ws://{host}:{port}/ws"):
+            with ws_connect(ws_url(host, port, sc)):
                 self._assert_still_encrypted(ws, phone, 42)
 
             time.sleep(0.3)
@@ -770,12 +790,12 @@ class TestConnectionPreemption:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             authenticate_and_verify(ws, phone)
             consume_connect(queue)
             consume_initial_config(ws, phone)
 
-            with ws_connect(f"ws://{host}:{port}/ws") as intruder:
+            with ws_connect(ws_url(host, port, sc)) as intruder:
                 bogus = {"type": "auth", "algo": "xsalsa20", "data": "bogus"}
                 intruder.send(json.dumps(bogus))
                 ack = json.loads(intruder.recv(timeout=2))
@@ -789,13 +809,13 @@ class TestConnectionPreemption:
         host, port, queue, sc = secure_server
         phone_a = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws_a:
+        with ws_connect(ws_url(host, port, sc)) as ws_a:
             authenticate_and_verify(ws_a, phone_a)
             consume_connect(queue)
             consume_initial_config(ws_a, phone_a)
 
             phone_b = PhoneSimulator(sc.get_public_key_b64())
-            with ws_connect(f"ws://{host}:{port}/ws") as ws_b:
+            with ws_connect(ws_url(host, port, sc)) as ws_b:
                 authenticate_and_verify(ws_b, phone_b)
 
                 # 旧连接被抢占，先收到 disconnect 再收到新连接的 connect

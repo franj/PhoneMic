@@ -33,18 +33,29 @@ def get_test_port():
     return _test_port_counter
 
 
-def wait_for_server_ready(host, port, timeout=5.0):
-    url = f"http://{host}:{port}/"
+def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
+    """探测服务器就绪：请求入口路径（加密模式带 /{secret} 前缀），200/404 均视为已响应。"""
+    prefix = f"/{secret_path}" if secret_path else ""
+    url = f"http://{host}:{port}{prefix}/"
     start = time.time()
     while time.time() - start < timeout:
         try:
             resp = urllib.request.urlopen(url, timeout=0.5)
             if resp.status in (200, 404):
                 return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return True
         except (urllib.error.URLError, OSError):
             pass
         time.sleep(0.1)
     return False
+
+
+def ws_url(host, port, sc):
+    """WebSocket 地址：加密模式带 /{secret} 前缀。"""
+    prefix = f"/{sc.secret_path}" if sc.secret_path else ""
+    return f"ws://{host}:{port}{prefix}/ws"
 
 
 class PhoneSimulator:
@@ -107,7 +118,7 @@ def secure_server():
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
-    if not wait_for_server_ready(host, port):
+    if not wait_for_server_ready(host, port, sc.secret_path):
         stop_server()
         pytest.fail("Server did not start within timeout")
 
@@ -127,7 +138,7 @@ class TestAuthHandshake:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             msg = ws.recv(timeout=5)
             data = json.loads(msg)
@@ -137,7 +148,7 @@ class TestAuthHandshake:
     def test_invalid_auth_closes_connection(self, secure_server):
         host, port, queue, sc = secure_server
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps({"type": "auth", "algo": "xsalsa20", "data": "garbage!!!"}))
             # 服务端先发送拒绝消息再关闭
             ack = json.loads(ws.recv(timeout=3))
@@ -149,7 +160,7 @@ class TestAuthHandshake:
     def test_non_auth_first_message_closes(self, secure_server):
         host, port, queue, sc = secure_server
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps({"type": "data", "data": "anything"}))
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
@@ -158,7 +169,7 @@ class TestAuthHandshake:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
 
@@ -173,7 +184,7 @@ class TestEncryptedMessageFlow:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect event
@@ -188,7 +199,7 @@ class TestEncryptedMessageFlow:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)
             queue.get(timeout=2)
@@ -207,7 +218,7 @@ class TestServerSendsEncrypted:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect
@@ -222,7 +233,7 @@ class TestServerSendsEncrypted:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect
@@ -242,7 +253,7 @@ class TestStateMachineSecurity:
     def test_data_before_auth_closes(self, secure_server):
         host, port, queue, sc = secure_server
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps({"type": "data", "data": "anything"}))
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
@@ -251,7 +262,7 @@ class TestStateMachineSecurity:
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(json.dumps(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect

@@ -37,6 +37,7 @@ import base64
 import hmac
 import json
 import os
+import secrets
 import time
 from typing import Optional
 
@@ -220,9 +221,12 @@ class SecureChannel:
         self._mode = mode
         self._pc_private: Optional[PrivateKey] = None
         self._token: Optional[str] = None
+        # 随机入口路径：加密模式下为 32 位随机串（防扫描），明文模式为空串（根路由）
+        self._secret_path = ""
 
         if self._algorithm != "none":
             self._pc_private = PrivateKey.generate()
+            self._secret_path = secrets.token_urlsafe(24)
         elif mode == "cloudflare":
             self._token = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
 
@@ -268,6 +272,14 @@ class SecureChannel:
         """是否需要 data 信封加密。none 模式不需要。"""
         return self._algorithm != "none"
 
+    @property
+    def secret_path(self) -> str:
+        """随机入口路径：加密模式为非空随机串，明文模式为空串（根路由）。
+
+        服务端 dispatcher 据此决定放行规则，URL 拼接时非空则插入 /{secret}/ 前缀。
+        """
+        return self._secret_path
+
     # ---- 公钥与 URL ----
 
     def get_public_key_b64(self) -> Optional[str]:
@@ -285,14 +297,16 @@ class SecureChannel:
     def append_to_url(self, url: str) -> str:
         """在 URL 末尾追加加密参数 fragment。
 
-        加密模式下 a= 为算法优先级列表（逗号分隔），
-        客户端按序挑选自身支持的算法并在 auth 时回传选择。
+        加密模式下：URL 插入 /{secret_path}/ 随机入口前缀（防扫描），
+        a= 为算法优先级列表（逗号分隔），客户端按序挑选自身支持的算法并在 auth 时回传选择。
         """
         key = self.get_public_key_b64()
         if key is None:
             return url
         if not url.endswith("/"):
             url += "/"
+        if self._secret_path:
+            url += f"{self._secret_path}/"
         return f"{url}#k={key}&a={','.join(self.offered_algorithms)}"
 
     # ---- 连接生命周期 ----

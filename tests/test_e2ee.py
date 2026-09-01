@@ -54,7 +54,8 @@ class TestSecureChannelKeys:
         sc = SecureChannel(algorithm="auto")
         url = "http://192.168.1.100:12000"
         result = sc.append_to_url(url)
-        assert result.startswith(url + "/#k=")
+        # 加密模式插入随机入口路径（防扫描），根路径不可见
+        assert result.startswith(url + f"/{sc.secret_path}/#k=")
         # a= 为算法优先级列表（逗号分隔），客户端按序协商
         assert f"a={','.join(OFFERED_ALGORITHMS)}" in result
 
@@ -62,13 +63,31 @@ class TestSecureChannelKeys:
         sc = SecureChannel(algorithm="auto")
         url = "https://abc-def.trycloudflare.com"
         result = sc.append_to_url(url)
-        assert result.startswith(url + "/#k=")
+        assert result.startswith(url + f"/{sc.secret_path}/#k=")
 
     def test_append_to_url_no_trailing_slash(self):
         sc = SecureChannel(algorithm="auto")
         url = "http://localhost:8080/"
         result = sc.append_to_url(url)
+        assert f"/{sc.secret_path}/#k=" in result
         assert "//#k=" not in result
+
+    def test_append_to_url_plaintext_no_secret_path(self):
+        """明文模式不加密：无随机路径、无 fragment。"""
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.secret_path == ""
+        url = "http://192.168.1.100:12000"
+        assert sc.append_to_url(url) == url
+
+    def test_secret_path_only_in_encrypted_mode(self):
+        """随机入口路径仅在加密模式生成，明文模式为空串。"""
+        enc = SecureChannel(algorithm="auto")
+        plain = SecureChannel(algorithm="none", mode="lan")
+        assert len(enc.secret_path) >= 20
+        assert plain.secret_path == ""
+        # 两个加密实例的路径不同（每次生成）
+        enc2 = SecureChannel(algorithm="auto")
+        assert enc.secret_path != enc2.secret_path
 
 
 class TestSecureChannelAuth:
