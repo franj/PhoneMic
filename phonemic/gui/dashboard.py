@@ -9,7 +9,7 @@ from PySide6.QtGui import QPixmap, QAction, QActionGroup, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QMenuBar, QMessageBox, QApplication,
-    QDialog, QRadioButton, QCheckBox, QDialogButtonBox, QTextEdit
+    QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
 from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
@@ -90,20 +90,6 @@ class Dashboard(QMainWindow):
         """设置算法变更回调函数。"""
         self._algorithm_change_callback = callback
 
-    def _set_url_text(self, text: str) -> None:
-        """写地址栏文本并居中。
-
-        QTextEdit 没有全局 alignment 属性，setAlignment 只影响当前段落，
-        而空文档 setAlignment 后 setPlainText 会用默认左对齐。
-        统一在这里设置文本 + 应用 block 居中格式。
-        """
-        self.url_text.setPlainText(text)
-        cursor = self.url_text.textCursor()
-        cursor.select(cursor.SelectionType.Document)
-        fmt = cursor.blockFormat()
-        fmt.setAlignment(Qt.AlignCenter)
-        cursor.mergeBlockFormat(fmt)
-
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -127,20 +113,12 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        # 地址栏：只读 QTextEdit，自动换行、多行时垂直滚动条可见
-        # 用户可以框选/复制完整 URL（QLabel 长文本无法滚动选中，复制会被截断）
-        self.url_text = QTextEdit()
-        self.url_text.setReadOnly(True)
-        self.url_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.url_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.url_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.url_text.setMaximumHeight(60)
-        self.url_text.setStyleSheet(
-            "QTextEdit { background: transparent; border: none; padding: 2px; }"
-        )
-        # 居中由 _set_url_text helper 在每次写文本时通过 cursor.mergeBlockFormat 完成
-        self._set_url_text(f"http://{ip}:{port}")
-        layout.addWidget(self.url_text)
+        # 地址栏：QLabel，居中 + 自动换行，可用鼠标选中复制
+        self.ip_label = QLabel(f"http://{ip}:{port}")
+        self.ip_label.setAlignment(Qt.AlignCenter)
+        self.ip_label.setWordWrap(True)
+        self.ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.ip_label)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
@@ -190,7 +168,7 @@ class Dashboard(QMainWindow):
             if self._tunnel_url:
                 self._refresh_qr()
             else:
-                self._set_url_text(self.i18n.tr("dashboard.cf_connecting"))
+                self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
@@ -214,7 +192,7 @@ class Dashboard(QMainWindow):
         self._switching = True
         self.act_lan.setEnabled(False)
         self.act_cf.setEnabled(False)
-        self._set_url_text(self.i18n.tr("dashboard.switching"))
+        self.ip_label.setText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
         self._apply_mode_ui()
@@ -262,7 +240,7 @@ class Dashboard(QMainWindow):
             return
         url = self._get_qr_url()
         self.qr_label.setPixmap(make_qr_pixmap(url))
-        self._set_url_text(url)
+        self.ip_label.setText(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
@@ -277,7 +255,7 @@ class Dashboard(QMainWindow):
                 else:
                     self._refresh_qr()
             else:
-                self._set_url_text("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
+                self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
     def get_mode(self) -> TunnelMode:
         """返回当前模式。"""

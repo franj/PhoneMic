@@ -253,7 +253,7 @@ def main():
         dashboard._switching = True
         dashboard.act_lan.setEnabled(False)
         dashboard.act_cf.setEnabled(False)
-        dashboard.url_text.setPlainText(i18n.tr("dashboard.cf_connecting"))
+        dashboard.ip_label.setText(i18n.tr("dashboard.cf_connecting"))
         QTimer.singleShot(500, lambda: tunnel_mgr.switch_mode(TunnelMode.CLOUDFLARE))
 
     # 6. 事件处理

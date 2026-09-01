@@ -93,7 +93,7 @@ class TestTunnelUrlUpdate:
     def test_update_tunnel_url_updates_qr(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" in dashboard.url_text.toPlainText()
+        assert "test.trycloudflare.com" in dashboard.ip_label.text()
 
     def test_update_tunnel_url_none_shows_disconnected(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
@@ -102,72 +102,49 @@ class TestTunnelUrlUpdate:
 
     def test_update_tunnel_url_not_applied_in_lan_mode(self, dashboard):
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" not in dashboard.url_text.toPlainText()
+        assert "test.trycloudflare.com" not in dashboard.ip_label.text()
 
 
 class TestUrlDisplay:
-    """地址栏用只读 QTextEdit，便于横向滚动/选中/复制。"""
+    """地址栏用 QLabel：居中、自动换行、可用鼠标选中复制。"""
 
-    def test_url_text_widget_exists(self, dashboard):
-        from PySide6.QtWidgets import QTextEdit
-        assert isinstance(dashboard.url_text, QTextEdit)
-        assert dashboard.url_text.isReadOnly() is True
+    def test_url_widget_is_label(self, dashboard):
+        from PySide6.QtWidgets import QLabel
+        assert isinstance(dashboard.ip_label, QLabel)
 
-    def test_url_text_shows_lan_url(self, dashboard):
-        assert "192.168.1.100:12000" in dashboard.url_text.toPlainText()
+    def test_url_label_shows_lan_url(self, dashboard):
+        assert "192.168.1.100:12000" in dashboard.ip_label.text()
 
-    def test_url_text_updates_after_tunnel_ready(self, dashboard):
+    def test_url_label_updates_after_tunnel_ready(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.update_tunnel_url("https://example.trycloudflare.com")
-        assert "example.trycloudflare.com" in dashboard.url_text.toPlainText()
+        assert "example.trycloudflare.com" in dashboard.ip_label.text()
 
-    def test_url_text_is_centered(self, dashboard):
-        """地址栏文本必须居中（通过 helper 方法应用 block 居中格式）。"""
+    def test_url_label_is_centered(self, dashboard):
+        """QLabel 的对齐是控件级属性，setText 后依然保持居中。"""
         from PySide6.QtCore import Qt
-        from PySide6.QtGui import QTextCursor
-        # PySide6: QTextCursor.SelectionType.Document（不是 QTextCursor.Document）
-        cursor = dashboard.url_text.textCursor()
-        cursor.select(cursor.SelectionType.Document)
-        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+        assert dashboard.ip_label.alignment() == Qt.AlignCenter
 
-    def test_set_url_text_helper_keeps_centering(self, dashboard):
-        """多次通过 helper 设置文本后仍居中。"""
+    def test_url_label_keeps_centering_after_updates(self, dashboard):
+        """多次更新 URL 后仍居中（不像 QTextEdit 那样会被重置）。"""
         from PySide6.QtCore import Qt
-        from PySide6.QtGui import QTextCursor
-        dashboard._set_url_text("https://a.trycloudflare.com")
-        cursor = dashboard.url_text.textCursor()
-        cursor.select(QTextCursor.Document)
-        assert cursor.blockFormat().alignment() == Qt.AlignCenter
-        dashboard._set_url_text("https://b.trycloudflare.com")
-        cursor = dashboard.url_text.textCursor()
-        cursor.select(QTextCursor.Document)
-        assert cursor.blockFormat().alignment() == Qt.AlignCenter
-
-    def test_url_text_supports_long_wrapping(self, dashboard):
-        """长 URL 走自动换行，多行居中。"""
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QTextEdit
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QTextCursor
-        long_url = "https://very-long-subdomain-name-that-will-wrap.trycloudflare.com:8443"
-        dashboard._set_url_text(long_url)
-        # QTextEdit 在只读 + NoWrap 时不换行，WidgetWidth 才换行
-        assert dashboard.url_text.lineWrapMode() == QTextEdit.WidgetWidth
-        # 单段落居中（自动换行是视觉上的，不增加段落）
-        cursor = dashboard.url_text.textCursor()
-        cursor.select(cursor.SelectionType.Document)
-        assert cursor.blockFormat().alignment() == Qt.AlignCenter
-
-    def test_url_text_updates_keep_centering(self, dashboard):
-        """多次更新 URL 后仍居中（默认段落格式不应被覆盖）。"""
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QTextCursor
-        dashboard._set_url_text("https://a.trycloudflare.com")
+        dashboard.ip_label.setText("https://a.trycloudflare.com")
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
-        dashboard._set_url_text("https://b.trycloudflare.com")
-        cursor = dashboard.url_text.textCursor()
-        cursor.select(QTextCursor.Document)
-        assert cursor.blockFormat().alignment() == Qt.AlignCenter
+        dashboard.ip_label.setText("https://b.trycloudflare.com")
+        assert dashboard.ip_label.alignment() == Qt.AlignCenter
+
+    def test_url_label_supports_long_wrapping(self, dashboard):
+        """长 URL 自动换行，文本完整保留。"""
+        long_url = "https://very-long-subdomain-name-that-will-wrap.trycloudflare.com:8443"
+        dashboard.ip_label.setText(long_url)
+        assert dashboard.ip_label.wordWrap() is True
+        assert dashboard.ip_label.text() == long_url
+
+    def test_url_label_is_selectable(self, dashboard):
+        """可用鼠标选中地址文本以便复制。"""
+        from PySide6.QtCore import Qt
+        flags = dashboard.ip_label.textInteractionFlags()
+        assert (flags & Qt.TextSelectableByMouse) == Qt.TextSelectableByMouse
 
 
 class TestEncryptionModeRestriction:
