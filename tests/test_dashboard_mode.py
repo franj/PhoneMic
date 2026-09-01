@@ -93,7 +93,7 @@ class TestTunnelUrlUpdate:
     def test_update_tunnel_url_updates_qr(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" in dashboard.ip_label.text()
+        assert "test.trycloudflare.com" in dashboard.url_text.toPlainText()
 
     def test_update_tunnel_url_none_shows_disconnected(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
@@ -102,4 +102,62 @@ class TestTunnelUrlUpdate:
 
     def test_update_tunnel_url_not_applied_in_lan_mode(self, dashboard):
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" not in dashboard.ip_label.text()
+        assert "test.trycloudflare.com" not in dashboard.url_text.toPlainText()
+
+
+class TestUrlDisplay:
+    """地址栏用只读 QTextEdit，便于横向滚动/选中/复制。"""
+
+    def test_url_text_widget_exists(self, dashboard):
+        from PySide6.QtWidgets import QTextEdit
+        assert isinstance(dashboard.url_text, QTextEdit)
+        assert dashboard.url_text.isReadOnly() is True
+
+    def test_url_text_shows_lan_url(self, dashboard):
+        assert "192.168.1.100:12000" in dashboard.url_text.toPlainText()
+
+    def test_url_text_updates_after_tunnel_ready(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.update_tunnel_url("https://example.trycloudflare.com")
+        assert "example.trycloudflare.com" in dashboard.url_text.toPlainText()
+
+
+class TestEncryptionModeRestriction:
+    """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际使用 xchacha20。"""
+
+    def test_algo_none_enabled_in_lan_by_default(self, dashboard):
+        assert dashboard.act_algo_none.isEnabled() is True
+
+    def test_algo_none_disabled_in_cf_mode(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+        assert dashboard.act_algo_none.isEnabled() is False
+
+    def test_algo_none_re_enabled_back_to_lan(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+        dashboard._on_mode_clicked(TunnelMode.LAN)
+        dashboard.on_switch_completed()
+        assert dashboard.act_algo_none.isEnabled() is True
+
+    def test_cf_with_config_none_shows_xchacha20_checked(self, dashboard):
+        """配置为 none 时进入 CF 模式：none 禁用 + xchacha20 勾选。"""
+        # 模拟配置为 none 的场景
+        dashboard._algorithm = "none"
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+        assert dashboard.act_algo_none.isEnabled() is False
+        assert dashboard.act_algo_xchacha20.isChecked() is True
+        assert dashboard.act_algo_none.isChecked() is False
+
+    def test_clicking_none_in_cf_mode_does_not_change_algorithm(self, dashboard):
+        """CF 模式下点 none 应被拒绝，配置不变。"""
+        dashboard._algorithm = "xsalsa20"
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+        dashboard._sync_menu_checks()
+        dashboard._on_algorithm_clicked("none")
+        # 应保持 xsalsa20，未切到 none
+        assert dashboard._algorithm == "xsalsa20"
+        assert dashboard.act_algo_xsalsa20.isChecked() is True
+        assert dashboard.act_algo_none.isChecked() is False

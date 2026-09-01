@@ -9,13 +9,13 @@ from PySide6.QtGui import QPixmap, QAction, QActionGroup, QPainter, QColor
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QFrame, QMenuBar, QMessageBox, QApplication,
-    QDialog, QRadioButton, QCheckBox, QDialogButtonBox
+    QDialog, QRadioButton, QCheckBox, QDialogButtonBox, QTextEdit
 )
 from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, get_bind_address
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, get_bind_address, effective_algorithm
 from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
@@ -113,11 +113,20 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        ip_label = QLabel(f"http://{ip}:{port}")
-        ip_label.setAlignment(Qt.AlignCenter)
-        ip_label.setWordWrap(True)
-        ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(ip_label)
+        # 地址栏：只读 QTextEdit，用户可以横向滚动、框选、复制
+        # QLabel 文本超出可视区域无法滚动选中和完整复制，QR 长 URL 经常被截断
+        self.url_text = QTextEdit()
+        self.url_text.setReadOnly(True)
+        self.url_text.setLineWrapMode(QTextEdit.NoWrap)
+        self.url_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.url_text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.url_text.setMaximumHeight(60)
+        self.url_text.setStyleSheet(
+            "QTextEdit { background: transparent; border: none; padding: 2px; }"
+        )
+        self.url_text.setAlignment(Qt.AlignCenter)
+        self.url_text.setPlainText(f"http://{ip}:{port}")
+        layout.addWidget(self.url_text)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
@@ -145,7 +154,6 @@ class Dashboard(QMainWindow):
         layout.addStretch()
 
         self.qr_label = qr_label
-        self.ip_label = ip_label
         self.info_label = info_label
 
     def _apply_mode_ui(self) -> None:
@@ -168,12 +176,19 @@ class Dashboard(QMainWindow):
             if self._tunnel_url:
                 self._refresh_qr()
             else:
-                self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
+                self.url_text.setPlainText(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
         self.act_lan.setChecked(self._mode == TunnelMode.LAN)
         self.act_cf.setChecked(self._mode == TunnelMode.CLOUDFLARE)
+        # Cloudflare 模式下禁用明文（none）选项
+        self.act_algo_none.setEnabled(self._mode == TunnelMode.LAN)
+        # 复选框跟随实际生效的算法（CF + 配置 none 实际是 xchacha20）
+        eff = effective_algorithm(self._algorithm, self._mode)
+        self.act_algo_none.setChecked(eff == "none")
+        self.act_algo_xsalsa20.setChecked(eff == "xsalsa20")
+        self.act_algo_xchacha20.setChecked(eff == "xchacha20")
 
     def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
         """点击模式切换菜单项。"""
@@ -185,7 +200,7 @@ class Dashboard(QMainWindow):
         self._switching = True
         self.act_lan.setEnabled(False)
         self.act_cf.setEnabled(False)
-        self.ip_label.setText(self.i18n.tr("dashboard.switching"))
+        self.url_text.setPlainText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
         self._apply_mode_ui()
@@ -196,12 +211,18 @@ class Dashboard(QMainWindow):
         """点击算法选择菜单项。"""
         if algo == self._algorithm:
             return
+        # Cloudflare 模式拒绝明文，防止明文 token 在公网泄漏
+        if algo == "none" and self._mode == TunnelMode.CLOUDFLARE:
+            # QActionGroup exclusive 会自动勾选 none，恢复到实际生效的勾选状态
+            self._sync_menu_checks()
+            return
         self._algorithm = algo
         self.sm.set("e2ee_algorithm", algo)
         if self._algorithm_change_callback:
             self._algorithm_change_callback(algo)
         self._refresh_qr()
         self.update_connection_status(self.connected)
+        self._sync_menu_checks()
 
     def on_switch_completed(self) -> None:
         """模式切换完成（成功或失败），恢复菜单可用状态。"""
@@ -227,7 +248,7 @@ class Dashboard(QMainWindow):
             return
         url = self._get_qr_url()
         self.qr_label.setPixmap(make_qr_pixmap(url))
-        self.ip_label.setText(url)
+        self.url_text.setPlainText(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
@@ -242,7 +263,7 @@ class Dashboard(QMainWindow):
                 else:
                     self._refresh_qr()
             else:
-                self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
+                self.url_text.setPlainText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
     def get_mode(self) -> TunnelMode:
         """返回当前模式。"""
@@ -307,24 +328,24 @@ class Dashboard(QMainWindow):
 
         self.act_algo_none = QAction(self.i18n.tr("dashboard.algo_none"), self)
         self.act_algo_none.setCheckable(True)
-        self.act_algo_none.setChecked(self._algorithm == "none")
         self.act_algo_none.triggered.connect(lambda: self._on_algorithm_clicked("none"))
         algo_group.addAction(self.act_algo_none)
         enc_menu.addAction(self.act_algo_none)
 
         self.act_algo_xsalsa20 = QAction(self.i18n.tr("dashboard.algo_xsalsa20"), self)
         self.act_algo_xsalsa20.setCheckable(True)
-        self.act_algo_xsalsa20.setChecked(self._algorithm == "xsalsa20")
         self.act_algo_xsalsa20.triggered.connect(lambda: self._on_algorithm_clicked("xsalsa20"))
         algo_group.addAction(self.act_algo_xsalsa20)
         enc_menu.addAction(self.act_algo_xsalsa20)
 
         self.act_algo_xchacha20 = QAction(self.i18n.tr("dashboard.algo_xchacha20"), self)
         self.act_algo_xchacha20.setCheckable(True)
-        self.act_algo_xchacha20.setChecked(self._algorithm == "xchacha20")
         self.act_algo_xchacha20.triggered.connect(lambda: self._on_algorithm_clicked("xchacha20"))
         algo_group.addAction(self.act_algo_xchacha20)
         enc_menu.addAction(self.act_algo_xchacha20)
+
+        # 初始化勾选状态（包括 CF 模式下 none 强制变为 xchacha20 的显示）
+        self._sync_menu_checks()
 
         # 帮助菜单
         help_action = QAction(self.i18n.tr("dashboard.menu_help_guide"), self)

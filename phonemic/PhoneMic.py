@@ -23,7 +23,7 @@ from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server, set_secure_channel
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
-from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode
+from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
 from phonemic.utils.paths import get_res_path
 from phonemic.utils.i18n import I18n
@@ -162,7 +162,8 @@ def main():
     # 安全通道
     algorithm = sm.get("e2ee_algorithm", "none")
     tunnel_mode = get_mode()
-    secure_channel = SecureChannel(algorithm=algorithm, mode=tunnel_mode.value)
+    # Cloudflare 模式下配置为 none 时强制使用 xchacha20，配置保持原值不写入
+    secure_channel = SecureChannel(algorithm=effective_algorithm(algorithm, tunnel_mode), mode=tunnel_mode.value)
     set_secure_channel(secure_channel)
 
     if not wait_for_server(selected_ip, actual_port):
@@ -241,7 +242,7 @@ def main():
     def _recreate_secure_channel(algo: str):
         """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。"""
         mode = dashboard.get_mode()
-        new_sc = SecureChannel(algorithm=algo, mode=mode.value)
+        new_sc = SecureChannel(algorithm=effective_algorithm(algo, mode), mode=mode.value)
         set_secure_channel(new_sc)
         dashboard.set_secure_channel(new_sc)
 
@@ -252,7 +253,7 @@ def main():
         dashboard._switching = True
         dashboard.act_lan.setEnabled(False)
         dashboard.act_cf.setEnabled(False)
-        dashboard.ip_label.setText(i18n.tr("dashboard.cf_connecting"))
+        dashboard.url_text.setPlainText(i18n.tr("dashboard.cf_connecting"))
         QTimer.singleShot(500, lambda: tunnel_mgr.switch_mode(TunnelMode.CLOUDFLARE))
 
     # 6. 事件处理
@@ -282,7 +283,10 @@ def main():
             dashboard._mode = mode
             set_mode(mode)
             # 模式变更后重建 SecureChannel（mode 影响 needs_auth 和 token 生成）
-            new_sc = SecureChannel(algorithm=sm.get("e2ee_algorithm", "none"), mode=mode.value)
+            new_sc = SecureChannel(
+                algorithm=effective_algorithm(sm.get("e2ee_algorithm", "none"), mode),
+                mode=mode.value,
+            )
             set_secure_channel(new_sc)
             dashboard.set_secure_channel(new_sc)
             dashboard._apply_mode_ui()
