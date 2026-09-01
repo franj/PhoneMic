@@ -10,10 +10,10 @@
 
 关键设计：
 - set_content 加载 HTML（与 test_mobile.py 一致）
-- patch _parseUrlFragment 注入 PC 公钥和算法参数（绕过 location.hash 限制）
-- 不 patch _selectAlgorithm — 让真实算法选择逻辑运行
+- patch _parseUrlFragment 注入 PC 公钥和 a= 算法列表（绕过 location.hash 限制）
+- 不 patch _selectAlgorithm — 让真实的协商选择逻辑运行
 - Mock WebSocket 不自动回复 auth_ack — Python 手动处理并发送
-- 参数化测试 xsalsa20 和 xchacha20 两种算法
+- 参数化测试 xsalsa20 和 xchacha20 两种算法（通过调整 a= 列表顺序让客户端分别选中）
 """
 
 import json
@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 from phonemic.tunnel.e2ee import SecureChannel
 
 pytest.importorskip("playwright")
@@ -82,8 +83,11 @@ window.WebSocket.CLOSED = 3;
 """
 
 
-def _prepare_html(channel, algo, force_none_algo=False):
-    """读取 mobile.html，内联外部脚本，注入 Mock WebSocket 和密钥参数。"""
+def _prepare_html(channel, offered, force_none_algo=False):
+    """读取 mobile.html，内联外部脚本，注入 Mock WebSocket 和密钥参数。
+
+    offered: 服务端 a= 下发的算法优先级列表，客户端按序协商选择第一个自身支持的。
+    """
     html = (RES_DIR / "mobile.html").read_text(encoding="utf-8")
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
@@ -92,12 +96,13 @@ def _prepare_html(channel, algo, force_none_algo=False):
     html = html.replace("__I18N_JSON__", "")
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
 
-    # patch _parseUrlFragment：注入 PC 公钥/token 和算法参数
+    # patch _parseUrlFragment：注入 PC 公钥/token 和 a= 算法列表
     pc_pubkey_b64 = channel.get_public_key_b64()
+    offered_js = ",".join(f"'{a}'" for a in offered)
     patch = "<script>SecureClient.prototype._parseUrlFragment = function() {"
     if pc_pubkey_b64:
         patch += f"  this._pcPublicKeyB64 = '{pc_pubkey_b64}';"
-    patch += f"  this._selectedAlgo = '{algo}';"
+    patch += f"  this._selectedAlgo = this._selectAlgorithm([{offered_js}]);"
     patch += "};"
     if force_none_algo:
         patch += (
@@ -143,11 +148,16 @@ def _process_auth(page, channel):
 
 @pytest.fixture(params=["xsalsa20", "xchacha20"])
 def secure_pair(page, request):
-    """参数化 fixture：Python SecureChannel + JS SecureClient（已认证）。"""
+    """参数化 fixture：Python SecureChannel + JS SecureClient（已认证）。
+
+    服务端下发完整优先级列表；为覆盖两种算法，将测试算法置于列表首位，
+    验证客户端按序协商后回传选择。
+    """
     algo = request.param
-    pc = SecureChannel(algorithm=algo)
+    pc = SecureChannel(algorithm="auto")
     channel = pc.new_session()
-    html = _prepare_html(pc, algo)
+    offered = [algo] + [a for a in OFFERED_ALGORITHMS if a != algo]
+    html = _prepare_html(pc, offered)
     page.set_content(html)
     _process_auth(page, channel)
     yield page, channel, algo
@@ -322,9 +332,9 @@ class TestRoundtrip:
 class TestAlgorithmRejection:
     def test_none_rejected(self, page):
         """none 算法被 PC 端拒绝，JS 断开连接。"""
-        pc = SecureChannel(algorithm="xsalsa20")
+        pc = SecureChannel(algorithm="auto")
         channel = pc.new_session()
-        html = _prepare_html(pc, "xsalsa20", force_none_algo=True)
+        html = _prepare_html(pc, ["xsalsa20"], force_none_algo=True)
         page.set_content(html)
 
         auth_msg = _wait_auth(page)
@@ -341,6 +351,57 @@ class TestAlgorithmRejection:
         assert page.evaluate("() => window.__wsClient.isConnected") is False
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
+
+
+# ---------- 算法协商 ----------
+
+class TestAlgorithmNegotiation:
+    """a= 为服务端算法优先级列表，客户端按序选择第一个自身支持的。"""
+
+    def test_client_prefers_first_offered(self, page):
+        """客户端选择列表中首个支持的算法。"""
+        pc = SecureChannel(algorithm="auto")
+        html = _prepare_html(pc, ["xchacha20", "xsalsa20"])
+        page.set_content(html)
+        page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
+        assert page.evaluate("() => window.__wsClient.secure._selectedAlgo") == "xchacha20"
+
+    def test_client_falls_back_along_list(self, page):
+        """列表首位不支持时按序回退到下一个支持的算法。"""
+        pc = SecureChannel(algorithm="auto")
+        html = _prepare_html(pc, ["aes-256-gcm", "xchacha20", "xsalsa20"])
+        page.set_content(html)
+        page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
+        assert page.evaluate("() => window.__wsClient.secure._selectedAlgo") == "xchacha20"
+
+    def test_no_common_algorithm_stops_connect(self, page):
+        """无共同算法：不建立 WebSocket 连接，提示重新扫码。"""
+        pc = SecureChannel(algorithm="auto")
+        html = _prepare_html(pc, ["aes-256-gcm", "aegis256"])
+        page.set_content(html)
+        page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
+
+        assert page.evaluate("() => window.__wsClient.secure.algoUnsupported") is True
+        # 未创建 WebSocket
+        assert page.evaluate("() => window.__mockWS.current") is None
+        text = page.locator("#status-bar").inner_text()
+        assert "重新扫码" in text
+        assert page.locator("#input-box").is_disabled()
+
+    def test_server_offered_list_priority(self):
+        """服务端 URL 下发完整优先级列表：xchacha20 优先于 xsalsa20。"""
+        assert OFFERED_ALGORITHMS[0] == "xchacha20"
+        pc = SecureChannel(algorithm="auto")
+        url = pc.append_to_url("https://x.trycloudflare.com")
+        assert "a=xchacha20,xsalsa20" in url
+
+    def test_auth_echoes_client_choice(self, secure_pair):
+        """auth 消息回传客户端协商出的算法，服务端 accept 并在 ack 中回显。"""
+        page, channel, algo = secure_pair
+        auth_msg = page.evaluate(
+            "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
+        )
+        assert auth_msg["algo"] == algo
 
 
 # ---------- 断线处理 ----------
@@ -367,7 +428,7 @@ def none_lan_pair(page):
     """none+LAN 模式：无认证，明文 JSON。"""
     pc = SecureChannel(algorithm="none", mode="lan")
     channel = pc.new_session()
-    html = _prepare_html(pc, "none")
+    html = _prepare_html(pc, ["none"])
     page.set_content(html)
     page.wait_for_function("() => window.__wsClient && window.__wsClient.isConnected")
     yield page, channel
@@ -454,7 +515,7 @@ def none_cf_pair(page):
     """none+Cloudflare 模式：token 认证，明文 JSON。"""
     pc = SecureChannel(algorithm="none", mode="cloudflare")
     channel = pc.new_session()
-    html = _prepare_html(pc, "none")
+    html = _prepare_html(pc, ["none"])
     page.set_content(html)
     _process_auth(page, channel)
     yield page, channel, pc
@@ -528,7 +589,7 @@ class TestNoneCloudflareRejection:
         """none+CF: 错误 token 被拒绝。"""
         pc = SecureChannel(algorithm="none", mode="cloudflare")
         channel = pc.new_session()
-        html = _prepare_html(pc, "none", force_none_algo=True)
+        html = _prepare_html(pc, ["none"], force_none_algo=True)
         page.set_content(html)
 
         auth_msg = _wait_auth(page)
@@ -555,8 +616,8 @@ class TestAuthFailureUX:
 
     def test_rejected_ack_shows_warning_and_stops_reconnect(self, page):
         """模拟旧二维码：服务端拒绝认证后提示重新扫码，且不再自动重连。"""
-        pc = SecureChannel(algorithm="xsalsa20")
-        html = _prepare_html(pc, "xsalsa20")
+        pc = SecureChannel(algorithm="auto")
+        html = _prepare_html(pc, ["xsalsa20"])
         page.set_content(html)
         _wait_auth(page)
 
@@ -576,8 +637,8 @@ class TestAuthFailureUX:
 
     def test_missing_key_does_not_connect(self, page):
         """加密算法但 URL 无密钥（如浏览器丢失 hash）：直接提示，不建立连接。"""
-        pc = SecureChannel(algorithm="xsalsa20")
-        html = _prepare_html(pc, "xsalsa20")
+        pc = SecureChannel(algorithm="auto")
+        html = _prepare_html(pc, ["xsalsa20"])
         # 去掉注入的公钥，模拟 hash 丢失
         html = html.replace(f"this._pcPublicKeyB64 = '{pc.get_public_key_b64()}';", "")
 

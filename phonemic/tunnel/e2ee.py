@@ -21,9 +21,12 @@
   URL fragment:
     none+LAN:  无
     none+CF:   #k=<token>&a=none
-    加密:      #k=<pubkey>&a=<algo>
+    加密:      #k=<pubkey>&a=<algo1,algo2,...>（服务端支持的算法，按优先级排序）
   auth:      { type:"auth", algo:"<algo>", data:"<b64>" }
+             客户端从 a= 列表中按序挑选自身支持的算法（优先列表靠前的），
+             将选择通过 algo 字段回传，服务端校验其属于下发列表
   auth_ack:  { type:"auth_ack", status:"OK" } 或 { type:"auth_ack", rejected:true, reason:"..." }
+             加密模式下回显最终协商出的算法 algo 字段
   消息:
     none:  明文 JSON { type:"send", text:"..." }
     加密:  { type:"data", data:"<b64(nonce+ciphertext)>" }
@@ -40,6 +43,7 @@ from typing import Optional
 from nacl.public import PrivateKey
 
 from phonemic.tunnel.crypto import create_provider
+from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 
 _AUTH_TIMEOUT = 10  # 秒
 
@@ -101,15 +105,15 @@ class SecureSession:
         Returns:
             True 如果认证成功，False 如果被拒绝。
         """
-        algorithm = self._channel.algorithm
-        algo = auth_msg.get("algo", "xsalsa20")
+        algo = auth_msg.get("algo", "none")
+        offered = self._channel.offered_algorithms
 
-        if algo != algorithm:
+        if algo not in offered:
             self._rejected = True
             self._reject_reason = f"algorithm '{algo}' not allowed"
             return False
 
-        if algorithm == "none":
+        if algo == "none":
             received = auth_msg.get("data") or ""
             expected = self._channel.token or ""
             # 常数时间比较，避免逐字节短路造成的时序侧信道
@@ -200,12 +204,14 @@ class SecureChannel:
     """
 
     def __init__(self, algorithm: str = "none", mode: str = "lan"):
-        self._algorithm = algorithm
+        # 归一化：具体算法名（历史配置值 xsalsa20/xchacha20）统一视为开启加密（auto），
+        # 实际算法由客户端从 a= 列表中协商决定
+        self._algorithm = "none" if algorithm == "none" else "auto"
         self._mode = mode
         self._pc_private: Optional[PrivateKey] = None
         self._token: Optional[str] = None
 
-        if algorithm != "none":
+        if self._algorithm != "none":
             self._pc_private = PrivateKey.generate()
         elif mode == "cloudflare":
             self._token = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
@@ -214,7 +220,19 @@ class SecureChannel:
 
     @property
     def algorithm(self) -> str:
+        """当前加密模式："none"（不加密）或 "auto"（加密，算法协商）。"""
         return self._algorithm
+
+    @property
+    def offered_algorithms(self) -> list:
+        """下发给客户端的算法列表（按优先级排序）。
+
+        不加密模式为 ["none"]（token 认证），
+        加密模式为 OFFERED_ALGORITHMS（全部支持的加密算法）。
+        """
+        if self._algorithm == "none":
+            return ["none"]
+        return list(OFFERED_ALGORITHMS)
 
     @property
     def mode(self) -> str:
@@ -255,13 +273,17 @@ class SecureChannel:
         return base64.urlsafe_b64encode(bytes(pub)).decode().rstrip("=")
 
     def append_to_url(self, url: str) -> str:
-        """在 URL 末尾追加加密参数 fragment。"""
+        """在 URL 末尾追加加密参数 fragment。
+
+        加密模式下 a= 为算法优先级列表（逗号分隔），
+        客户端按序挑选自身支持的算法并在 auth 时回传选择。
+        """
         key = self.get_public_key_b64()
         if key is None:
             return url
         if not url.endswith("/"):
             url += "/"
-        return f"{url}#k={key}&a={self._algorithm}"
+        return f"{url}#k={key}&a={','.join(self.offered_algorithms)}"
 
     # ---- 连接生命周期 ----
 

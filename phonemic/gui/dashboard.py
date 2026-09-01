@@ -176,11 +176,10 @@ class Dashboard(QMainWindow):
         self.act_cf.setChecked(self._mode == TunnelMode.CLOUDFLARE)
         # Cloudflare 模式下禁用明文（none）选项
         self.act_algo_none.setEnabled(self._mode == TunnelMode.LAN)
-        # 复选框跟随实际生效的算法（CF + 配置 none 实际是 xchacha20）
+        # 复选框跟随实际生效的加密状态（CF + 配置 none 实际强制加密）
         eff = effective_algorithm(self._algorithm, self._mode)
         self.act_algo_none.setChecked(eff == "none")
-        self.act_algo_xsalsa20.setChecked(eff == "xsalsa20")
-        self.act_algo_xchacha20.setChecked(eff == "xchacha20")
+        self.act_algo_encrypted.setChecked(eff == "auto")
 
     def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
         """点击模式切换菜单项。"""
@@ -200,7 +199,7 @@ class Dashboard(QMainWindow):
             self._mode_switch_callback(target_mode)
 
     def _on_algorithm_clicked(self, algo: str) -> None:
-        """点击算法选择菜单项。"""
+        """点击加密开关菜单项（"none" 不加密 / "auto" 加密，具体算法由客户端协商）。"""
         if algo == self._algorithm:
             return
         # Cloudflare 模式拒绝明文，防止明文 token 在公网泄漏
@@ -313,7 +312,7 @@ class Dashboard(QMainWindow):
 
         network_menu.addSeparator()
 
-        # 加密方式子菜单
+        # 加密方式子菜单：只暴露加密/不加密，具体算法由客户端从 a= 列表协商
         enc_menu = network_menu.addMenu(self.i18n.tr("dashboard.menu_encryption"))
         algo_group = QActionGroup(self)
         algo_group.setExclusive(True)
@@ -324,19 +323,13 @@ class Dashboard(QMainWindow):
         algo_group.addAction(self.act_algo_none)
         enc_menu.addAction(self.act_algo_none)
 
-        self.act_algo_xsalsa20 = QAction(self.i18n.tr("dashboard.algo_xsalsa20"), self)
-        self.act_algo_xsalsa20.setCheckable(True)
-        self.act_algo_xsalsa20.triggered.connect(lambda: self._on_algorithm_clicked("xsalsa20"))
-        algo_group.addAction(self.act_algo_xsalsa20)
-        enc_menu.addAction(self.act_algo_xsalsa20)
+        self.act_algo_encrypted = QAction(self.i18n.tr("dashboard.algo_encrypted"), self)
+        self.act_algo_encrypted.setCheckable(True)
+        self.act_algo_encrypted.triggered.connect(lambda: self._on_algorithm_clicked("auto"))
+        algo_group.addAction(self.act_algo_encrypted)
+        enc_menu.addAction(self.act_algo_encrypted)
 
-        self.act_algo_xchacha20 = QAction(self.i18n.tr("dashboard.algo_xchacha20"), self)
-        self.act_algo_xchacha20.setCheckable(True)
-        self.act_algo_xchacha20.triggered.connect(lambda: self._on_algorithm_clicked("xchacha20"))
-        algo_group.addAction(self.act_algo_xchacha20)
-        enc_menu.addAction(self.act_algo_xchacha20)
-
-        # 初始化勾选状态（包括 CF 模式下 none 强制变为 xchacha20 的显示）
+        # 初始化勾选状态（包括 CF 模式下 none 强制变为加密的显示）
         self._sync_menu_checks()
 
         # 帮助菜单
@@ -389,11 +382,11 @@ class Dashboard(QMainWindow):
         self.connected = connected
         if connected:
             text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
-            if self._algorithm == "none":
+            if effective_algorithm(self._algorithm, self._mode) == "none":
                 text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
             else:
-                algo_display = self.i18n.tr(f"dashboard.algo_{self._algorithm}")
-                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted_algo", algo=algo_display) + '</span>'
+                # 具体算法由客户端协商，状态栏只显示加密/明文
+                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
             self.status_label.setText(text)
         else:
             self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))

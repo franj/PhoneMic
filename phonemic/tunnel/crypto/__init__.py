@@ -19,6 +19,11 @@ _PROVIDER_CLASSES = {
     "xchacha20": XChaCha20Provider,
 }
 
+# 加密算法优先级列表（高 → 低）。
+# 开启加密时通过 URL a= 参数整体下发给客户端，客户端按序挑选自身支持的算法，
+# 并在 auth 消息中回传选择。新增算法（如 aes-256-gcm、aegis256）时在此追加。
+OFFERED_ALGORITHMS = ["xchacha20", "xsalsa20"]
+
 
 def create_provider(algo: str, pc_private: Optional[PrivateKey] = None) -> CryptoProvider:
     """根据算法名创建 Provider 实例。
@@ -53,4 +58,5 @@ __all__ = [
     "XChaCha20Provider",
     "create_provider",
     "get_available_algorithms",
+    "OFFERED_ALGORITHMS",
 ]

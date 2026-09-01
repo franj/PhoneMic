@@ -721,12 +721,18 @@ __I18N_JSON__
         get needsAuth() { return this._pcPublicKeyB64 !== null; }
         get isEncrypted() { return this._selectedAlgo !== 'none'; }
         get isAuthenticated() { return this._authenticated; }
+        // 服务端下发的算法列表与本地无交集（版本不匹配等），无法建立加密通道
+        get algoUnsupported() { return this._selectedAlgo === null; }
 
         async init() {
             await sodium.ready;
             this._ready = true;
             this._b64Variant = sodium.base64_VARIANT_URLSAFE_NO_PADDING;
             this._parseUrlFragment();
+            if (this._selectedAlgo === null) {
+                console.error('[SEC] No common algorithm with server');
+                return;
+            }
             this._createProvider();
             if (this._provider.initKeypair) this._provider.initKeypair();
             if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
@@ -738,7 +744,16 @@ __I18N_JSON__
             const kMatch = hash.match(/[#&]k=([^&]+)/);
             if (kMatch) this._pcPublicKeyB64 = kMatch[1];
             const aMatch = hash.match(/[#&]a=([^&]+)/);
-            this._selectedAlgo = aMatch ? aMatch[1] : 'none';
+            // a= 为服务端支持的算法优先级列表（逗号分隔），按序选择第一个自身支持的
+            const offered = aMatch ? aMatch[1].split(',').map(s => s.trim()) : ['none'];
+            this._selectedAlgo = this._selectAlgorithm(offered);
+        }
+
+        _selectAlgorithm(offered) {
+            for (const name of offered) {
+                if (name in PROVIDER_CLASSES) return name;
+            }
+            return null; // 无共同支持的算法
         }
 
         _createProvider() {
@@ -828,6 +843,11 @@ __I18N_JSON__
         async connect() {
             if (this.authRejected) return;
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+            // 服务端算法列表与本地无交集：重试结果相同，直接提示重新扫码
+            if (this.secure.algoUnsupported) {
+                this._showAuthRejected(false);
+                return;
+            }
             // 加密模式但 URL 中没有密钥（如浏览器丢失 hash）：重连无法恢复，直接提示重新扫码
             if (this.secure.isEncrypted && !this.secure.needsAuth) {
                 this._showAuthRejected(false);

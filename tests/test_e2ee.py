@@ -12,15 +12,16 @@ from nacl.public import Box, PrivateKey, PublicKey, SealedBox
 from nacl.utils import random as random_bytes
 
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 
-ALGO = "xsalsa20"
+ALGO = "xsalsa20"  # 客户端从 a= 列表中协商选择的算法
 
 
-def make_session(algorithm=ALGO, mode="lan"):
-    """创建一个已完成握手的会话（加密模式）。"""
-    sc = SecureChannel(algorithm=algorithm, mode=mode)
+def make_session(phone_algo=ALGO, mode="lan"):
+    """创建一个已完成握手的会话（加密模式，算法由客户端协商）。"""
+    sc = SecureChannel(algorithm="auto", mode=mode)
     session = sc.new_session()
-    session.receive_auth(make_phone_auth(sc, algorithm=algorithm))
+    session.receive_auth(make_phone_auth(sc, algorithm=phone_algo))
     return sc, session
 
 
@@ -38,32 +39,33 @@ class TestSecureChannelKeys:
     """测试密钥对生成和编码。"""
 
     def test_generates_different_keys(self):
-        sc1 = SecureChannel(algorithm=ALGO)
-        sc2 = SecureChannel(algorithm=ALGO)
+        sc1 = SecureChannel(algorithm="auto")
+        sc2 = SecureChannel(algorithm="auto")
         assert sc1.get_public_key_b64() != sc2.get_public_key_b64()
 
     def test_public_key_is_valid_base64url(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         b64 = sc.get_public_key_b64()
         assert "=" not in b64
         decoded = base64.urlsafe_b64decode(b64 + "==")
         assert len(decoded) == 32
 
     def test_append_to_url_lan(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         url = "http://192.168.1.100:12000"
         result = sc.append_to_url(url)
         assert result.startswith(url + "/#k=")
-        assert "a=xsalsa20" in result
+        # a= 为算法优先级列表（逗号分隔），客户端按序协商
+        assert f"a={','.join(OFFERED_ALGORITHMS)}" in result
 
     def test_append_to_url_cloudflare(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         url = "https://abc-def.trycloudflare.com"
         result = sc.append_to_url(url)
         assert result.startswith(url + "/#k=")
 
     def test_append_to_url_no_trailing_slash(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         url = "http://localhost:8080/"
         result = sc.append_to_url(url)
         assert "//#k=" not in result
@@ -73,20 +75,20 @@ class TestSecureChannelAuth:
     """测试 auth 握手流程。"""
 
     def test_receive_auth_succeeds(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         assert session.receive_auth(make_phone_auth(sc)) is True
         assert session.is_authenticated is True
 
     def test_receive_auth_fails_with_garbage(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         bad = {"type": "auth", "algo": ALGO, "data": "not_valid_base64!!!"}
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
     def test_receive_auth_fails_with_wrong_key(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         other_pc = PrivateKey.generate()
         phone_private = PrivateKey.generate()
@@ -97,15 +99,43 @@ class TestSecureChannelAuth:
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
-    def test_receive_auth_fails_with_wrong_algo(self):
-        sc = SecureChannel(algorithm=ALGO)
+    def test_receive_auth_fails_with_unsupported_algo(self):
+        """客户端回传的算法不在服务端下发列表中：拒绝。"""
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
-        auth_msg = {"type": "auth", "algo": "xchacha20", "data": "whatever"}
+        auth_msg = {"type": "auth", "algo": "aes-256-gcm", "data": "whatever"}
         assert session.receive_auth(auth_msg) is False
         assert session.is_rejected is True
 
+    @pytest.mark.parametrize("phone_algo", OFFERED_ALGORITHMS)
+    def test_receive_auth_accepts_any_offered_algo(self, phone_algo):
+        """客户端可从下发列表中任选一个算法完成握手。"""
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        assert session.receive_auth(make_phone_auth(sc, algorithm=phone_algo)) is True
+        assert session.is_authenticated is True
+        # auth_ack 回显协商出的算法
+        assert session.make_auth_ack()["algo"] == phone_algo
+
+    def test_offered_algorithms_priority_order(self):
+        """加密模式下 a= 列表按优先级排序，xchacha20 优先。"""
+        sc = SecureChannel(algorithm="auto")
+        assert sc.offered_algorithms == OFFERED_ALGORITHMS
+        assert sc.offered_algorithms[0] == "xchacha20"
+
+    def test_offered_algorithms_none_mode(self):
+        """不加密模式下仅提供 none（token 认证）。"""
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        assert sc.offered_algorithms == ["none"]
+
+    def test_legacy_algorithm_normalized_to_auto(self):
+        """历史配置值（xsalsa20/xchacha20）归一化为 auto。"""
+        assert SecureChannel(algorithm="xsalsa20").algorithm == "auto"
+        assert SecureChannel(algorithm="xchacha20").algorithm == "auto"
+        assert SecureChannel(algorithm="auto").algorithm == "auto"
+
     def test_make_auth_ack_returns_encrypted(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         session.receive_auth(make_phone_auth(sc))
         ack = session.make_auth_ack()
@@ -114,7 +144,7 @@ class TestSecureChannelAuth:
         assert len(ack["data"]) > 0
 
     def test_auth_ack_decrypts_correctly(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
         phone_public = phone_private.public_key
@@ -138,7 +168,7 @@ class TestSecureChannelEncryptDecrypt:
 
     def _setup_authenticated(self):
         """建立已完成握手的会话，返回 (session, phone_box)。"""
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
         sb = SealedBox(sc.pc_private.public_key)
@@ -197,7 +227,7 @@ class TestSecureChannelEncryptDecrypt:
 
     def test_wrap_without_auth_raises(self):
         """未握手的会话没有 provider，wrap 会失败而非静默发送明文。"""
-        session = SecureChannel(algorithm=ALGO).new_session()
+        session = SecureChannel(algorithm="auto").new_session()
         with pytest.raises(AttributeError):
             session.wrap({"type": "preview", "text": "test"})
 
@@ -239,7 +269,7 @@ class TestSecureChannelStateMachine:
     """测试状态机行为。"""
 
     def test_not_authenticated_by_default(self):
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         assert sc.new_session().is_authenticated is False
 
     def test_none_lan_auto_authenticated(self):
@@ -247,12 +277,12 @@ class TestSecureChannelStateMachine:
         assert sc.new_session().is_authenticated is True
 
     def test_auth_timed_out_after_timeout(self):
-        session = SecureChannel(algorithm=ALGO).new_session()
+        session = SecureChannel(algorithm="auto").new_session()
         session._connected_at = time.monotonic() - 11
         assert session.auth_timed_out is True
 
     def test_auth_not_timed_out_within_window(self):
-        session = SecureChannel(algorithm=ALGO).new_session()
+        session = SecureChannel(algorithm="auto").new_session()
         assert session.auth_timed_out is False
 
     def test_auth_not_timed_out_after_auth(self):
@@ -281,7 +311,7 @@ class TestSessionIsolation:
 
     def test_sessions_have_independent_keys(self):
         """两个会话各自持有独立密钥，互相无法解密对方报文。"""
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         session_a = sc.new_session()
         session_a.receive_auth(make_phone_auth(sc))
         session_b = sc.new_session()
@@ -291,7 +321,7 @@ class TestSessionIsolation:
 
     def test_channel_keypair_stable_across_sessions(self):
         """多次建会话不会更换 PC 密钥对，二维码保持有效。"""
-        sc = SecureChannel(algorithm=ALGO)
+        sc = SecureChannel(algorithm="auto")
         pub = sc.get_public_key_b64()
         for _ in range(3):
             sc.new_session()

@@ -148,7 +148,7 @@ class TestUrlDisplay:
 
 
 class TestEncryptionModeRestriction:
-    """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际使用 xchacha20。"""
+    """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际强制加密。"""
 
     def test_algo_none_enabled_in_lan_by_default(self, dashboard):
         assert dashboard.act_algo_none.isEnabled() is True
@@ -165,24 +165,61 @@ class TestEncryptionModeRestriction:
         dashboard.on_switch_completed()
         assert dashboard.act_algo_none.isEnabled() is True
 
-    def test_cf_with_config_none_shows_xchacha20_checked(self, dashboard):
-        """配置为 none 时进入 CF 模式：none 禁用 + xchacha20 勾选。"""
+    def test_cf_with_config_none_shows_encrypted_checked(self, dashboard):
+        """配置为 none 时进入 CF 模式：none 禁用 + 加密勾选。"""
         # 模拟配置为 none 的场景
         dashboard._algorithm = "none"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         assert dashboard.act_algo_none.isEnabled() is False
-        assert dashboard.act_algo_xchacha20.isChecked() is True
+        assert dashboard.act_algo_encrypted.isChecked() is True
         assert dashboard.act_algo_none.isChecked() is False
 
     def test_clicking_none_in_cf_mode_does_not_change_algorithm(self, dashboard):
         """CF 模式下点 none 应被拒绝，配置不变。"""
-        dashboard._algorithm = "xsalsa20"
+        dashboard._algorithm = "auto"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         dashboard._sync_menu_checks()
         dashboard._on_algorithm_clicked("none")
-        # 应保持 xsalsa20，未切到 none
-        assert dashboard._algorithm == "xsalsa20"
-        assert dashboard.act_algo_xsalsa20.isChecked() is True
+        # 应保持 auto（加密），未切到 none
+        assert dashboard._algorithm == "auto"
+        assert dashboard.act_algo_encrypted.isChecked() is True
         assert dashboard.act_algo_none.isChecked() is False
+
+
+class TestEncryptionToggle:
+    """加密菜单只有 加密/不加密 两项，具体算法由客户端协商。"""
+
+    def test_menu_has_no_algorithm_items(self, dashboard):
+        """不再暴露具体算法菜单项。"""
+        assert not hasattr(dashboard, "act_algo_xsalsa20")
+        assert not hasattr(dashboard, "act_algo_xchacha20")
+
+    def test_default_is_none(self, dashboard):
+        """默认不加密（LAN 模式）。"""
+        assert dashboard.act_algo_none.isChecked() is True
+        assert dashboard.act_algo_encrypted.isChecked() is False
+
+    def test_clicking_encrypted_persists_auto(self, dashboard):
+        """点击加密：配置写入 auto，加密项勾选。"""
+        dashboard._on_algorithm_clicked("auto")
+        assert dashboard._algorithm == "auto"
+        assert dashboard.sm.get("e2ee_algorithm") == "auto"
+        assert dashboard.act_algo_encrypted.isChecked() is True
+        assert dashboard.act_algo_none.isChecked() is False
+
+    def test_clicking_none_back_in_lan(self, dashboard):
+        """LAN 模式下可从加密切回不加密。"""
+        dashboard._on_algorithm_clicked("auto")
+        dashboard._on_algorithm_clicked("none")
+        assert dashboard._algorithm == "none"
+        assert dashboard.sm.get("e2ee_algorithm") == "none"
+        assert dashboard.act_algo_none.isChecked() is True
+
+    def test_status_shows_encrypted_not_algorithm(self, dashboard):
+        """状态栏只显示 加密/明文，不显示具体算法名。"""
+        dashboard._algorithm = "auto"
+        dashboard.update_connection_status(True)
+        assert "XChaCha20" not in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_encrypted") in dashboard.status_label.text()

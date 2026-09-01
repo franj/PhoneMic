@@ -58,11 +58,13 @@ class PhoneSimulator:
         self._box = Box(self._phone_private, self._pc_public)
         self._seq = 0
 
-    def make_auth(self) -> dict:
+    def make_auth(self, algo: str = "xsalsa20") -> dict:
+        """模拟手机端 auth：algo 为客户端从 a= 列表中协商选择的算法。"""
         sb = SealedBox(self._pc_public)
         sealed = sb.encrypt(bytes(self._phone_public))
         return {
             "type": "auth",
+            "algo": algo,
             "data": base64.urlsafe_b64encode(sealed).decode().rstrip("="),
         }
 
