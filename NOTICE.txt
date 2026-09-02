@@ -33,19 +33,15 @@
    许可证：BSD 3-Clause
    主页：https://github.com/giampaolo/psutil
 
-8. keyboard
-   许可证：MIT
-   主页：https://github.com/boppreh/keyboard
-
-9. qrcode
+8. qrcode
    许可证：BSD 3-Clause
    主页：https://github.com/lincolnloop/python-qrcode
 
-10. pyparsing
-    许可证：MIT
-    主页：https://github.com/pyparsing/pyparsing
+9. pyparsing
+   许可证：MIT
+   主页：https://github.com/pyparsing/pyparsing
 
-11. PyNaCl
+10. PyNaCl
     许可证：BSD 3-Clause
     主页：https://github.com/pyca/pynacl
     说明：用于端到端加密 (NaCl crypto_box: X25519 + XSalsa20-Poly1305)，

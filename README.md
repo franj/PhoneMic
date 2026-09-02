@@ -158,7 +158,6 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 - Pyperclip (BSD 3-Clause)
 - netifaces (MIT)
 - psutil (BSD 3-Clause)
-- keyboard (MIT)
 - qrcode (BSD 3-Clause)
 - pyparsing (MIT)
 - PyNaCl (BSD 3-Clause) – [主页](https://github.com/pyca/pynacl)

@@ -32,19 +32,15 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
    License: BSD 3-Clause
    Homepage: https://github.com/giampaolo/psutil
 
-8. keyboard
-   License: MIT
-   Homepage: https://github.com/boppreh/keyboard
-
-9. qrcode
+8. qrcode
    License: BSD 3-Clause
    Homepage: https://github.com/lincolnloop/python-qrcode
 
-10. pyparsing
-    License: MIT
-    Homepage: https://github.com/pyparsing/pyparsing
+9. pyparsing
+   License: MIT
+   Homepage: https://github.com/pyparsing/pyparsing
 
-11. PyNaCl
+10. PyNaCl
     License: BSD 3-Clause
     Homepage: https://github.com/pyca/pynacl
     Note: Used for end-to-end encryption (NaCl crypto_box: X25519 + XSalsa20-Poly1305).
