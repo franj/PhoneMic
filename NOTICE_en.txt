@@ -7,9 +7,10 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
    Homepage: https://www.qt.io/qt-for-python
    Note: Dynamically linked; related source code can be obtained from https://www.qt.io/offline-installers
 
-2. aiohttp
-   License: Apache 2.0
-   Homepage: https://github.com/aio-libs/aiohttp
+2. Starlette
+   License: MIT
+   Homepage: https://github.com/encode/starlette
+   Note: Depends on Uvicorn (BSD 3-Clause, https://github.com/encode/uvicorn) as the ASGI server
 
 3. PyWin32
    License: PSF (Python Software Foundation) License

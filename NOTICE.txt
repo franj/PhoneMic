@@ -8,9 +8,10 @@
    主页：https://www.qt.io/qt-for-python
    说明：动态链接使用，相关源代码可从 https://www.qt.io/offline-installers 获取
 
-2. aiohttp
-   许可证：Apache 2.0
-   主页：https://github.com/aio-libs/aiohttp
+2. Starlette
+   许可证：MIT
+   主页：https://github.com/encode/starlette
+   说明：依赖 Uvicorn（BSD 3-Clause，https://github.com/encode/uvicorn）作为 ASGI 服务器
 
 3. PyWin32
    许可证：PSF (Python Software Foundation) License
