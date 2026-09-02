@@ -939,16 +939,16 @@ __I18N_JSON__
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
         }
         _showAuthRejected(hasKey) {
-            const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
             let text = hasKey ? window.i18n.auth_rejected_text : window.i18n.auth_nokey_text;
-            if (isWeChat) text += '。' + window.i18n.auth_wechat_hint;
+            // 仅"页面缺少密钥"与微信内置浏览器丢失 hash 相关，认证失败与浏览器无关不提示
+            if (!hasKey && /MicroMessenger/i.test(navigator.userAgent)) {
+                text += '。' + window.i18n.auth_wechat_hint;
+            }
             this._notifyStatusChange(false, text);
         }
         _showRescanRequired() {
-            const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
-            let text = window.i18n.auth_reconfig_text;
-            if (isWeChat) text += '。' + window.i18n.auth_wechat_hint;
-            this._notifyStatusChange(false, text);
+            // PC 端配置变更与浏览器无关，不追加微信提示
+            this._notifyStatusChange(false, window.i18n.auth_reconfig_text);
         }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
