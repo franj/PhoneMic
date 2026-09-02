@@ -54,9 +54,14 @@ class QueueSignals(QObject):
         self.monitor_thread.start()
 
 
-def wait_for_server(host: str, port: int, timeout: float = 5.0) -> bool:
-    """等待服务器就绪，返回是否成功"""
-    url = f"http://{host}:{port}/"
+def wait_for_server(host: str, port: int, secret_path: str = "", timeout: float = 5.0) -> bool:
+    """等待服务器就绪，返回是否成功。
+
+    secret_path 非空（加密模式）时探测 /{secret}/ 入口路径，
+    根路由在加密模式下返回 404，不能作为就绪信号。
+    """
+    prefix = f"/{secret_path}" if secret_path else ""
+    url = f"http://{host}:{port}{prefix}/"
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -166,7 +171,7 @@ def main():
     secure_channel = SecureChannel(algorithm=effective_algorithm(algorithm, tunnel_mode), mode=tunnel_mode.value)
     set_secure_channel(secure_channel)
 
-    if not wait_for_server(selected_ip, actual_port):
+    if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
         QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.server_timeout", port=actual_port))
         sys.exit(1)
 
@@ -193,22 +198,22 @@ def main():
         new_ip, new_mac = select_lan_ip(dashboard)
         if new_ip is None:
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
             return
         if new_ip == selected_ip:
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
             return
 
         old_ip = selected_ip
         selected_ip = new_ip
         selected_mac = new_mac
         start_server(selected_ip, actual_port, bridge)
-        if not wait_for_server(selected_ip, actual_port):
+        if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
             QMessageBox.critical(dashboard, i18n.tr("error.title"), i18n.tr("error.switch_network_fail", old_ip=old_ip))
             selected_ip = old_ip
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
         else:
             dashboard.update_network(selected_ip, actual_port)
             if selected_mac:
