@@ -139,12 +139,3 @@ class TestAutoFallback:
         assert manager.mode == TunnelMode.CLOUDFLARE
         on_error.assert_called_once()
 
-
-class TestAuthManagers:
-    def test_pairing_accessible(self, manager):
-        assert manager.pairing is not None
-        assert manager.pairing.is_active() is False
-
-    def test_tokens_accessible(self, manager):
-        assert manager.tokens is not None
-        assert manager.tokens.validate("any") is False

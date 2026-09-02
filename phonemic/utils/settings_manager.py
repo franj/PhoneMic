@@ -55,7 +55,7 @@ class SettingsManager(QObject):
             "network_selection_mode": "ask",      # "auto", "last", "ask"
             "last_network_mac": None,             # 上次使用的网卡MAC
             "auto_start_silent": False,           # 开机自启时是否静默（不显示主窗口）
-            "e2ee_enabled": False,                # 端到端加密
+            "e2ee_algorithm": "none",             # 端到端加密: "none"(不加密), "auto"(加密，算法由客户端协商)
         }
         print(f"default lan is {default['language']}")
         
@@ -81,6 +81,12 @@ class SettingsManager(QObject):
                 if "auto_start_silent" in loaded:
                     if not isinstance(loaded["auto_start_silent"], bool):
                         loaded["auto_start_silent"] = default["auto_start_silent"]
+                # 校验 e2ee_algorithm：历史值 xsalsa20/xchacha20 迁移为 auto
+                if "e2ee_algorithm" in loaded:
+                    if loaded["e2ee_algorithm"] in ("xsalsa20", "xchacha20"):
+                        loaded["e2ee_algorithm"] = "auto"
+                    elif loaded["e2ee_algorithm"] not in ("none", "auto"):
+                        loaded["e2ee_algorithm"] = default["e2ee_algorithm"]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置

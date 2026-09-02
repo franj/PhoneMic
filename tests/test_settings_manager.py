@@ -240,5 +240,42 @@ def test_network_selection_mode_validation(mock_config_path, reset_singleton):
     assert sm.get("network_selection_mode") == "ask"
 
 
+def test_e2ee_algorithm_legacy_values_migrated(mock_config_path, reset_singleton):
+    """历史算法值（xsalsa20/xchacha20）加载时迁移为 auto（加密，算法协商）"""
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"e2ee_algorithm": "xchacha20"}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("e2ee_algorithm") == "auto"
+
+    # xsalsa20 同样迁移
+    SettingsManager._instance = None
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"e2ee_algorithm": "xsalsa20"}, f)
+    sm = SettingsManager.instance()
+    assert sm.get("e2ee_algorithm") == "auto"
+
+
+def test_e2ee_algorithm_valid_values_kept(mock_config_path, reset_singleton):
+    """合法值 none/auto 原样保留"""
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"e2ee_algorithm": "auto"}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("e2ee_algorithm") == "auto"
+
+
+def test_e2ee_algorithm_invalid_value_reset_to_default(mock_config_path, reset_singleton):
+    """非法值重置为默认 none"""
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"e2ee_algorithm": "bogus_algo"}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("e2ee_algorithm") == "none"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

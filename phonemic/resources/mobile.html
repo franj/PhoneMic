@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>📱🎙️PhoneMic💬💻</title>
-    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <script src="sodium.js" defer></script>
+    <script src="crypto_providers.js" defer></script>
     <style>
         /* ========== 基础样式 ========== */
         :root {
@@ -278,18 +280,6 @@
     </div>
 </div>
 
-<!-- 认证弹窗（Cloudflare 隧道模式） -->
-<div id="auth-overlay">
-    <div class="auth-box">
-        <h3 data-i18n="auth_title">设备配对</h3>
-        <p data-i18n="auth_pairing_hint">请在电脑端查看配对码并输入</p>
-        <input type="text" id="pairing-code-input" maxlength="4" inputmode="numeric" placeholder="0000" autocomplete="off" enterkeyhint="done">
-        <br>
-        <button id="pairing-submit" data-i18n="auth_submit">确认配对</button>
-        <div id="auth-error"></div>
-    </div>
-</div>
-
 <script id="i18n-data" type="application/json">
 __I18N_JSON__
 </script>
@@ -309,10 +299,10 @@ __I18N_JSON__
         "log_ws_unknown_type": "[WS] 未处理的消息类型:",
         "log_ws_parse_error": "[WS] 解析消息失败",
         "log_config_updated": "[Config] 更新 maxHistory = ",
-        "auth_title": "设备配对",
-        "auth_pairing_hint": "请在电脑端查看配对码并输入",
-        "auth_submit": "确认配对",
-        "auth_failed": "认证失败"
+        "auth_rejected_text": "认证失败，请重新扫码",
+        "auth_nokey_text": "页面缺少密钥，请重新扫码",
+        "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
+        "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
     };
 
     var i18nData = {};
@@ -713,103 +703,127 @@ __I18N_JSON__
     }
 
     // ========== 4. WebSocket 客户端 ==========
-    // ---- E2EE 客户端：封装所有加解密逻辑，与 WSClient 解耦 ----
-    class E2EEClient {
+    // CryptoProvider 类（NaClBoxProvider, XChaCha20Provider, PlainProvider, PROVIDER_CLASSES）
+    // 定义在 crypto_providers.js 中，通过 <script src> 加载。
+    // SecureClient 负责协调：URL 解析、算法选择、base64 编码、消息组装
+    class SecureClient {
         constructor() {
-            this._key = null;       // CryptoKey
-            this._active = false;   // 是否正在加密
-            this._hasKey = false;   // 是否有密钥
-            this._lastMsg = null;   // 上一条消息（用于 e2ee_required 重发）
+            this._provider = null;
+            this._pcPublicKeyB64 = null;
+            this._pcPublicKeyRaw = null;
+            this._selectedAlgo = 'none';
+            this._ready = false;
+            this._authenticated = false;
+            this._b64Variant = null;
+            // 防重放：每方向独立递增的序列号
+            this._sendSeq = 0;
+            this._recvSeq = -1;
         }
-        get hasKey() { return this._hasKey; }
-        get active() { return this._active; }
-        /** 从 URL fragment (#k=...) 提取密钥 */
-        async initFromUrl() {
-            const match = location.hash.match(/[#&]k=([^&]+)/);
-            if (!match) return;
-            try {
-                this._key = await E2EEClient._importKey(match[1]);
-                this._hasKey = true;
-                this._active = true;
-                console.log('[E2EE] Key loaded from URL');
-            } catch(e) {
-                console.error('[E2EE] Key import failed:', e);
+        get needsAuth() { return this._pcPublicKeyB64 !== null; }
+        get isEncrypted() { return this._selectedAlgo !== 'none'; }
+        get isAuthenticated() { return this._authenticated; }
+        // 服务端下发的算法列表与本地无交集（版本不匹配等），无法建立加密通道
+        get algoUnsupported() { return this._selectedAlgo === null; }
+
+        async init() {
+            await sodium.ready;
+            this._ready = true;
+            this._b64Variant = sodium.base64_VARIANT_URLSAFE_NO_PADDING;
+            this._parseUrlFragment();
+            if (this._selectedAlgo === null) {
+                console.error('[SEC] No common algorithm with server');
+                return;
+            }
+            this._createProvider();
+            if (this._provider.initKeypair) this._provider.initKeypair();
+            if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
+            console.log('[SEC] sodium ready, algorithm:', this._selectedAlgo);
+        }
+
+        _parseUrlFragment() {
+            const hash = location.hash;
+            const kMatch = hash.match(/[#&]k=([^&]+)/);
+            if (kMatch) this._pcPublicKeyB64 = kMatch[1];
+            const aMatch = hash.match(/[#&]a=([^&]+)/);
+            // a= 为服务端支持的算法优先级列表（逗号分隔），按序选择第一个自身支持的
+            const offered = aMatch ? aMatch[1].split(',').map(s => s.trim()) : ['none'];
+            this._selectedAlgo = this._selectAlgorithm(offered);
+        }
+
+        _selectAlgorithm(offered) {
+            for (const name of offered) {
+                if (name in PROVIDER_CLASSES) return name;
+            }
+            return null; // 无共同支持的算法
+        }
+
+        _createProvider() {
+            const Cls = PROVIDER_CLASSES[this._selectedAlgo];
+            this._provider = new Cls();
+            if (this._pcPublicKeyB64) {
+                if (this._selectedAlgo === 'none') {
+                    this._provider.setToken(this._pcPublicKeyB64);
+                } else {
+                    this._pcPublicKeyRaw = sodium.from_base64(this._pcPublicKeyB64, this._b64Variant);
+                }
             }
         }
-        shouldEncrypt() { return this._active && this._key; }
-        isEncrypted(data) { return data.type === 'encrypted'; }
-        async encrypt(msg) {
-            this._lastMsg = { ...msg };
-            return E2EEClient._encryptData(this._key, msg);
+
+        _toB64(bytes) { return sodium.to_base64(bytes, this._b64Variant); }
+        _fromB64(str) { return sodium.from_base64(str, this._b64Variant); }
+
+        makeAuth() {
+            const auth = { type: 'auth', algo: this._selectedAlgo };
+            const authData = this._provider.makeAuthData();
+            if (authData instanceof Uint8Array) {
+                auth.data = this._toB64(authData);
+            } else if (authData) {
+                auth.data = authData;
+            }
+            return auth;
         }
-        async decrypt(envelope) {
-            return E2EEClient._decryptData(this._key, envelope);
-        }
-        /** 处理 E2EE 控制消息，返回 true 表示已处理 */
-        async handleControl(data, ws) {
-            if (data.type === 'e2ee_required') {
-                if (this._hasKey) {
-                    this._active = true;
-                    console.log('[E2EE] Required by server, resending');
-                    await this._resendLast(ws);
-                } else {
-                    E2EEClient._showRescanPrompt();
+
+        handleAuthAck(ackMsg) {
+            if (ackMsg.rejected) {
+                console.error('[SEC] Auth rejected:', ackMsg.reason);
+                return false;
+            }
+            if (ackMsg.data) {
+                const raw = this._fromB64(ackMsg.data);
+                if (this._provider.handleAuthAck(raw)) {
+                    this._authenticated = true;
+                    this._sendSeq = 0;
+                    this._recvSeq = -1;
+                    console.log('[SEC] Authenticated by server');
+                    return true;
                 }
+            } else {
+                this._authenticated = true;
+                console.log('[SEC] Authenticated by server');
                 return true;
             }
             return false;
         }
-        async _resendLast(ws) {
-            if (!this._lastMsg || !this._key) return;
-            const encrypted = await E2EEClient._encryptData(this._key, this._lastMsg);
-            ws.send(JSON.stringify(encrypted));
+
+        encrypt(msg) {
+            if (!this.isEncrypted) return msg;
+            const payload = Object.assign({}, msg, { seq: this._sendSeq++ });
+            const pt = sodium.from_string(JSON.stringify(payload));
+            const encrypted = this._provider.encrypt(pt);
+            return { type: 'data', data: this._toB64(encrypted) };
         }
-        // ---- 底层加解密 (AES-256-GCM via Web Crypto API) ----
-        static _b64urlDecode(str) {
-            str = str.replace(/-/g, '+').replace(/_/g, '/');
-            while (str.length % 4) str += '=';
-            const bin = atob(str);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            return bytes;
-        }
-        static _b64urlEncode(bytes) {
-            let bin = '';
-            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-            return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-        }
-        static async _importKey(b64url) {
-            const raw = E2EEClient._b64urlDecode(b64url);
-            return crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
-        }
-        static async _encryptData(key, msg) {
-            const pt = new TextEncoder().encode(JSON.stringify(msg));
-            const nonce = crypto.getRandomValues(new Uint8Array(12));
-            const ct = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, key, pt);
-            const combined = new Uint8Array(nonce.length + ct.byteLength);
-            combined.set(nonce, 0);
-            combined.set(new Uint8Array(ct), nonce.length);
-            return { type: 'encrypted', data: E2EEClient._b64urlEncode(combined) };
-        }
-        static async _decryptData(key, envelope) {
-            const raw = E2EEClient._b64urlDecode(envelope.data);
-            const nonce = raw.slice(0, 12);
-            const ct = raw.slice(12);
-            const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: nonce}, key, ct);
-            return JSON.parse(new TextDecoder().decode(pt));
-        }
-        static _showRescanPrompt() {
-            const sb = document.getElementById('status-bar');
-            if (!sb) return;
-            const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
-            sb.style.display = 'block';
-            sb.style.background = '#fff3cd';
-            sb.style.color = '#856404';
-            if (isWeChat) {
-                sb.innerText = '微信浏览器可能丢失加密密钥，请在系统浏览器中打开此页面';
-            } else {
-                sb.innerText = '请重新扫码以获取密钥';
+
+        decrypt(envelope) {
+            if (!this.isEncrypted) return envelope;
+            const raw = this._fromB64(envelope.data);
+            const pt = this._provider.decrypt(raw);
+            const inner = JSON.parse(sodium.to_string(pt));
+            // 防重放：seq 必须严格递增，重放/乱序直接抛错由调用方处理
+            if (typeof inner.seq !== 'number' || inner.seq <= this._recvSeq) {
+                throw new Error('[SEC] replay detected');
             }
+            this._recvSeq = inner.seq;
+            return inner;
         }
     }
 
@@ -821,61 +835,74 @@ __I18N_JSON__
             this.isConnected = false;
             this.reconnectInterval = 2000;
             this.reconnectTimer = null;
+            this.authRejected = false;
             this.messageHandlers = new Map();
-            this._token = null;
-            try { this._token = localStorage.getItem('phonemic_token') || null; } catch(e) { this._token = null; }
-            this.e2ee = new E2EEClient();
+            this.secure = new SecureClient();
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
-        connect() {
+
+        async connect() {
+            if (this.authRejected) return;
             if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+            // 服务端算法列表与本地无交集：重试结果相同，直接提示重新扫码
+            if (this.secure.algoUnsupported) {
+                this._showAuthRejected(false);
+                return;
+            }
+            // 加密模式但 URL 中没有密钥（如浏览器丢失 hash）：重连无法恢复，直接提示重新扫码
+            if (this.secure.isEncrypted && !this.secure.needsAuth) {
+                this._showAuthRejected(false);
+                return;
+            }
             try {
                 this.ws = new WebSocket(this.url);
-                this.ws.onopen = async () => {
+                this.ws.onopen = () => {
                     console.log(window.i18n.log_ws_connected);
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    if (this._token) {
-                        let msg = {type: 'auth', method: 'token', token: this._token};
-                        if (this.e2ee.shouldEncrypt()) {
-                            msg = await this.e2ee.encrypt(msg);
-                        }
-                        this.ws.send(JSON.stringify(msg));
+                    if (this.secure.needsAuth) {
+                        const authMsg = this.secure.makeAuth();
+                        this.ws.send(JSON.stringify(authMsg));
+                        console.log('[SEC] Auth sent, algo:', authMsg.algo);
+                    } else {
+                        this.isConnected = true;
+                        this._notifyStatusChange(true);
                     }
                 };
-                this.ws.onmessage = async (event) => {
+                this.ws.onmessage = (event) => {
                     try {
-                        let data = JSON.parse(event.data);
+                        const data = JSON.parse(event.data);
 
-                        // Step 1: 解密加密消息
-                        if (this.e2ee.isEncrypted(data)) {
-                            if (this.e2ee.hasKey) {
-                                data = await this.e2ee.decrypt(data);
+                        if (data.type === 'auth_ack') {
+                            if (this.secure.handleAuthAck(data)) {
+                                this.isConnected = true;
+                                this._notifyStatusChange(true);
                             } else {
-                                E2EEClient._showRescanPrompt();
-                                return;
+                                // 密钥不匹配（如旧二维码），重试结果相同：停止自动重连并提示重新扫码
+                                this.authRejected = true;
+                                this._showAuthRejected(true);
+                                this.ws.close();
                             }
+                            return;
                         }
 
-                        // Step 2: 处理 E2EE 控制消息
-                        if (await this.e2ee.handleControl(data, this.ws)) return;
-
-                        // Step 3: 正常流程（认证、config、preview/send 等）
-                        if (data.type === 'auth_required') {
-                            if (!this._token) {
-                                this._showPairingUI();
+                        if (this.secure.isEncrypted) {
+                            if (data.type === 'data') {
+                                let inner;
+                                try {
+                                    inner = this.secure.decrypt(data);
+                                } catch (e) {
+                                    console.error('[SEC] Decrypt failed:', e);
+                                    return;
+                                }
+                                if (!this.isConnected) {
+                                    this.isConnected = true;
+                                    this._notifyStatusChange(true);
+                                }
+                                const handler = this.messageHandlers.get(inner.type);
+                                if (handler) handler(inner);
+                                else console.warn(window.i18n.log_ws_unknown_type, inner.type);
+                                return;
                             }
-                        } else if (data.type === 'auth_success') {
-                            if (data.token) {
-                                this._token = data.token;
-                                try { localStorage.setItem('phonemic_token', data.token); } catch(e) {}
-                            }
-                            this.isConnected = true;
-                            this._hidePairingUI();
-                            this._notifyStatusChange(true);
-                        } else if (data.type === 'auth_failed') {
-                            this._showAuthError(data.message || window.i18n.auth_failed);
-                            this._token = null;
-                            try { localStorage.removeItem('phonemic_token'); } catch(e) {}
                         } else {
                             if (!this.isConnected) {
                                 this.isConnected = true;
@@ -884,12 +911,17 @@ __I18N_JSON__
                             const handler = this.messageHandlers.get(data.type);
                             if (handler) handler(data);
                             else console.warn(window.i18n.log_ws_unknown_type, data.type);
+                            return;
                         }
+
+                        console.warn('[WS] Unexpected message type:', data.type);
                     } catch (err) { console.error(window.i18n.log_ws_parse_error, err); }
                 };
                 this.ws.onclose = () => {
                     console.log(window.i18n.log_ws_disconnected);
                     this.isConnected = false;
+                    this.secure._authenticated = false;
+                    if (this.authRejected) return; // 保持认证失败提示，不再自动重连
                     this._notifyStatusChange(false);
                     this._scheduleReconnect();
                 };
@@ -903,46 +935,25 @@ __I18N_JSON__
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
             this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
         }
-        _notifyStatusChange(connected) {
-            document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected } }));
+        _notifyStatusChange(connected, message) {
+            document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
         }
-        _showPairingUI() {
-            const el = document.getElementById('auth-overlay');
-            if (el) el.classList.add('show');
-            const input = document.getElementById('pairing-code-input');
-            if (input) {
-                setTimeout(() => { input.focus(); input.click(); }, 200);
+        _showAuthRejected(hasKey) {
+            let text = hasKey ? window.i18n.auth_rejected_text : window.i18n.auth_nokey_text;
+            // 仅"页面缺少密钥"与微信内置浏览器丢失 hash 相关，认证失败与浏览器无关不提示
+            if (!hasKey && /MicroMessenger/i.test(navigator.userAgent)) {
+                text += '。' + window.i18n.auth_wechat_hint;
             }
+            this._notifyStatusChange(false, text);
         }
-        _hidePairingUI() {
-            const el = document.getElementById('auth-overlay');
-            if (el) el.classList.remove('show');
-            const err = document.getElementById('auth-error');
-            if (err) err.style.display = 'none';
+        _showRescanRequired() {
+            // PC 端配置变更与浏览器无关，不追加微信提示
+            this._notifyStatusChange(false, window.i18n.auth_reconfig_text);
         }
-        _showAuthError(msg) {
-            const err = document.getElementById('auth-error');
-            if (err) {
-                err.textContent = msg;
-                err.style.display = 'block';
-            }
-        }
-        async sendPairingCode(code) {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                let msg = {type: 'auth', method: 'pairing_code', code: code};
-                if (this.e2ee.shouldEncrypt()) {
-                    msg = await this.e2ee.encrypt(msg);
-                }
-                this.ws.send(JSON.stringify(msg));
-            }
-        }
-        async send(type, text) {
+        send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-            let msg = { type, text };
-            if (this.e2ee.shouldEncrypt()) {
-                msg = await this.e2ee.encrypt(msg);
-            }
-            this.ws.send(JSON.stringify(msg));
+            const encrypted = this.secure.encrypt({ type, text });
+            this.ws.send(JSON.stringify(encrypted));
             return true;
         }
         getConnected() { return this.isConnected; }
@@ -1098,7 +1109,7 @@ __I18N_JSON__
                 setTimeout(() => this.chatManager.scrollToBottom(), 300);
             });
 
-            document.addEventListener('ws-status', (e) => this.onConnectionChange(e.detail.connected));
+            document.addEventListener('ws-status', (e) => this.onConnectionChange(e.detail.connected, e.detail.message));
             this.setupScrollFix();
         }
 
@@ -1145,7 +1156,7 @@ __I18N_JSON__
             }
             this.modeToggle.style.display = (this.inputBox.value.trim() === '') ? 'block' : 'none';
         }
-        onConnectionChange(connected) {
+        onConnectionChange(connected, message) {
             const statusBar = document.getElementById('status-bar');
             const chatListDiv = document.getElementById('chat-list');
             if (connected) {
@@ -1159,7 +1170,7 @@ __I18N_JSON__
                 this.updateModeToggleVisibility();
             } else {
                 statusBar.style.display = 'block';
-                statusBar.innerText = window.i18n.status_disconnected_text;
+                statusBar.innerText = message || window.i18n.status_disconnected_text;
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
@@ -1201,7 +1212,8 @@ __I18N_JSON__
         window.chatManagerInstance = chatManager;
 
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsClient = new WSClient(`${wsProto}//${location.host}/ws`, appConfig);
+        // 跟随当前页面路径：加密模式页面在 /{secret}/ 下 → /{secret}/ws；明文模式在 / 下 → /ws
+        const wsClient = new WSClient(`${wsProto}//${location.host}${location.pathname}ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);
@@ -1211,36 +1223,22 @@ __I18N_JSON__
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.log(window.i18n.log_config_updated + data.mobile_max_records);
             }
-            if (data.e2ee_enabled && !wsClient.e2ee.hasKey) {
-                E2EEClient._showRescanPrompt();
-            }
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
-
-        // 配对码输入处理
-        const pairingInput = document.getElementById('pairing-code-input');
-        const pairingBtn = document.getElementById('pairing-submit');
-        const submitPairing = () => {
-            const code = pairingInput.value.trim();
-            if (code.length === 4) {
-                const err = document.getElementById('auth-error');
-                if (err) err.style.display = 'none';
-                wsClient.sendPairingCode(code);
+        // PC 端配置变更（如切换加密开关）：URL 已变化，停止自动重连并提示重新扫码
+        wsClient.on('reconnect', (data) => {
+            if (data && data.reason === 'config_changed') {
+                wsClient.authRejected = true;
+                wsClient._showRescanRequired();
+                if (wsClient.ws) wsClient.ws.close();
             }
-        };
-        pairingBtn.addEventListener('click', submitPairing);
-        pairingInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); submitPairing(); }
-        });
-        pairingInput.addEventListener('input', () => {
-            pairingInput.value = pairingInput.value.replace(/[^0-9]/g, '');
         });
 
-        // 从 URL fragment 提取 E2EE 密钥（不经过网络）
-        await wsClient.e2ee.initFromUrl();
+        // 初始化安全通道（从 URL 提取 PC 公钥 + 生成手机密钥对）
+        await wsClient.secure.init();
 
-        wsClient.connect();
         uiController.onConnectionChange(false);
+        wsClient.connect();
         chatManager.scrollToBottom();
         if (inputBox.value === '') modeToggle.style.display = 'block';
     };

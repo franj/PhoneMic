@@ -44,10 +44,17 @@
     许可证：MIT
     主页：https://github.com/pyparsing/pyparsing
 
-11. pycryptodome
-    许可证：Public Domain / BSD 2-Clause
-    主页：https://github.com/Legrandin/pycryptodome/
-    说明：用于 Cloudflare 隧道模式的端到端加密 (AES-256-GCM)
+11. PyNaCl
+    许可证：BSD 3-Clause
+    主页：https://github.com/pyca/pynacl
+    说明：用于端到端加密 (NaCl crypto_box: X25519 + XSalsa20-Poly1305)，
+          PC 端密钥生成、密封盒解密、消息加解密
+
+11. libsodium.js
+    许可证：ISC
+    主页：https://github.com/jedisct1/libsodium.js/
+    说明：手机端加密库（libsodium 的 WASM 绑定），用于密钥生成、
+          密封盒加密、消息加解密，与 PC 端 PyNaCl 互通
 
 12. Nuitka (仅打包使用，不包含在最终分发中)
     许可证：Apache 2.0

@@ -1,14 +1,13 @@
 """
 隧道管理器。
-编排 CloudflareTunnel、服务端重启、认证模式切换，处理自动回退。
+编排 CloudflareTunnel、服务端重启，处理自动回退。
 """
 
 import logging
 import threading
 from typing import Callable, Optional
 
-from phonemic.server.api import restart_server, stop_server, set_tunnel_auth
-from phonemic.tunnel.auth import PairingCodeManager, TokenManager
+from phonemic.server.api import restart_server
 from phonemic.tunnel.cloudflare import CloudflareTunnel
 from phonemic.tunnel.mode import TunnelMode, get_bind_address
 
@@ -25,8 +24,6 @@ class TunnelManager:
         self._port = port
         self._bridge = bridge
         self._tunnel = CloudflareTunnel()
-        self._pairing = PairingCodeManager()
-        self._tokens = TokenManager()
         self._mode = TunnelMode.LAN
         self._on_url: Optional[Callable[[str], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
@@ -36,14 +33,6 @@ class TunnelManager:
     @property
     def mode(self) -> TunnelMode:
         return self._mode
-
-    @property
-    def pairing(self) -> PairingCodeManager:
-        return self._pairing
-
-    @property
-    def tokens(self) -> TokenManager:
-        return self._tokens
 
     def set_callbacks(
         self,
@@ -91,7 +80,6 @@ class TunnelManager:
 
         host = get_bind_address(TunnelMode.CLOUDFLARE)
         restart_server(host, self._port, self._bridge)
-        set_tunnel_auth(True, self._pairing, self._tokens)
         self._url_obtained = False
 
         self._tunnel.set_callbacks(
@@ -110,7 +98,6 @@ class TunnelManager:
         self._tunnel.stop()
         host = get_bind_address(TunnelMode.LAN)
         restart_server(host, self._port, self._bridge)
-        set_tunnel_auth(False)
         self._mode = TunnelMode.LAN
         if self._on_mode_changed:
             self._on_mode_changed(TunnelMode.LAN)

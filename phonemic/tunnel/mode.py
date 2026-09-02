@@ -36,3 +36,17 @@ def get_bind_address(mode: TunnelMode) -> str:
     if mode == TunnelMode.CLOUDFLARE:
         return "127.0.0.1"
     return "0.0.0.0"
+
+
+def effective_algorithm(algo: str, mode: TunnelMode) -> str:
+    """根据当前模式返回最终生效的加密设置。
+
+    返回值为 "none"（不加密）或 "auto"（加密，具体算法由客户端协商）。
+    历史配置值 xsalsa20/xchacha20 一律归一化为 auto。
+    Cloudflare 模式下明文传输存在互联网中间人风险，
+    即使用户配置为 none，也强制加密，配置保持原值不修改。
+    """
+    algo = "none" if algo == "none" else "auto"
+    if mode == TunnelMode.CLOUDFLARE and algo == "none":
+        return "auto"
+    return algo

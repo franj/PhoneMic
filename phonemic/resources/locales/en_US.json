@@ -7,6 +7,7 @@
     "status_disconnected": "Disconnected",
     "status_encrypted": "Encrypted",
     "status_plaintext": "Plaintext",
+    "status_encrypted_algo": "Encrypted ({algo})",
     "menu_program": "Program",
     "menu_network": "Network",
     "menu_action": "Preferences",
@@ -16,6 +17,10 @@
     "menu_help": "Help",
     "menu_help_guide": "User Guide",
     "menu_about": "About PhoneMic",
+    "algo_none": "None",
+    "algo_encrypted": "Encrypted",
+    "algo_xsalsa20": "XSalsa20",
+    "algo_xchacha20": "XChaCha20",
     "btn_lan": "LAN",
     "btn_cloudflare": "Cloudflare",
     "btn_generate_pairing": "Generate Pairing Code",
@@ -120,10 +125,10 @@
     "log_ws_unknown_type": "[WS] Unknown message type:",
     "log_ws_parse_error": "[WS] Failed to parse message",
     "log_config_updated": "[Config] Updated maxHistory = ",
-    "auth_title": "Device Pairing",
-    "auth_pairing_hint": "Check the pairing code on your computer and enter it",
-    "auth_submit": "Confirm Pairing",
-    "auth_failed": "Authentication failed"
+    "auth_rejected_text": "Authentication failed. Please scan the QR code again",
+    "auth_nokey_text": "Key missing from this page. Please scan the QR code again",
+    "auth_reconfig_text": "PC settings changed. Please scan the QR code again",
+    "auth_wechat_hint": "WeChat built-in browser may lose the key. Please open this page in a system browser"
   },
   "commands": {
     "title": "Command Manager",

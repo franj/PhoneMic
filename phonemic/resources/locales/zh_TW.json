@@ -7,6 +7,7 @@
     "status_disconnected": "未連線",
     "status_encrypted": "加密",
     "status_plaintext": "明文",
+    "status_encrypted_algo": "加密（{algo}）",
     "menu_program": "程式",
     "menu_network": "網路",
     "menu_action": "偏好設定",
@@ -16,6 +17,10 @@
     "menu_help": "說明",
     "menu_help_guide": "使用說明",
     "menu_about": "關於 PhoneMic",
+    "algo_none": "不加密",
+    "algo_encrypted": "加密",
+    "algo_xsalsa20": "XSalsa20",
+    "algo_xchacha20": "XChaCha20",
     "btn_lan": "區域網路",
     "btn_cloudflare": "Cloudflare",
     "btn_generate_pairing": "產生配對碼",
@@ -121,10 +126,10 @@
     "log_ws_unknown_type": "[WS] 未處理的訊息類型:",
     "log_ws_parse_error": "[WS] 解析訊息失敗",
     "log_config_updated": "[Config] 更新 maxHistory = ",
-    "auth_title": "裝置配對",
-    "auth_pairing_hint": "請在電腦端查看配對碼並輸入",
-    "auth_submit": "確認配對",
-    "auth_failed": "認證失敗"
+    "auth_rejected_text": "認證失敗，請重新掃碼",
+    "auth_nokey_text": "頁面缺少金鑰，請重新掃碼",
+    "auth_reconfig_text": "PC 端配置已變更，請重新掃碼",
+    "auth_wechat_hint": "微信瀏覽器可能無法保留金鑰，請用系統瀏覽器開啟此頁面"
   },
   "commands": {
     "title": "命令管理",

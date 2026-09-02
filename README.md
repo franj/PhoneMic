@@ -17,7 +17,7 @@
 - ✅ **实时预览** – 电脑悬浮窗实时显示输入内容，无焦点不干扰
 - ✅ **自动发送** – 语音识别结束后自动上屏，流畅高效
 - ✅ **语音命令** – 自定义文字触发模拟按键、输入文本或运行外部程序
-- ✅ **隐私安全** – 局域网模式下数据不经过任何云端服务器；Cloudflare 隧道模式下通过 HTTPS 加密传输，并额外提供端到端加密（E2EE），防止中间节点窃听。局域网模式为明文传输，请在可信网络下使用；不可信网络（如公共 WiFi）请使用 Cloudflare 模式。
+- ✅ **隐私安全** – 局域网模式下数据只在局域网内传输，不经过任何云端服务器；Cloudflare 隧道模式在 HTTPS 隧道之上**强制启用端到端加密**，中间节点无法读取内容。局域网模式可自行决定是否加密：在主界面菜单 **网络 → 加密** 开启即可，具体算法由手机与电脑自动协商，密钥通过二维码传递、不经过网络。
 
 ## 🚀 快速开始
 
@@ -50,9 +50,7 @@
 - [GitHub Releases](https://github.com/franj/PhoneMic/releases)
 - [Gitee Releases](https://gitee.com/franj/PhoneMic/releases)
 
-提供两个版本：
-- **标准版** `PhoneMic_Setup_...exe`：体积小，仅用局域网模式可选；想用 Cloudflare 模式需自行安装 cloudflared
-- **内嵌版** `PhoneMic_Setup_bundled_...exe`：自带 cloudflared，开箱即用，无需额外安装
+提供内嵌版本（`PhoneMic_Setup_bundled_...exe`，自带 cloudflared，开箱即用）。
 
 ### 方式二：从源码运行
 
@@ -95,17 +93,17 @@ PhoneMic 默认在局域网内工作。如果手机和电脑不在同一局域�
 ### 使用步骤
 
 1. 在 PhoneMic 主界面菜单栏点击 **网络 → Cloudflare** 切换模式。
-2. 程序会自动启动隧道，成功后界面显示二维码和配对码。
-3. 用手机扫码打开页面，输入 4 位配对码完成认证。
-4. 认证通过后即可正常使用，后续重连无需再次输入配对码（程序重启后需重新配对）。
+2. 程序会自动启动隧道，成功后界面显示二维码。
+3. 用手机扫码打开页面，手机端自动完成密钥交换与认证。
+4. 认证通过后即可正常使用。
 
 ### 说明
 
-- **安全性：** 隧道提供 HTTPS 加密，并自动启用端到端加密（AES-256-GCM），密钥通过二维码传递，不经过网络传输；配对码 60 秒有效，仅最后一个配对的设备可连接。
+- **安全性：** 隧道本身提供 HTTPS 加密，且在该模式下**强制启用端到端加密**：PC 公钥通过二维码带外传递，手机用 crypto_box_seal 密封自己的公钥发送给 PC，此后双向通信全部加密，Cloudflare 中间节点也只能看到密文。
 - **域名变化：** 每次启动隧道域名会变，程序会自动更新二维码，重新扫码即可。
 - **回退机制：** 如果 `cloudflared` 未安装或启动失败，程序会自动回退到局域网模式。
 - **中国大陆用户：** Cloudflare 隧道在国内可能有连接不稳定的情况，如遇问题请使用局域网模式。
-- **公司/单位网络：** 如果局域网直连都不通，说明网络管控较严。Cloudflare 隧道通过互联网中转，连接本身有 HTTPS 加密和配对码认证，但请确认单位是否允许建立外部隧道连接，使用前请确认是否违反单位安全规定。
+- **公司/单位网络：** 如果局域网直连都不通，说明网络管控较严。Cloudflare 隧道通过互联网中转，连接本身有 HTTPS 加密且强制端到端加密，但请确认单位是否允许建立外部隧道连接，使用前请确认是否违反单位安全规定。
 
 ## 🛠 语音命令（扩展功能）
 
@@ -162,7 +160,8 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 - keyboard (MIT)
 - qrcode (BSD 3-Clause)
 - pyparsing (MIT)
-- pycryptodome (Public Domain / BSD 2-Clause) – [主页](https://github.com/Legrandin/pycryptodome/)
+- PyNaCl (BSD 3-Clause) – [主页](https://github.com/pyca/pynacl)
+- libsodium.js (ISC) – [主页](https://github.com/jedisct1/libsodium.js/)
 - cloudflared (Apache 2.0, 可选) – [主页](https://github.com/cloudflare/cloudflared)
 
 详细的版权和许可声明请参阅 [NOTICE.txt](NOTICE.txt) 文件。

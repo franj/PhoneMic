@@ -20,10 +20,10 @@ from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
-from phonemic.server.api import start_server, stop_server
-from phonemic.tunnel.e2ee import E2EEManager
+from phonemic.server.api import start_server, stop_server, set_secure_channel, request_client_rescan
+from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
-from phonemic.tunnel.mode import TunnelMode, set_mode
+from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
 from phonemic.utils.paths import get_res_path
 from phonemic.utils.i18n import I18n
@@ -54,9 +54,14 @@ class QueueSignals(QObject):
         self.monitor_thread.start()
 
 
-def wait_for_server(host: str, port: int, timeout: float = 5.0) -> bool:
-    """等待服务器就绪，返回是否成功"""
-    url = f"http://{host}:{port}/"
+def wait_for_server(host: str, port: int, secret_path: str = "", timeout: float = 5.0) -> bool:
+    """等待服务器就绪，返回是否成功。
+
+    secret_path 非空（加密模式）时探测 /{secret}/ 入口路径，
+    根路由在加密模式下返回 404，不能作为就绪信号。
+    """
+    prefix = f"/{secret_path}" if secret_path else ""
+    url = f"http://{host}:{port}{prefix}/"
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -159,12 +164,14 @@ def main():
 
     start_server(selected_ip, actual_port, bridge)
 
-    # E2EE 管理器
-    e2ee_mgr = E2EEManager()
-    from phonemic.server.api import set_e2ee_manager
-    set_e2ee_manager(e2ee_mgr)
+    # 安全通道
+    algorithm = sm.get("e2ee_algorithm", "none")
+    tunnel_mode = get_mode()
+    # Cloudflare 模式下配置为 none 时强制使用 xchacha20，配置保持原值不写入
+    secure_channel = SecureChannel(algorithm=effective_algorithm(algorithm, tunnel_mode), mode=tunnel_mode.value)
+    set_secure_channel(secure_channel)
 
-    if not wait_for_server(selected_ip, actual_port):
+    if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
         QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.server_timeout", port=actual_port))
         sys.exit(1)
 
@@ -191,22 +198,22 @@ def main():
         new_ip, new_mac = select_lan_ip(dashboard)
         if new_ip is None:
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
             return
         if new_ip == selected_ip:
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
             return
 
         old_ip = selected_ip
         selected_ip = new_ip
         selected_mac = new_mac
         start_server(selected_ip, actual_port, bridge)
-        if not wait_for_server(selected_ip, actual_port):
+        if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
             QMessageBox.critical(dashboard, i18n.tr("error.title"), i18n.tr("error.switch_network_fail", old_ip=old_ip))
             selected_ip = old_ip
             start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port)
+            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
         else:
             dashboard.update_network(selected_ip, actual_port)
             if selected_mac:
@@ -233,10 +240,23 @@ def main():
         on_mode_changed=_on_mode_changed,
     )
     dashboard.set_mode_switch_callback(lambda mode: tunnel_mgr.switch_mode(mode))
-    dashboard.set_generate_pairing_callback(lambda: tunnel_mgr.pairing.generate())
 
-    # E2EE：Cloudflare 模式自动启用，LAN 模式不加密
-    dashboard.set_e2ee_manager(e2ee_mgr)
+    # 安全通道
+    dashboard.set_secure_channel(secure_channel)
+
+    def _recreate_secure_channel(algo: str):
+        """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。
+
+        URL（随机路径/公钥）已变化，通知已连接的手机端重新扫码并断开旧连接，
+        避免旧连接继续以旧加密状态通信、且自动重连陷入死循环。
+        """
+        mode = dashboard.get_mode()
+        new_sc = SecureChannel(algorithm=effective_algorithm(algo, mode), mode=mode.value)
+        set_secure_channel(new_sc)
+        dashboard.set_secure_channel(new_sc)
+        request_client_rescan()
+
+    dashboard.set_algorithm_change_callback(_recreate_secure_channel)
 
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
@@ -257,7 +277,9 @@ def main():
                 flash_insert(payload)
             hud.hide()
         elif event_type == "connect":
-            dashboard.update_connection_status(True)
+            # payload 为本次握手协商出的算法名（明文模式为 "none"）
+            algo = payload if isinstance(payload, str) else None
+            dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
         elif event_type == "disconnect":
             dashboard.update_connection_status(False)
@@ -272,17 +294,17 @@ def main():
             mode = TunnelMode(payload)
             dashboard._mode = mode
             set_mode(mode)
-            # E2EE 自动管理：Cloudflare 启用，LAN 禁用
-            if mode == TunnelMode.CLOUDFLARE:
-                e2ee_mgr.enable()
-            else:
-                e2ee_mgr.disable()
+            # 模式变更后重建 SecureChannel（mode 影响 needs_auth 和 token 生成）
+            new_sc = SecureChannel(
+                algorithm=effective_algorithm(sm.get("e2ee_algorithm", "none"), mode),
+                mode=mode.value,
+            )
+            set_secure_channel(new_sc)
+            dashboard.set_secure_channel(new_sc)
             dashboard._apply_mode_ui()
             dashboard.update_connection_status(dashboard.connected)
             if mode == TunnelMode.LAN:
                 dashboard.on_switch_completed()
-        elif event_type == "pairing_success":
-            tray.show_message(i18n.tr("tunnel.pairing_success_title"), i18n.tr("tunnel.pairing_success_msg"), timeout=3000)
         else:
             logger.warning(f"Unknown event: {event_type}")
 

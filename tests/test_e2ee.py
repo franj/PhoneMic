@@ -1,184 +1,476 @@
 """
-E2EE 管理器单元测试。
-测试密钥生成、加解密、URL fragment 拼接、状态切换。
+SecureChannel / SecureSession 单元测试。
+测试密钥对生成、auth 握手、加解密、状态机、none 模式、会话隔离。
 """
 
 import base64
 import json
+import time
 
 import pytest
+from nacl.public import Box, PrivateKey, PublicKey, SealedBox
+from nacl.utils import random as random_bytes
 
-from phonemic.tunnel.e2ee import E2EEManager
+from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 
-
-class TestE2EEState:
-    """测试启用/禁用状态管理。"""
-
-    def test_disabled_by_default(self):
-        mgr = E2EEManager()
-        assert mgr.enabled is False
-
-    def test_enable_sets_enabled(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        assert mgr.enabled is True
-
-    def test_disable_clears_state(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        mgr.disable()
-        assert mgr.enabled is False
-
-    def test_enable_generates_different_keys(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        key1 = mgr.get_key_b64()
-        mgr.enable()
-        key2 = mgr.get_key_b64()
-        assert key1 != key2
-
-    def test_disable_clears_key(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        assert mgr.get_key_b64() != ""
-        mgr.disable()
-        assert mgr.get_key_b64() == ""
+ALGO = "xsalsa20"  # 客户端从 a= 列表中协商选择的算法
 
 
-class TestE2EEUrl:
-    """测试 URL fragment 拼接。"""
+def make_session(phone_algo=ALGO, mode="lan"):
+    """创建一个已完成握手的会话（加密模式，算法由客户端协商）。"""
+    sc = SecureChannel(algorithm="auto", mode=mode)
+    session = sc.new_session()
+    session.receive_auth(make_phone_auth(sc, algorithm=phone_algo))
+    return sc, session
 
-    def test_append_to_url_when_enabled(self):
-        mgr = E2EEManager()
-        mgr.enable()
+
+def make_phone_auth(sc, algorithm=ALGO):
+    """模拟手机端：用 sealed box 加密手机公钥。"""
+    phone_private = PrivateKey.generate()
+    phone_public = phone_private.public_key
+    sb = SealedBox(sc.pc_private.public_key)
+    sealed = sb.encrypt(bytes(phone_public))
+    sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
+    return {"type": "auth", "algo": algorithm, "data": sealed_b64}
+
+
+class TestSecureChannelKeys:
+    """测试密钥对生成和编码。"""
+
+    def test_generates_different_keys(self):
+        sc1 = SecureChannel(algorithm="auto")
+        sc2 = SecureChannel(algorithm="auto")
+        assert sc1.get_public_key_b64() != sc2.get_public_key_b64()
+
+    def test_public_key_is_valid_base64url(self):
+        sc = SecureChannel(algorithm="auto")
+        b64 = sc.get_public_key_b64()
+        assert "=" not in b64
+        decoded = base64.urlsafe_b64decode(b64 + "==")
+        assert len(decoded) == 32
+
+    def test_append_to_url_lan(self):
+        sc = SecureChannel(algorithm="auto")
         url = "http://192.168.1.100:12000"
-        result = mgr.append_to_url(url)
-        assert result.startswith(url + "/#k=")
-        assert len(mgr.get_key_b64()) > 0
+        result = sc.append_to_url(url)
+        # 加密模式插入随机入口路径（防扫描），根路径不可见
+        assert result.startswith(url + f"/{sc.secret_path}/#k=")
+        # a= 为算法优先级列表（逗号分隔），客户端按序协商
+        assert f"a={','.join(OFFERED_ALGORITHMS)}" in result
 
-    def test_append_to_url_when_disabled(self):
-        mgr = E2EEManager()
-        url = "http://192.168.1.100:12000"
-        result = mgr.append_to_url(url)
-        assert result == url
-
-    def test_append_to_cloudflare_url(self):
-        mgr = E2EEManager()
-        mgr.enable()
+    def test_append_to_url_cloudflare(self):
+        sc = SecureChannel(algorithm="auto")
         url = "https://abc-def.trycloudflare.com"
-        result = mgr.append_to_url(url)
-        assert result.startswith(url + "/#k=")
+        result = sc.append_to_url(url)
+        assert result.startswith(url + f"/{sc.secret_path}/#k=")
+
+    def test_append_to_url_no_trailing_slash(self):
+        sc = SecureChannel(algorithm="auto")
+        url = "http://localhost:8080/"
+        result = sc.append_to_url(url)
+        assert f"/{sc.secret_path}/#k=" in result
+        assert "//#k=" not in result
+
+    def test_append_to_url_plaintext_no_secret_path(self):
+        """明文模式不加密：无随机路径、无 fragment。"""
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.secret_path == ""
+        url = "http://192.168.1.100:12000"
+        assert sc.append_to_url(url) == url
+
+    def test_secret_path_only_in_encrypted_mode(self):
+        """随机入口路径仅在加密模式生成，明文模式为空串。"""
+        enc = SecureChannel(algorithm="auto")
+        plain = SecureChannel(algorithm="none", mode="lan")
+        assert len(enc.secret_path) >= 20
+        assert plain.secret_path == ""
+        # 两个加密实例的路径不同（每次生成）
+        enc2 = SecureChannel(algorithm="auto")
+        assert enc.secret_path != enc2.secret_path
 
 
-class TestE2EEEncryptDecrypt:
-    """测试加解密核心功能。"""
+class TestSecureChannelAuth:
+    """测试 auth 握手流程。"""
+
+    def test_receive_auth_succeeds(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        assert session.receive_auth(make_phone_auth(sc)) is True
+        assert session.is_authenticated is True
+
+    def test_receive_auth_fails_with_garbage(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        bad = {"type": "auth", "algo": ALGO, "data": "not_valid_base64!!!"}
+        assert session.receive_auth(bad) is False
+        assert session.is_authenticated is False
+
+    def test_receive_auth_fails_with_wrong_key(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        other_pc = PrivateKey.generate()
+        phone_private = PrivateKey.generate()
+        sb = SealedBox(other_pc.public_key)
+        sealed = sb.encrypt(bytes(phone_private.public_key))
+        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
+        bad = {"type": "auth", "algo": ALGO, "data": sealed_b64}
+        assert session.receive_auth(bad) is False
+        assert session.is_authenticated is False
+
+    def test_receive_auth_fails_with_unsupported_algo(self):
+        """客户端回传的算法不在服务端下发列表中：拒绝。"""
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        auth_msg = {"type": "auth", "algo": "aes-256-gcm", "data": "whatever"}
+        assert session.receive_auth(auth_msg) is False
+        assert session.is_rejected is True
+
+    @pytest.mark.parametrize("phone_algo", OFFERED_ALGORITHMS)
+    def test_receive_auth_accepts_any_offered_algo(self, phone_algo):
+        """客户端可从下发列表中任选一个算法完成握手。"""
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        assert session.receive_auth(make_phone_auth(sc, algorithm=phone_algo)) is True
+        assert session.is_authenticated is True
+        # auth_ack 回显协商出的算法
+        assert session.make_auth_ack()["algo"] == phone_algo
+        # 协商结果可通过属性查询（供状态栏展示）
+        assert session.negotiated_algorithm == phone_algo
+
+    def test_negotiated_algorithm_none_before_handshake(self):
+        """未握手或 none 模式下协商结果为 none。"""
+        sc = SecureChannel(algorithm="auto")
+        assert sc.new_session().negotiated_algorithm == "none"
+        sc_none = SecureChannel(algorithm="none", mode="lan")
+        assert sc_none.new_session().negotiated_algorithm == "none"
+
+    def test_offered_algorithms_priority_order(self):
+        """加密模式下 a= 列表按优先级排序，xchacha20 优先。"""
+        sc = SecureChannel(algorithm="auto")
+        assert sc.offered_algorithms == OFFERED_ALGORITHMS
+        assert sc.offered_algorithms[0] == "xchacha20"
+
+    def test_offered_algorithms_none_mode(self):
+        """不加密模式下仅提供 none（token 认证）。"""
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        assert sc.offered_algorithms == ["none"]
+
+    def test_legacy_algorithm_normalized_to_auto(self):
+        """历史配置值（xsalsa20/xchacha20）归一化为 auto。"""
+        assert SecureChannel(algorithm="xsalsa20").algorithm == "auto"
+        assert SecureChannel(algorithm="xchacha20").algorithm == "auto"
+        assert SecureChannel(algorithm="auto").algorithm == "auto"
+
+    def test_make_auth_ack_returns_encrypted(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        session.receive_auth(make_phone_auth(sc))
+        ack = session.make_auth_ack()
+        assert ack["type"] == "auth_ack"
+        assert "data" in ack
+        assert len(ack["data"]) > 0
+
+    def test_auth_ack_decrypts_correctly(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        phone_private = PrivateKey.generate()
+        phone_public = phone_private.public_key
+        sb = SealedBox(sc.pc_private.public_key)
+        sealed = sb.encrypt(bytes(phone_public))
+        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
+        session.receive_auth({"type": "auth", "algo": ALGO, "data": sealed_b64})
+        ack = session.make_auth_ack()
+        phone_box = Box(phone_private, sc.pc_private.public_key)
+        raw = base64.urlsafe_b64decode(ack["data"] + "==")
+        nonce = raw[: Box.NONCE_SIZE]
+        ct = raw[Box.NONCE_SIZE :]
+        pt = phone_box.decrypt(ct, nonce)
+        msg = json.loads(pt)
+        assert msg["status"] == "OK"
+        assert "ts" in msg
+
+
+class TestSecureChannelEncryptDecrypt:
+    """测试数据加解密。"""
+
+    def _setup_authenticated(self):
+        """建立已完成握手的会话，返回 (session, phone_box)。"""
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        phone_private = PrivateKey.generate()
+        sb = SealedBox(sc.pc_private.public_key)
+        sealed = sb.encrypt(bytes(phone_private.public_key))
+        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
+        session.receive_auth({"type": "auth", "algo": ALGO, "data": sealed_b64})
+        phone_box = Box(phone_private, sc.pc_private.public_key)
+        return session, phone_box
 
     def test_wrap_unwrap_roundtrip(self):
-        mgr = E2EEManager()
-        mgr.enable()
+        sc, _ = self._setup_authenticated()
         original = {"type": "preview", "text": "你好世界"}
-        encrypted = mgr.wrap(original)
-        assert encrypted["type"] == "encrypted"
+        encrypted = sc.wrap(original)
+        assert encrypted["type"] == "data"
         assert "data" in encrypted
-        decrypted = mgr.unwrap(encrypted)
+        decrypted = sc.unwrap(encrypted)
         assert decrypted == original
 
-    def test_wrap_unroll_with_english(self):
-        mgr = E2EEManager()
-        mgr.enable()
+    def test_wrap_unwrap_with_english(self):
+        sc, _ = self._setup_authenticated()
         original = {"type": "send", "text": "Hello World"}
-        encrypted = mgr.wrap(original)
-        decrypted = mgr.unwrap(encrypted)
+        encrypted = sc.wrap(original)
+        decrypted = sc.unwrap(encrypted)
         assert decrypted == original
 
-    def test_wrap_unroll_with_empty_text(self):
-        mgr = E2EEManager()
-        mgr.enable()
+    def test_wrap_unwrap_with_empty_text(self):
+        sc, _ = self._setup_authenticated()
         original = {"type": "preview", "text": ""}
-        encrypted = mgr.wrap(original)
-        decrypted = mgr.unwrap(encrypted)
+        encrypted = sc.wrap(original)
+        decrypted = sc.unwrap(encrypted)
         assert decrypted == original
 
-    def test_wrap_unroll_with_nested_json(self):
-        mgr = E2EEManager()
-        mgr.enable()
+    def test_wrap_unwrap_with_nested_json(self):
+        sc, _ = self._setup_authenticated()
         original = {"type": "config", "settings": {"max": 10, "lang": "zh"}}
-        encrypted = mgr.wrap(original)
-        decrypted = mgr.unwrap(encrypted)
+        encrypted = sc.wrap(original)
+        decrypted = sc.unwrap(encrypted)
         assert decrypted == original
 
     def test_wrap_produces_different_ciphertexts(self):
-        mgr = E2EEManager()
-        mgr.enable()
+        sc, _ = self._setup_authenticated()
         msg = {"type": "preview", "text": "hello"}
-        ct1 = mgr.wrap(msg)
-        ct2 = mgr.wrap(msg)
-        assert ct1["data"] != ct2["data"]  # nonce 不同
+        ct1 = sc.wrap(msg)
+        ct2 = sc.wrap(msg)
+        assert ct1["data"] != ct2["data"]
 
-    def test_decrypt_with_wrong_key_fails(self):
-        mgr1 = E2EEManager()
-        mgr1.enable()
-        encrypted = mgr1.wrap({"type": "send", "text": "secret"})
+    def test_unwrap_returns_none_on_bad_data(self):
+        sc, _ = self._setup_authenticated()
+        assert sc.unwrap({"type": "data", "data": "garbage!!!"}) is None
 
-        mgr2 = E2EEManager()
-        mgr2.enable()  # 不同的密钥
-        with pytest.raises(Exception):
-            mgr2.unwrap(encrypted)
-
-    def test_decrypt_tampered_data_fails(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        encrypted = mgr.wrap({"type": "preview", "text": "hello"})
-        # 篡改密文
+    def test_unwrap_returns_none_on_tampered(self):
+        sc, _ = self._setup_authenticated()
+        encrypted = sc.wrap({"type": "preview", "text": "hello"})
         tampered = encrypted["data"][:-4] + "aaaa"
-        with pytest.raises(Exception):
-            mgr.unwrap({"type": "encrypted", "data": tampered})
+        assert sc.unwrap({"type": "data", "data": tampered}) is None
 
-    def test_unwrap_missing_data_field_raises(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        with pytest.raises(ValueError, match="missing 'data'"):
-            mgr.unwrap({"type": "encrypted"})
+    def test_wrap_without_auth_raises(self):
+        """未握手的会话没有 provider，wrap 会失败而非静默发送明文。"""
+        session = SecureChannel(algorithm="auto").new_session()
+        with pytest.raises(AttributeError):
+            session.wrap({"type": "preview", "text": "test"})
+
+    def test_replay_envelope_rejected(self):
+        """同一信封重放：seq 未递增，返回 None。"""
+        sc, _ = self._setup_authenticated()
+        envelope = sc.wrap({"type": "preview", "text": "hello"})
+        assert sc.unwrap(envelope) == {"type": "preview", "text": "hello"}
+        # 重放同一密文：防重放拒绝
+        assert sc.unwrap(envelope) is None
+
+    def test_out_of_order_rejected(self):
+        """乱序消息（先 seq=1 再 seq=0）：拒绝。"""
+        sc, _ = self._setup_authenticated()
+        e1 = sc.wrap({"type": "preview", "text": "a"})
+        e2 = sc.wrap({"type": "preview", "text": "b"})
+        assert sc.unwrap(e2) == {"type": "preview", "text": "b"}
+        assert sc.unwrap(e1) is None
+
+    def test_seq_stripped_from_inner(self):
+        """seq 是传输层字段，unwrap 后不暴露给业务层。"""
+        sc, _ = self._setup_authenticated()
+        inner = sc.unwrap(sc.wrap({"type": "send", "text": "x"}))
+        assert inner == {"type": "send", "text": "x"}
+        assert "seq" not in inner
+
+    def test_missing_seq_rejected(self):
+        """密文中没有 seq 字段：按防重放失败处理。"""
+        sc, _ = self._setup_authenticated()
+        # 直接加密不含 seq 的明文
+        raw_pt = b'{"type":"send","text":"x"}'
+        encrypted = sc._provider.encrypt(raw_pt)
+        import base64
+        envelope = {"type": "data", "data": base64.urlsafe_b64encode(encrypted).decode().rstrip("=")}
+        assert sc.unwrap(envelope) is None
 
 
-class TestE2EEDisabledPassthrough:
-    """测试禁用时的透传行为。"""
+class TestSecureChannelStateMachine:
+    """测试状态机行为。"""
 
-    def test_disabled_get_key_b64_returns_empty(self):
-        mgr = E2EEManager()
-        assert mgr.get_key_b64() == ""
+    def test_not_authenticated_by_default(self):
+        sc = SecureChannel(algorithm="auto")
+        assert sc.new_session().is_authenticated is False
 
-    def test_disabled_append_to_url_unchanged(self):
-        mgr = E2EEManager()
-        url = "http://localhost:8080"
-        assert mgr.append_to_url(url) == url
+    def test_none_lan_auto_authenticated(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.new_session().is_authenticated is True
 
-    def test_is_encrypted_detects_envelope(self):
-        mgr = E2EEManager()
-        assert mgr.is_encrypted({"type": "encrypted", "data": "abc"}) is True
-        assert mgr.is_encrypted({"type": "preview", "text": "abc"}) is False
+    def test_auth_timed_out_after_timeout(self):
+        session = SecureChannel(algorithm="auto").new_session()
+        session._connected_at = time.monotonic() - 11
+        assert session.auth_timed_out is True
+
+    def test_auth_not_timed_out_within_window(self):
+        session = SecureChannel(algorithm="auto").new_session()
+        assert session.auth_timed_out is False
+
+    def test_auth_not_timed_out_after_auth(self):
+        _, session = make_session()
+        session._connected_at = time.monotonic() - 20
+        assert session.auth_timed_out is False
 
 
-class TestE2EERebindKey:
-    """测试密钥重新生成（切换场景）。"""
+class TestSessionIsolation:
+    """测试会话隔离：新连接的握手不得影响已认证的连接。"""
 
-    def test_reenable_generates_new_key(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        key1 = mgr.get_key_b64()
-        mgr.disable()
-        mgr.enable()
-        key2 = mgr.get_key_b64()
-        assert key1 != key2
+    def test_new_session_does_not_reset_authenticated_session(self):
+        """新建会话后，已认证会话仍保持认证态且能正常加解密。"""
+        sc, session_a = make_session()
+        sc.new_session()  # 攻击者建立新连接，尚未认证
+        assert session_a.is_authenticated is True
+        assert session_a.wrap({"type": "send", "text": "x"})["type"] == "data"
 
-    def test_old_key_cannot_decrypt_after_reenable(self):
-        mgr = E2EEManager()
-        mgr.enable()
-        old_encrypted = mgr.wrap({"type": "send", "text": "old message"})
-        old_key_b64 = mgr.get_key_b64()
+    def test_failed_auth_does_not_affect_authenticated_session(self):
+        """新连接认证失败，不得让已认证会话退回明文。"""
+        sc, session_a = make_session()
+        session_b = sc.new_session()
+        assert session_b.receive_auth({"type": "auth", "algo": ALGO, "data": "bad"}) is False
+        assert session_a.is_authenticated is True
+        assert session_a.wrap({"type": "send", "text": "x"})["type"] == "data"
 
-        # 重新生成密钥
-        mgr.enable()
-        # 用旧密钥加密的消息应该解不了
-        with pytest.raises(Exception):
-            mgr.unwrap(old_encrypted)
+    def test_sessions_have_independent_keys(self):
+        """两个会话各自持有独立密钥，互相无法解密对方报文。"""
+        sc = SecureChannel(algorithm="auto")
+        session_a = sc.new_session()
+        session_a.receive_auth(make_phone_auth(sc))
+        session_b = sc.new_session()
+        session_b.receive_auth(make_phone_auth(sc))
+        envelope = session_a.wrap({"type": "send", "text": "hello"})
+        assert session_b.unwrap(envelope) is None
+
+    def test_channel_keypair_stable_across_sessions(self):
+        """多次建会话不会更换 PC 密钥对，二维码保持有效。"""
+        sc = SecureChannel(algorithm="auto")
+        pub = sc.get_public_key_b64()
+        for _ in range(3):
+            sc.new_session()
+        assert sc.get_public_key_b64() == pub
+
+
+class TestNoneMode:
+    """测试 none 模式（不加密）。"""
+
+    def test_none_lan_no_auth_needed(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.needs_auth is False
+        assert sc.is_encrypted is False
+
+    def test_none_lan_no_key(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.get_public_key_b64() is None
+
+    def test_none_lan_append_url_unchanged(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        url = "http://192.168.1.100:12000"
+        assert sc.append_to_url(url) == url
+
+    def test_none_lan_wrap_passthrough(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        msg = {"type": "send", "text": "hello"}
+        assert sc.new_session().wrap(msg) == msg
+
+    def test_none_lan_unwrap_passthrough(self):
+        sc = SecureChannel(algorithm="none", mode="lan")
+        msg = {"type": "send", "text": "hello"}
+        assert sc.new_session().unwrap(msg) == msg
+
+    def test_none_cf_needs_auth(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        assert sc.needs_auth is True
+        assert sc.is_encrypted is False
+
+    def test_none_cf_has_token(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        token = sc.get_public_key_b64()
+        assert token is not None
+        assert len(token) > 0
+
+    def test_none_cf_append_url(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        url = "https://abc.trycloudflare.com"
+        result = sc.append_to_url(url)
+        token = sc.get_public_key_b64()
+        assert f"#k={token}&a=none" in result
+
+    def test_none_cf_auth_correct_token(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        session = sc.new_session()
+        token = sc.get_public_key_b64()
+        auth_msg = {"type": "auth", "algo": "none", "data": token}
+        assert session.receive_auth(auth_msg) is True
+        assert session.is_authenticated is True
+
+    def test_none_cf_auth_wrong_token(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        session = sc.new_session()
+        auth_msg = {"type": "auth", "algo": "none", "data": "wrong_token"}
+        assert session.receive_auth(auth_msg) is False
+        assert session.is_rejected is True
+        assert "token" in session.reject_reason
+
+    def test_none_cf_make_auth_ack(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        session = sc.new_session()
+        token = sc.get_public_key_b64()
+        session.receive_auth({"type": "auth", "algo": "none", "data": token})
+        ack = session.make_auth_ack()
+        assert ack["type"] == "auth_ack"
+        assert ack["status"] == "OK"
+        assert "data" not in ack
+
+    def test_none_cf_wrap_passthrough(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        msg = {"type": "send", "text": "hello"}
+        assert sc.new_session().wrap(msg) == msg
+
+    def test_none_cf_unwrap_passthrough(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        msg = {"type": "send", "text": "hello"}
+        assert sc.new_session().unwrap(msg) == msg
+
+    def test_none_cf_tokens_unique(self):
+        sc1 = SecureChannel(algorithm="none", mode="cloudflare")
+        sc2 = SecureChannel(algorithm="none", mode="cloudflare")
+        assert sc1.get_public_key_b64() != sc2.get_public_key_b64()
+
+    def test_none_lan_new_session_still_authenticated(self):
+        """none+LAN 无需握手，新会话天然处于已认证态。"""
+        sc = SecureChannel(algorithm="none", mode="lan")
+        assert sc.new_session().is_authenticated is True
+
+    def test_none_cf_new_session_starts_unauthenticated(self):
+        """none+CF 每个新会话都要重新认证，且不影响已有会话。"""
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        token = sc.get_public_key_b64()
+        session_a = sc.new_session()
+        session_a.receive_auth({"type": "auth", "algo": "none", "data": token})
+        assert session_a.is_authenticated is True
+
+        session_b = sc.new_session()
+        assert session_b.is_authenticated is False
+        assert session_b.is_rejected is False
+        assert session_a.is_authenticated is True
+
+    def test_none_cf_auth_wrong_algo_rejected(self):
+        sc = SecureChannel(algorithm="none", mode="cloudflare")
+        session = sc.new_session()
+        token = sc.get_public_key_b64()
+        auth_msg = {"type": "auth", "algo": "xsalsa20", "data": token}
+        assert session.receive_auth(auth_msg) is False
+        assert session.is_rejected is True
+        assert "not allowed" in session.reject_reason
+
+    def test_none_default_is_lan(self):
+        sc = SecureChannel()
+        assert sc.algorithm == "none"
+        assert sc.needs_auth is False
+        assert sc.is_encrypted is False
