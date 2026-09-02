@@ -185,6 +185,41 @@ def push_config(key: str, value) -> bool:
     return send_to_phone({"type": "config", key: value})
 
 
+def request_client_rescan() -> bool:
+    """
+    通知已连接的手机端重新扫码（配置已变更），随后关闭连接。
+
+    算法/模式切换后 URL（随机路径、公钥、token）已变化，旧连接与新配置
+    不一致且重连必然失败。先通过现有连接推送 reconnect 消息（按该连接
+    自身会话加密/明文），手机端收到后停止自动重连并提示重新扫码。
+
+    Returns:
+        True 如果已调度发送，False 如果没有活动连接或调度失败
+    """
+    if _manager is None or _manager.active_websocket is None:
+        return False
+    if _event_loop is None:
+        return False
+
+    async def _do():
+        try:
+            ws = _manager.active_websocket
+            session = _manager.session_for(ws)
+            if session is None:
+                return
+            message = {"type": "reconnect", "reason": "config_changed"}
+            if session.is_authenticated:
+                message = session.wrap(message)
+            await ws.send_str(json.dumps(message, ensure_ascii=False))
+            await ws.close(code=1000)
+            logger.info("Client notified to rescan, connection closed.")
+        except Exception as e:
+            logger.warning(f"Failed to notify client rescan: {e}")
+
+    asyncio.run_coroutine_threadsafe(_do(), _event_loop)
+    return True
+
+
 # ---------- WebSocket 连接处理 ----------
 
 async def _handle_auth(ws: web.WebSocketResponse, session) -> bool:

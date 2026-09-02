@@ -20,7 +20,7 @@ from nacl.utils import random as random_bytes
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import (
     set_bridge, start_server, stop_server, restart_server,
-    push_config, send_to_phone, set_secure_channel,
+    push_config, send_to_phone, set_secure_channel, request_client_rescan,
 )
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.mode import TunnelMode, get_bind_address
@@ -335,6 +335,47 @@ def test_send_to_phone_custom_message(secure_server):
         inner = phone.decrypt(data)
         assert inner["type"] == "notice"
         assert inner["text"] == "hello from server"
+
+
+def test_request_client_rescan_notifies_and_closes(secure_server):
+    """request_client_rescan：通知已连接手机重新扫码，随后关闭连接。"""
+    host, port, queue, sc = secure_server
+    phone = PhoneSimulator(sc.get_public_key_b64())
+
+    with ws_connect(ws_url(host, port, sc)) as ws:
+        authenticate(ws, phone)
+        consume_connect(queue)
+        consume_initial_config(ws, phone)
+
+        # 触发重新扫码通知（如用户切换加密开关）
+        assert request_client_rescan() is True
+
+        # 手机端收到 reconnect 消息（加密信封，解密后为明文指令）
+        msg = json.loads(ws.recv(timeout=2))
+        assert msg["type"] == "data"
+        inner = phone.decrypt(msg)
+        assert inner["type"] == "reconnect"
+        assert inner["reason"] == "config_changed"
+
+        # 连接随后被服务端关闭
+        with pytest.raises(Exception):
+            ws.recv(timeout=3)
+
+    # 断开事件已推送
+    msg_type, _ = queue.get(timeout=2)
+    assert msg_type == "disconnect"
+
+
+def test_request_client_rescan_when_disconnected():
+    """没有活动连接时 request_client_rescan 应返回 False。"""
+    bridge = QueueEventBridge(multiprocessing.Queue())
+    set_bridge(bridge)
+    sc = SecureChannel(algorithm="xsalsa20")
+    set_secure_channel(sc)
+
+    assert request_client_rescan() is False
+
+    set_secure_channel(None)
 
 
 def test_send_to_phone_when_disconnected():

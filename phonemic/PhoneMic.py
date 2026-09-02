@@ -20,7 +20,7 @@ from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
-from phonemic.server.api import start_server, stop_server, set_secure_channel
+from phonemic.server.api import start_server, stop_server, set_secure_channel, request_client_rescan
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
@@ -245,11 +245,16 @@ def main():
     dashboard.set_secure_channel(secure_channel)
 
     def _recreate_secure_channel(algo: str):
-        """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。"""
+        """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。
+
+        URL（随机路径/公钥）已变化，通知已连接的手机端重新扫码并断开旧连接，
+        避免旧连接继续以旧加密状态通信、且自动重连陷入死循环。
+        """
         mode = dashboard.get_mode()
         new_sc = SecureChannel(algorithm=effective_algorithm(algo, mode), mode=mode.value)
         set_secure_channel(new_sc)
         dashboard.set_secure_channel(new_sc)
+        request_client_rescan()
 
     dashboard.set_algorithm_change_callback(_recreate_secure_channel)
 

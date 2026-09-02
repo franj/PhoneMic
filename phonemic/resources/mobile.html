@@ -301,6 +301,7 @@ __I18N_JSON__
         "log_config_updated": "[Config] 更新 maxHistory = ",
         "auth_rejected_text": "认证失败，请重新扫码",
         "auth_nokey_text": "页面缺少密钥，请重新扫码",
+        "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
         "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
     };
 
@@ -943,6 +944,12 @@ __I18N_JSON__
             if (isWeChat) text += '。' + window.i18n.auth_wechat_hint;
             this._notifyStatusChange(false, text);
         }
+        _showRescanRequired() {
+            const isWeChat = /MicroMessenger/i.test(navigator.userAgent);
+            let text = window.i18n.auth_reconfig_text;
+            if (isWeChat) text += '。' + window.i18n.auth_wechat_hint;
+            this._notifyStatusChange(false, text);
+        }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
             const encrypted = this.secure.encrypt({ type, text });
@@ -1218,6 +1225,14 @@ __I18N_JSON__
             }
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
+        // PC 端配置变更（如切换加密开关）：URL 已变化，停止自动重连并提示重新扫码
+        wsClient.on('reconnect', (data) => {
+            if (data && data.reason === 'config_changed') {
+                wsClient.authRejected = true;
+                wsClient._showRescanRequired();
+                if (wsClient.ws) wsClient.ws.close();
+            }
+        });
 
         // 初始化安全通道（从 URL 提取 PC 公钥 + 生成手机密钥对）
         await wsClient.secure.init();

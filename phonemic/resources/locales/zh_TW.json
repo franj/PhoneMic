@@ -128,6 +128,7 @@
     "log_config_updated": "[Config] 更新 maxHistory = ",
     "auth_rejected_text": "認證失敗，請重新掃碼",
     "auth_nokey_text": "頁面缺少金鑰，請重新掃碼",
+    "auth_reconfig_text": "PC 端配置已變更，請重新掃碼",
     "auth_wechat_hint": "微信瀏覽器可能無法保留金鑰，請用系統瀏覽器開啟此頁面"
   },
   "commands": {
