@@ -1,4 +1,4 @@
-PhoneMic – Third-Party Dependency Notice
+﻿PhoneMic – Third-Party Dependency Notice
 
 This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICENSE file), and includes the following third-party components, with thanks:
 
@@ -8,56 +8,69 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
    Note: Dynamically linked; related source code can be obtained from https://www.qt.io/offline-installers
 
 2. Starlette
-   License: MIT
+   License: BSD 3-Clause
    Homepage: https://github.com/encode/starlette
-   Note: Depends on Uvicorn (BSD 3-Clause, https://github.com/encode/uvicorn) as the ASGI server
+   Note: ASGI application framework, provides HTTP routing and WebSocket endpoints
 
-3. PyWin32
+3. Uvicorn
+   License: BSD 3-Clause
+   Homepage: https://github.com/encode/uvicorn
+   Note: ASGI server. Installed as uvicorn[standard]; the following components are
+         distributed together with this software:
+         - httptools (MIT, https://github.com/MagicStack/httptools): HTTP parsing (C extension)
+         - websockets (BSD 3-Clause, https://github.com/python-websockets/websockets): WebSocket implementation
+         - watchfiles (MIT, https://github.com/samuelcolvin/watchfiles): file change monitoring
+         - python-dotenv (BSD 3-Clause, https://github.com/theskumar/python-dotenv): environment variable loading
+         - anyio (MIT, https://github.com/agronholm/anyio): async compatibility layer
+         - click (BSD 3-Clause, https://github.com/pallets/click): command line interface
+         - h11 (MIT, https://github.com/python-hyper/h11): HTTP/1.1 protocol implementation
+
+4. PyWin32
    License: PSF (Python Software Foundation) License
    Homepage: https://github.com/mhammond/pywin32
 
-4. PyAutoGUI
+5. PyAutoGUI
    License: BSD 3-Clause
    Homepage: https://github.com/asweigart/pyautogui
 
-5. Pyperclip
+6. Pyperclip
    License: BSD 3-Clause
    Homepage: https://github.com/asweigart/pyperclip
 
-6. netifaces
+7. netifaces
    License: MIT
    Homepage: https://github.com/al45tair/netifaces
 
-7. psutil
+8. psutil
    License: BSD 3-Clause
    Homepage: https://github.com/giampaolo/psutil
 
-8. qrcode
+9. qrcode
    License: BSD 3-Clause
    Homepage: https://github.com/lincolnloop/python-qrcode
 
-9. pyparsing
+10. pyparsing
    License: MIT
    Homepage: https://github.com/pyparsing/pyparsing
 
-10. PyNaCl
+11. PyNaCl
     License: BSD 3-Clause
     Homepage: https://github.com/pyca/pynacl
     Note: Used for end-to-end encryption (NaCl crypto_box: X25519 + XSalsa20-Poly1305).
           PC-side key generation, sealed box decryption, message encryption/decryption.
 
-11. libsodium.js
+12. libsodium.js
     License: ISC
     Homepage: https://github.com/jedisct1/libsodium.js/
     Note: Mobile-side crypto library (WASM binding of libsodium), used for key
           generation, sealed box encryption, message encryption/decryption.
           Interoperable with PC-side PyNaCl.
 
-12. Nuitka (used only for packaging, not included in final distribution)
+13. Nuitka (used only for packaging, not included in final distribution)
     License: Apache 2.0
     Homepage: https://nuitka.net
 
-13. cloudflared (optional dependency, users may install separately)
+14. cloudflared (optional dependency, users may install separately)
     License: Apache 2.0
     Homepage: https://github.com/cloudflare/cloudflared
     Download: https://github.com/cloudflare/cloudflared/releases
