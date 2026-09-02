@@ -17,7 +17,6 @@
     "menu_help": "說明",
     "menu_help_guide": "使用說明",
     "menu_about": "關於 PhoneMic",
-    "menu_encryption": "加密方式",
     "algo_none": "不加密",
     "algo_encrypted": "加密",
     "algo_xsalsa20": "XSalsa20",

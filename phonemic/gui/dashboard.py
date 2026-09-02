@@ -305,16 +305,7 @@ class Dashboard(QMainWindow):
 
         network_menu.addSeparator()
 
-        # 切换网络地址（仅局域网模式可用）
-        self.switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
-        self.switch_network_action.triggered.connect(self._on_switch_network)
-        self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
-        network_menu.addAction(self.switch_network_action)
-
-        network_menu.addSeparator()
-
-        # 加密方式子菜单：只暴露加密/不加密，具体算法由客户端从 a= 列表协商
-        enc_menu = network_menu.addMenu(self.i18n.tr("dashboard.menu_encryption"))
+        # 加密方式平铺：只暴露加密/不加密，具体算法由客户端从 a= 列表协商
         algo_group = QActionGroup(self)
         algo_group.setExclusive(True)
 
@@ -322,13 +313,21 @@ class Dashboard(QMainWindow):
         self.act_algo_none.setCheckable(True)
         self.act_algo_none.triggered.connect(lambda: self._on_algorithm_clicked("none"))
         algo_group.addAction(self.act_algo_none)
-        enc_menu.addAction(self.act_algo_none)
+        network_menu.addAction(self.act_algo_none)
 
         self.act_algo_encrypted = QAction(self.i18n.tr("dashboard.algo_encrypted"), self)
         self.act_algo_encrypted.setCheckable(True)
         self.act_algo_encrypted.triggered.connect(lambda: self._on_algorithm_clicked("auto"))
         algo_group.addAction(self.act_algo_encrypted)
-        enc_menu.addAction(self.act_algo_encrypted)
+        network_menu.addAction(self.act_algo_encrypted)
+
+        network_menu.addSeparator()
+
+        # 切换网络地址（仅局域网模式可用）
+        self.switch_network_action = QAction(self.i18n.tr("dashboard.menu_switch_network"), self)
+        self.switch_network_action.triggered.connect(self._on_switch_network)
+        self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
+        network_menu.addAction(self.switch_network_action)
 
         # 初始化勾选状态（包括 CF 模式下 none 强制变为加密的显示）
         self._sync_menu_checks()

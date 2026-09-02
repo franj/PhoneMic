@@ -17,7 +17,6 @@
     "menu_help": "Help",
     "menu_help_guide": "User Guide",
     "menu_about": "About PhoneMic",
-    "menu_encryption": "Encryption",
     "algo_none": "None",
     "algo_encrypted": "Encrypted",
     "algo_xsalsa20": "XSalsa20",
