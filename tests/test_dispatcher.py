@@ -17,7 +17,7 @@ import pytest
 from websockets.sync.client import connect as ws_connect
 
 from phonemic.bridge_queue import QueueEventBridge
-from phonemic.server.api import set_bridge, start_server, stop_server, set_secure_channel
+from phonemic.server.api import set_bridge, start_server, stop_server, set_secure_channel, get_secret_path
 from phonemic.tunnel.e2ee import SecureChannel
 
 
@@ -198,3 +198,27 @@ def test_dynamic_secret_switch_without_restart():
     stop_server()
     set_secure_channel(None)
     time.sleep(0.3)
+
+
+def test_get_secret_path_tracks_latest_channel():
+    """get_secret_path 应始终返回最新 SecureChannel 的 secret_path，而非过期引用。"""
+    try:
+        sc1 = SecureChannel(algorithm="auto")
+        set_secure_channel(sc1)
+        assert get_secret_path() == sc1.secret_path
+
+        # 模拟算法/模式切换重建 SecureChannel
+        sc2 = SecureChannel(algorithm="auto")
+        set_secure_channel(sc2)
+        assert get_secret_path() == sc2.secret_path
+        assert get_secret_path() != sc1.secret_path
+
+        # 明文模式（无 secret）与未设置场景
+        plain = SecureChannel(algorithm="none")
+        set_secure_channel(plain)
+        assert get_secret_path() == ""
+
+        set_secure_channel(None)
+        assert get_secret_path() == ""
+    finally:
+        set_secure_channel(None)

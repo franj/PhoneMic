@@ -135,6 +135,15 @@ def set_secure_channel(sc: SecureChannel) -> None:
     _secure_channel = sc
 
 
+def get_secret_path() -> str:
+    """返回当前安全通道的 secret_path（未设置时为空串）。
+
+    算法/模式切换会重建 SecureChannel 并更新全局 _secure_channel，
+    调用方应始终通过本函数读取最新值，避免持有过期引用。
+    """
+    return _secure_channel.secret_path if _secure_channel else ""
+
+
 async def _send_json(websocket, message: dict) -> None:
     """发送 JSON 消息，按该连接自身的会话状态决定是否加密。
 

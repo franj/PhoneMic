@@ -20,7 +20,7 @@ from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert
 from phonemic.gui.tray import SystemTray
-from phonemic.server.api import start_server, stop_server, set_secure_channel, request_client_rescan
+from phonemic.server.api import start_server, stop_server, restart_server, set_secure_channel, get_secret_path, request_client_rescan
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
@@ -194,26 +194,22 @@ def main():
             QMessageBox.information(dashboard, i18n.tr("info.title"), i18n.tr("info.single_network_no_switch"))
             return
 
-        stop_server()
+        # 先让用户选择，此时服务器仍在运行，无副作用
         new_ip, new_mac = select_lan_ip(dashboard)
-        if new_ip is None:
-            start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
-            return
-        if new_ip == selected_ip:
-            start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
-            return
+        if new_ip is None or new_ip == selected_ip:
+            return  # 取消 / 选了当前地址：什么都不做
 
         old_ip = selected_ip
+        old_mac = selected_mac
         selected_ip = new_ip
         selected_mac = new_mac
-        start_server(selected_ip, actual_port, bridge)
-        if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
+        restart_server(selected_ip, actual_port, bridge)
+        if not wait_for_server(selected_ip, actual_port, get_secret_path()):
             QMessageBox.critical(dashboard, i18n.tr("error.title"), i18n.tr("error.switch_network_fail", old_ip=old_ip))
             selected_ip = old_ip
-            start_server(selected_ip, actual_port, bridge)
-            wait_for_server(selected_ip, actual_port, secure_channel.secret_path)
+            selected_mac = old_mac
+            restart_server(old_ip, actual_port, bridge)
+            wait_for_server(old_ip, actual_port, get_secret_path())
         else:
             dashboard.update_network(selected_ip, actual_port)
             if selected_mac:
