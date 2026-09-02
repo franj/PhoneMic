@@ -9,7 +9,7 @@ from typing import Callable, Optional
 
 from phonemic.server.api import restart_server
 from phonemic.tunnel.cloudflare import CloudflareTunnel
-from phonemic.tunnel.mode import TunnelMode, get_bind_address
+from phonemic.tunnel.mode import TunnelMode
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,10 @@ class TunnelManager:
     管理模式切换、隧道启停、服务端重启和自动回退。
     """
 
-    def __init__(self, port: int, bridge):
+    def __init__(self, port: int, bridge, lan_ip: str = "127.0.0.1"):
         self._port = port
         self._bridge = bridge
+        self._lan_ip = lan_ip
         self._tunnel = CloudflareTunnel()
         self._mode = TunnelMode.LAN
         self._on_url: Optional[Callable[[str], None]] = None
@@ -78,8 +79,7 @@ class TunnelManager:
             self._fallback_to_lan()
             return False
 
-        host = get_bind_address(TunnelMode.CLOUDFLARE)
-        restart_server(host, self._port, self._bridge)
+        restart_server("127.0.0.1", self._port, self._bridge)
         self._url_obtained = False
 
         self._tunnel.set_callbacks(
@@ -96,8 +96,7 @@ class TunnelManager:
     def _switch_to_lan(self) -> None:
         """切换到局域网模式。"""
         self._tunnel.stop()
-        host = get_bind_address(TunnelMode.LAN)
-        restart_server(host, self._port, self._bridge)
+        restart_server(self._lan_ip, self._port, self._bridge)
         self._mode = TunnelMode.LAN
         if self._on_mode_changed:
             self._on_mode_changed(TunnelMode.LAN)

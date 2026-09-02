@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, get_bind_address, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
 
 
 class TestTunnelMode:
@@ -53,14 +53,6 @@ class TestSetMode:
             mock_sm_cls.instance.return_value = mock_sm
             set_mode(TunnelMode.CLOUDFLARE)
             mock_sm.set.assert_called_once_with("tunnel_mode", "cloudflare")
-
-
-class TestBindAddress:
-    def test_lan_binds_all_interfaces(self):
-        assert get_bind_address(TunnelMode.LAN) == "0.0.0.0"
-
-    def test_cloudflare_binds_localhost(self):
-        assert get_bind_address(TunnelMode.CLOUDFLARE) == "127.0.0.1"
 
 
 class TestEffectiveAlgorithm:

@@ -30,14 +30,6 @@ def set_mode(mode: TunnelMode) -> None:
     sm = SettingsManager.instance()
     sm.set("tunnel_mode", mode.value)
 
-
-def get_bind_address(mode: TunnelMode) -> str:
-    """返回模式对应的绑定地址。"""
-    if mode == TunnelMode.CLOUDFLARE:
-        return "127.0.0.1"
-    return "0.0.0.0"
-
-
 def effective_algorithm(algo: str, mode: TunnelMode) -> str:
     """根据当前模式返回最终生效的加密设置。
 

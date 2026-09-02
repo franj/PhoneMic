@@ -13,7 +13,7 @@ from phonemic.tunnel.cloudflare import CloudflareTunnel
 
 @pytest.fixture
 def manager():
-    return TunnelManager(port=12000, bridge=MagicMock())
+    return TunnelManager(port=12000, bridge=MagicMock(), lan_ip="192.168.1.100")
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ class TestSwitchMode:
 
         assert result is True
         assert manager.mode == TunnelMode.LAN
-        mock_restart.assert_any_call("0.0.0.0", 12000, manager._bridge)
+        mock_restart.assert_any_call("192.168.1.100", 12000, manager._bridge)
         on_error.assert_called()
 
     @patch("phonemic.tunnel.manager.restart_server")
@@ -68,7 +68,7 @@ class TestSwitchMode:
 
         assert manager.mode == TunnelMode.LAN
         manager._tunnel.stop.assert_called_once()
-        mock_restart.assert_called_once_with("0.0.0.0", 12000, manager._bridge)
+        mock_restart.assert_called_once_with("192.168.1.100", 12000, manager._bridge)
 
     @patch("phonemic.tunnel.manager.restart_server")
     def test_switch_same_mode_noop(self, mock_restart, manager, sync_switch):
@@ -123,7 +123,7 @@ class TestAutoFallback:
         manager._on_tunnel_stopped()
 
         assert manager.mode == TunnelMode.LAN
-        mock_restart.assert_called_with("0.0.0.0", 12000, manager._bridge)
+        mock_restart.assert_called_with("192.168.1.100", 12000, manager._bridge)
         on_error.assert_called_once()
 
     @patch("phonemic.tunnel.manager.restart_server")

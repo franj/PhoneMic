@@ -223,7 +223,7 @@ def main():
     dashboard.set_restart_network_callback(restart_network)
 
     # 6. 隧道管理（Cloudflare / LAN 模式切换）
-    tunnel_mgr = TunnelManager(actual_port, bridge)
+    tunnel_mgr = TunnelManager(actual_port, bridge, selected_ip)
 
     def _on_tunnel_url(url: str):
         bridge.emit("tunnel_url", url)

@@ -23,7 +23,6 @@ from phonemic.server.api import (
     push_config, send_to_phone, set_secure_channel, request_client_rescan,
 )
 from phonemic.tunnel.e2ee import SecureChannel
-from phonemic.tunnel.mode import TunnelMode, get_bind_address
 
 
 # ---------- 辅助函数 ----------
@@ -732,12 +731,10 @@ def test_restart_server_with_different_host():
     sc = SecureChannel(algorithm="xsalsa20")
     set_secure_channel(sc)
 
-    lan_host = get_bind_address(TunnelMode.LAN)
-    start_server(lan_host, port, bridge)
+    start_server("0.0.0.0", port, bridge)
     assert wait_for_server_ready("127.0.0.1", port, sc.secret_path), "LAN mode start failed"
 
-    cf_host = get_bind_address(TunnelMode.CLOUDFLARE)
-    restart_server(cf_host, port, bridge)
+    restart_server("127.0.0.1", port, bridge)
     assert wait_for_server_ready("127.0.0.1", port, sc.secret_path), "Cloudflare mode restart failed"
 
     phone = PhoneSimulator(sc.get_public_key_b64())

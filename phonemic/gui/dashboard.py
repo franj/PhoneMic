@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, get_bind_address, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
 from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
