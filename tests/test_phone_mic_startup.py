@@ -346,6 +346,14 @@ def test_main_no_free_port(qapp, mocker):
     mock_QMessageBox = mocker.patch("phonemic.PhoneMic.QMessageBox")
     mocker.patch.object(pm.QApplication, 'exec', return_value=0)
 
+    # 必须 mock SettingsManager：否则会读取真实配置，
+    # network_selection_mode 默认为 "ask"，将弹出真实网络选择对话框
+    mock_sm = mocker.patch.object(pm, "SettingsManager")
+    mock_sm.instance.return_value.get.side_effect = lambda key, default=None: {
+        "network_selection_mode": "auto",
+        "last_network_mac": None,
+    }.get(key, default)
+
     sys.argv = ["PhoneMic.py"]
 
     with pytest.raises(SystemExit) as exc:
@@ -370,6 +378,14 @@ def test_main_server_start_timeout(qapp, mocker):
     mocker.patch.object(pm, "wait_for_server", return_value=False)
     mock_QMessageBox = mocker.patch("phonemic.PhoneMic.QMessageBox")
     mocker.patch.object(pm.QApplication, 'exec', return_value=0)
+
+    # 必须 mock SettingsManager：否则会读取真实配置，
+    # network_selection_mode 默认为 "ask"，将弹出真实网络选择对话框
+    mock_sm = mocker.patch.object(pm, "SettingsManager")
+    mock_sm.instance.return_value.get.side_effect = lambda key, default=None: {
+        "network_selection_mode": "auto",
+        "last_network_mac": None,
+    }.get(key, default)
 
     sys.argv = ["PhoneMic.py"]
 
