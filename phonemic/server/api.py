@@ -389,6 +389,7 @@ def _create_app() -> web.Application:
         if "gzip" in accept_encoding:
             gz_path = get_res_path("sodium.js.gz")
             if os.path.exists(gz_path):
+                logger.info("Serving sodium.js.gz (gzip)")
                 return web.FileResponse(
                     gz_path,
                     headers={
@@ -396,6 +397,7 @@ def _create_app() -> web.Application:
                         'Content-Encoding': 'gzip',
                     }
                 )
+        logger.info("Serving sodium.js (uncompressed)")
         sodium_path = get_res_path("sodium.js")
         return web.FileResponse(
             sodium_path,

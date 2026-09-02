@@ -48,6 +48,10 @@
             z-index: 10;
             font-weight: 500;
         }
+        #status-bar.loading {
+            background: #dce8ff;
+            color: #2255aa;
+        }
         #chat-list {
             flex: 1;
             overflow-y: auto;
@@ -293,6 +297,9 @@ __I18N_JSON__
         "btn_send_manual": "发送",
         "btn_clear_aria": "清空输入框",
         "status_disconnected_text": "已断开连接，正在重连...",
+        "status_loading_text": "正在加载...",
+        "status_connecting_text": "正在连接服务器...",
+        "status_load_failed_text": "加密库加载失败，请刷新页面重试",
         "confirm_resend": "重发这条消息？",
         "log_ws_connected": "[WS] 已连接",
         "log_ws_disconnected": "[WS] 断开",
@@ -1156,11 +1163,12 @@ __I18N_JSON__
             }
             this.modeToggle.style.display = (this.inputBox.value.trim() === '') ? 'block' : 'none';
         }
-        onConnectionChange(connected, message) {
+        onConnectionChange(connected, message, type) {
             const statusBar = document.getElementById('status-bar');
             const chatListDiv = document.getElementById('chat-list');
             if (connected) {
                 statusBar.style.display = 'none';
+                statusBar.classList.remove('loading');
                 chatListDiv.classList.remove('offline');
                 this.inputBox.disabled = false;
                 this.btnSend.disabled = false;
@@ -1171,6 +1179,7 @@ __I18N_JSON__
             } else {
                 statusBar.style.display = 'block';
                 statusBar.innerText = message || window.i18n.status_disconnected_text;
+                statusBar.classList.toggle('loading', type === 'loading');
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
@@ -1235,9 +1244,16 @@ __I18N_JSON__
         });
 
         // 初始化安全通道（从 URL 提取 PC 公钥 + 生成手机密钥对）
-        await wsClient.secure.init();
+        uiController.onConnectionChange(false, window.i18n.status_loading_text, 'loading');
+        try {
+            await wsClient.secure.init();
+        } catch (e) {
+            console.error('[SEC] Init failed:', e);
+            uiController.onConnectionChange(false, window.i18n.status_load_failed_text);
+            return;
+        }
 
-        uiController.onConnectionChange(false);
+        uiController.onConnectionChange(false, window.i18n.status_connecting_text, 'loading');
         wsClient.connect();
         chatManager.scrollToBottom();
         if (inputBox.value === '') modeToggle.style.display = 'block';
