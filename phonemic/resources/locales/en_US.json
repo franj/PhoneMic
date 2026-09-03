@@ -131,7 +131,15 @@
     "auth_rejected_text": "Authentication failed. Please scan the QR code again",
     "auth_nokey_text": "Key missing from this page. Please scan the QR code again",
     "auth_reconfig_text": "PC settings changed. Please scan the QR code again",
-    "auth_wechat_hint": "WeChat built-in browser may lose the key. Please open this page in a system browser"
+    "auth_wechat_hint": "WeChat built-in browser may lose the key. Please open this page in a system browser",
+    "dbg_connect_start": "Initiating WebSocket connection...",
+    "dbg_handshake_wait": "WebSocket created, waiting for handshake...",
+    "dbg_handshake_ok": "Handshake OK ({ms}ms), authenticating...",
+    "dbg_auth_ok": "Auth OK ({ms}ms), ready",
+    "dbg_ready_plain": "Ready ({ms}ms, plaintext)",
+    "dbg_error": "Connection error ({ms}ms), closing...",
+    "dbg_closed": "Connection closed, reconnecting in {ms}ms...",
+    "dbg_timeout": "Connection timeout ({ms}ms), retrying..."
   },
   "commands": {
     "title": "Command Manager",

@@ -132,7 +132,15 @@
     "auth_rejected_text": "认证失败，请重新扫码",
     "auth_nokey_text": "页面缺少密钥，请重新扫码",
     "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
-    "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
+    "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面",
+    "dbg_connect_start": "正在发起 WebSocket 连接...",
+    "dbg_handshake_wait": "WebSocket 已创建，等待握手...",
+    "dbg_handshake_ok": "握手成功({ms}ms)，正在认证...",
+    "dbg_auth_ok": "认证通过({ms}ms)，连接就绪",
+    "dbg_ready_plain": "连接就绪({ms}ms，明文模式)",
+    "dbg_error": "连接错误({ms}ms)，即将关闭...",
+    "dbg_closed": "连接关闭，{ms}ms 后重连...",
+    "dbg_timeout": "连接超时({ms}ms)，重试中..."
   },
   "commands": {
     "title": "命令管理",

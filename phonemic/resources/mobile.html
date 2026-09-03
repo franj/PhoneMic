@@ -52,6 +52,10 @@
             background: #dce8ff;
             color: #2255aa;
         }
+        #status-bar.debug {
+            background: #fff3b0;
+            color: #8a6d00;
+        }
         #chat-list {
             flex: 1;
             overflow-y: auto;
@@ -309,7 +313,15 @@ __I18N_JSON__
         "auth_rejected_text": "认证失败，请重新扫码",
         "auth_nokey_text": "页面缺少密钥，请重新扫码",
         "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
-        "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面"
+        "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面",
+        "dbg_connect_start": "正在发起 WebSocket 连接...",
+        "dbg_handshake_wait": "WebSocket 已创建，等待握手...",
+        "dbg_handshake_ok": "握手成功({ms}ms)，正在认证...",
+        "dbg_auth_ok": "认证通过({ms}ms)，连接就绪",
+        "dbg_ready_plain": "连接就绪({ms}ms，明文模式)",
+        "dbg_error": "连接错误({ms}ms)，即将关闭...",
+        "dbg_closed": "连接关闭，{ms}ms 后重连...",
+        "dbg_timeout": "连接超时({ms}ms)，重试中..."
     };
 
     var i18nData = {};
@@ -840,13 +852,33 @@ __I18N_JSON__
             this.config = configManager;
             this.ws = null;
             this.isConnected = false;
-            this.reconnectInterval = 2000;
+            this.reconnectInterval = 1000;
+            this.connectTimeout = 3000;
             this.reconnectTimer = null;
+            this._connectTimer = null;
+            this._skipNextDelay = false;
             this.authRejected = false;
             this.messageHandlers = new Map();
             this.secure = new SecureClient();
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
+
+        _setDebugStatus(text) {
+            const statusBar = document.getElementById('status-bar');
+            if (statusBar) {
+                statusBar.style.display = 'block';
+                statusBar.classList.remove('loading');
+                statusBar.classList.add('debug');
+                statusBar.innerText = text;
+            }
+        }
+
+        _clearConnectTimer() {
+            if (this._connectTimer) {
+                clearTimeout(this._connectTimer);
+                this._connectTimer = null;
+            }
+        }
 
         async connect() {
             if (this.authRejected) return;
@@ -861,10 +893,28 @@ __I18N_JSON__
                 this._showAuthRejected(false);
                 return;
             }
+            const t0 = Date.now();
+            this._setDebugStatus(window.i18n.dbg_connect_start);
+            this._clearConnectTimer();
             try {
                 this.ws = new WebSocket(this.url);
+                this._setDebugStatus(window.i18n.dbg_handshake_wait);
+
+                // 连接超时：3 秒内没握手成功就主动放弃，快速失败以便下一轮重试
+                this._connectTimer = setTimeout(() => {
+                    const elapsed = Date.now() - t0;
+                    console.warn(`[WS] Connection timeout after ${elapsed}ms, closing`);
+                    this._setDebugStatus(window.i18n.dbg_timeout.replace('{ms}', elapsed));
+                    if (this.ws) {
+                        try { this.ws.close(); } catch(e) {}
+                    }
+                }, this.connectTimeout);
+
                 this.ws.onopen = () => {
-                    console.log(window.i18n.log_ws_connected);
+                    this._clearConnectTimer();
+                    const t1 = Date.now();
+                    console.log(window.i18n.log_ws_connected, `(${t1 - t0}ms)`);
+                    this._setDebugStatus(window.i18n.dbg_handshake_ok.replace('{ms}', t1 - t0));
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
@@ -872,7 +922,9 @@ __I18N_JSON__
                         console.log('[SEC] Auth sent, algo:', authMsg.algo);
                     } else {
                         this.isConnected = true;
-                        this._notifyStatusChange(true);
+                        const t2 = Date.now();
+                        this._setDebugStatus(window.i18n.dbg_ready_plain.replace('{ms}', t2 - t0));
+                        setTimeout(() => this._notifyStatusChange(true), 500);
                     }
                 };
                 this.ws.onmessage = (event) => {
@@ -880,9 +932,11 @@ __I18N_JSON__
                         const data = JSON.parse(event.data);
 
                         if (data.type === 'auth_ack') {
+                            const t2 = Date.now();
                             if (this.secure.handleAuthAck(data)) {
                                 this.isConnected = true;
-                                this._notifyStatusChange(true);
+                                this._setDebugStatus(window.i18n.dbg_auth_ok.replace('{ms}', t2 - t0));
+                                setTimeout(() => this._notifyStatusChange(true), 500);
                             } else {
                                 // 密钥不匹配（如旧二维码），重试结果相同：停止自动重连并提示重新扫码
                                 this.authRejected = true;
@@ -925,22 +979,36 @@ __I18N_JSON__
                     } catch (err) { console.error(window.i18n.log_ws_parse_error, err); }
                 };
                 this.ws.onclose = () => {
-                    console.log(window.i18n.log_ws_disconnected);
+                    this._clearConnectTimer();
+                    const t3 = Date.now();
+                    console.log(window.i18n.log_ws_disconnected, `(${t3 - t0}ms)`);
+                    this._setDebugStatus(window.i18n.dbg_closed.replace('{ms}', this.reconnectInterval));
                     this.isConnected = false;
                     this.secure._authenticated = false;
                     if (this.authRejected) return; // 保持认证失败提示，不再自动重连
                     this._notifyStatusChange(false);
                     this._scheduleReconnect();
                 };
-                this.ws.onerror = (err) => { console.error(err); this.ws.close(); };
+                this.ws.onerror = (err) => {
+                    const t4 = Date.now();
+                    console.error('WS error at', t4 - t0, 'ms:', err);
+                    this._setDebugStatus(window.i18n.dbg_error.replace('{ms}', t4 - t0));
+                    this.ws.close();
+                };
             } catch (err) {
+                this._clearConnectTimer();
                 console.error(err);
                 this._scheduleReconnect();
             }
         }
         _scheduleReconnect() {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-            this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
+            if (this._skipNextDelay) {
+                this._skipNextDelay = false;
+                this.connect();
+            } else {
+                this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
+            }
         }
         _notifyStatusChange(connected, message) {
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
@@ -1169,6 +1237,7 @@ __I18N_JSON__
             if (connected) {
                 statusBar.style.display = 'none';
                 statusBar.classList.remove('loading');
+                statusBar.classList.remove('debug');
                 chatListDiv.classList.remove('offline');
                 this.inputBox.disabled = false;
                 this.btnSend.disabled = false;
@@ -1180,6 +1249,7 @@ __I18N_JSON__
                 statusBar.style.display = 'block';
                 statusBar.innerText = message || window.i18n.status_disconnected_text;
                 statusBar.classList.toggle('loading', type === 'loading');
+                statusBar.classList.remove('debug');
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
@@ -1226,6 +1296,28 @@ __I18N_JSON__
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);
+
+        // 网络恢复时立即重连，跳过等待定时器
+        window.addEventListener('online', () => {
+            console.log('[NET] Network online, triggering immediate reconnect');
+            if (wsClient.authRejected) return;
+            if (wsClient.getConnected()) return;
+
+            // 清除等待中的重连定时器
+            if (wsClient.reconnectTimer) {
+                clearTimeout(wsClient.reconnectTimer);
+                wsClient.reconnectTimer = null;
+            }
+
+            // 如果当前有卡在 CONNECTING 的连接，强制关闭它，
+            // 并标记让 onclose 触发的下一次重连跳过等待
+            if (wsClient.ws && wsClient.ws.readyState === WebSocket.CONNECTING) {
+                wsClient._skipNextDelay = true;
+                try { wsClient.ws.close(); } catch(e) {}
+            } else {
+                wsClient.connect();
+            }
+        });
 
         wsClient.on('config', (data) => {
             if (data.mobile_max_records !== undefined) {
