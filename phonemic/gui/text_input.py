@@ -91,6 +91,7 @@ KEYEVENTF_UNICODE = 0x0004
 
 VK_TAB = 0x09
 VK_RETURN = 0x0D
+VK_SHIFT = 0x10
 
 # 单次 SendInput 调用注入的最大事件数。SendInput 内部是原子的，一次调用越多
 # 越能保证顺序；但整段文本可能很长，分批可避免一次分配过大的数组。
@@ -127,17 +128,34 @@ def _vk_pair(vk: int) -> List["INPUT"]:
     ]
 
 
+def _shift_return_inputs() -> List["INPUT"]:
+    """
+    Shift+Enter 插入换行。
+
+    单独的 VK_RETURN 在微信、QQ、浏览器聊天框等程序里会被当成「发送」，
+    多行文本会在第一个换行处被提前发出去。Shift+Enter 是这些程序里
+    「换行但不发送」的约定；记事本、Word、VS Code 等编辑器里同样插入换行。
+    Unicode 注入 \\n 在多数程序里不会产生回车动作，因此不能用来换行。
+    """
+    return [
+        _make_input(VK_SHIFT, 0, 0),
+        _make_input(VK_RETURN, 0, 0),
+        _make_input(VK_RETURN, 0, KEYEVENTF_KEYUP),
+        _make_input(VK_SHIFT, 0, KEYEVENTF_KEYUP),
+    ]
+
+
 def _char_inputs(ch: str) -> List["INPUT"]:
     """
     单个字符对应的事件序列。
 
-    - 换行走 VK_RETURN（Unicode 注入 \\n 在多数程序里不会产生回车动作）
+    - 换行走 Shift+Enter（避免聊天软件把单独的 Enter 当成发送）
     - 制表符走 VK_TAB（终端里的补全、编辑器里的缩进才符合"真人敲键"预期）
     - 其余控制字符丢弃
     - BMP 外字符按 UTF-16 代理项对拆成两个码元
     """
     if ch == "\n":
-        return _vk_pair(VK_RETURN)
+        return _shift_return_inputs()
     if ch == "\t":
         return _vk_pair(VK_TAB)
     if ord(ch) < 0x20 or ord(ch) == 0x7F:

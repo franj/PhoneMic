@@ -65,7 +65,9 @@ def decode(events):
             units.append(e.union.ki.wScan)
         else:
             flush()
-            out.append({text_input.VK_RETURN: "\n", text_input.VK_TAB: "\t"}[e.union.ki.wVk])
+            mapped = {text_input.VK_RETURN: "\n", text_input.VK_TAB: "\t"}.get(e.union.ki.wVk)
+            if mapped:
+                out.append(mapped)
     flush()
     return "".join(out)
 
@@ -99,13 +101,42 @@ def test_crlf_normalized_to_single_return(injected):
     assert decode(events) == "a\nb"
 
 
-def test_newline_uses_virtual_key_not_unicode(injected):
-    """换行必须走 VK_RETURN，Unicode 注入 \\n 在多数程序里不产生回车"""
+def test_newline_uses_shift_return_not_unicode(injected):
+    """换行走 Shift+Enter，避免聊天软件把单独的 Enter 当成发送"""
     text_input.send_text("\n")
     events = flatten(injected)
-    assert len(events) == 2
-    assert all(e.union.ki.wVk == text_input.VK_RETURN for e in events)
+    assert len(events) == 4
+    assert [e.union.ki.wVk for e in events] == [
+        text_input.VK_SHIFT, text_input.VK_RETURN,
+        text_input.VK_RETURN, text_input.VK_SHIFT,
+    ]
+    assert [bool(e.union.ki.dwFlags & text_input.KEYEVENTF_KEYUP) for e in events] == [
+        False, False, True, True,
+    ]
     assert all(not e.union.ki.dwFlags & text_input.KEYEVENTF_UNICODE for e in events)
+
+
+def test_newline_shift_does_not_wrap_neighboring_chars(injected):
+    """Shift 只包住 Enter 本身，前后字符不应被带着按 Shift"""
+    text_input.send_text("a\nb")
+    events = flatten(injected)
+    vks = [e.union.ki.wVk for e in events]
+    assert vks[:2] == [0, 0]  # 'a' 的 unicode 按下/抬起，wVk 为 0
+    assert vks[2:6] == [
+        text_input.VK_SHIFT, text_input.VK_RETURN,
+        text_input.VK_RETURN, text_input.VK_SHIFT,
+    ]
+    assert vks[6:] == [0, 0]  # 'b'
+
+
+def test_consecutive_newlines_each_get_shift_return(injected):
+    text_input.send_text("\n\n")
+    events = flatten(injected)
+    assert len(events) == 8
+    returns = [e for e in events
+               if e.union.ki.wVk == text_input.VK_RETURN
+               and not e.union.ki.dwFlags & text_input.KEYEVENTF_KEYUP]
+    assert len(returns) == 2
 
 
 def test_each_char_has_keydown_and_keyup(injected):
