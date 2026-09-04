@@ -100,7 +100,6 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(12, 16, 12, 12)
 
         self.input_mode_combo = QComboBox()
-        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_auto"), "auto")
         self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_paste"), "paste")
         self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_type"), "type")
         self.input_mode_combo.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
@@ -201,7 +200,7 @@ class SettingsDialog(QDialog):
         font_val = self.sm.get("hud_font_size", 14)
         self.set_combo_index(self.font_combo, font_val)
 
-        self.set_combo_index(self.input_mode_combo, self.sm.get("text_input_mode", "auto"))
+        self.set_combo_index(self.input_mode_combo, self.sm.get("text_input_mode", "paste"))
 
         self.max_records_spin.setValue(self.sm.get("mobile_max_records", 10))
 

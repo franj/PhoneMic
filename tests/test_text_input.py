@@ -172,50 +172,55 @@ def test_long_text_split_into_multiple_batches(injected):
 
 
 # ---------- 失败与平台限制 ----------
-def test_send_failure_propagates(monkeypatch):
-    """SendInput 未全部注入时抛 RuntimeError，供上层回退到剪贴板"""
+def test_first_batch_failure_reports_not_partial(monkeypatch):
+    """首批就失败 -> partial=False，上层可安全回退到剪贴板"""
     monkeypatch.setattr(text_input, "IS_WINDOWS", True)
     monkeypatch.setattr(text_input, "INPUT", FakeInput)
     monkeypatch.setattr(text_input, "BATCH_INTERVAL_SEC", 0)
+    monkeypatch.setattr(
+        text_input, "_send",
+        lambda events: (_ for _ in ()).throw(text_input.SendTextError("拦截", partial=False)))
 
-    def boom(events):
-        raise RuntimeError("SendInput 注入失败")
-
-    monkeypatch.setattr(text_input, "_send", boom)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(text_input.SendTextError) as exc:
         text_input.send_text("hello")
+    assert exc.value.partial is False
+
+
+def test_later_batch_failure_reports_partial(monkeypatch):
+    """前面批次已注入、后续批次失败 -> partial=True，上层不得回退，否则重复上屏"""
+    monkeypatch.setattr(text_input, "IS_WINDOWS", True)
+    monkeypatch.setattr(text_input, "INPUT", FakeInput)
+    monkeypatch.setattr(text_input, "BATCH_INTERVAL_SEC", 0)
+    monkeypatch.setattr(text_input, "MAX_INPUTS_PER_CALL", 4)
+
+    calls = []
+
+    def flaky(events):
+        calls.append(events)
+        if len(calls) > 1:
+            raise text_input.SendTextError("中断", partial=False)
+
+    monkeypatch.setattr(text_input, "_send", flaky)
+    with pytest.raises(text_input.SendTextError) as exc:
+        text_input.send_text("abcdef")
+    assert exc.value.partial is True
+
+
+def test_partial_within_batch_reports_partial(monkeypatch):
+    """同一批内只注入了一部分 -> partial=True"""
+    monkeypatch.setattr(text_input, "IS_WINDOWS", True)
+    monkeypatch.setattr(text_input, "INPUT", FakeInput)
+    monkeypatch.setattr(text_input, "BATCH_INTERVAL_SEC", 0)
+    monkeypatch.setattr(
+        text_input, "_send",
+        lambda events: (_ for _ in ()).throw(text_input.SendTextError("半截", partial=True)))
+
+    with pytest.raises(text_input.SendTextError) as exc:
+        text_input.send_text("hello")
+    assert exc.value.partial is True
 
 
 def test_non_windows_raises(monkeypatch):
     monkeypatch.setattr(text_input, "IS_WINDOWS", False)
-    with pytest.raises(RuntimeError, match="仅在 Windows"):
+    with pytest.raises(text_input.SendTextError, match="仅在 Windows"):
         text_input.send_text("hello")
-
-
-# ---------- 终端识别 ----------
-@pytest.mark.parametrize("class_name,process_name,expected", [
-    ("cascadia_hosting_window_class", "windowsterminal.exe", True),
-    ("consolewindowclass", "cmd.exe", True),
-    ("mintty", "mintty.exe", True),
-    ("putty", "putty.exe", True),
-    ("", "pwsh.exe", True),
-    ("notepad", "notepad.exe", False),
-    ("chrome_widgetwin_1", "chrome.exe", False),
-    ("", "", False),
-])
-def test_is_terminal_foreground(monkeypatch, class_name, process_name, expected):
-    monkeypatch.setattr(text_input, "get_foreground_app", lambda: (class_name, process_name))
-    assert text_input.is_terminal_foreground() is expected
-
-
-def test_is_terminal_foreground_extra_processes(monkeypatch):
-    """用户自定义的冷门终端也应被识别"""
-    monkeypatch.setattr(text_input, "get_foreground_app", lambda: ("someclass", "myterm.exe"))
-    assert text_input.is_terminal_foreground() is False
-    assert text_input.is_terminal_foreground(["MyTerm.exe"]) is True
-    assert text_input.is_terminal_foreground(["  ", ""]) is False
-
-
-def test_get_foreground_app_non_windows(monkeypatch):
-    monkeypatch.setattr(text_input, "IS_WINDOWS", False)
-    assert text_input.get_foreground_app() == ("", "")

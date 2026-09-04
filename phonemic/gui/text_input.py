@@ -15,15 +15,28 @@ KEYEVENTF_UNICODE 让 SendInput 把 wScan 中的 UTF-16 码元以 VK_PACKET 的�
 已知边界：
 - BMP 之外的字符（emoji）必须按 UTF-16 代理项对拆成两个码元连续发送。
 - SendInput 受 UIPI 限制：目标窗口以更高完整性级别（管理员）运行时注入会失败，
-  此时 send_text 抛 RuntimeError，由调用方回退到剪贴板方案。
+  此时 send_text 抛 SendTextError，由调用方决定是否回退到剪贴板方案。
 """
 import ctypes
 import logging
 import sys
 import time
-from typing import List, Optional, Tuple
+from typing import List
 
 logger = logging.getLogger(__name__)
+
+
+class SendTextError(RuntimeError):
+    """
+    模拟输入失败。
+
+    partial=True 表示已有部分字符注入到目标窗口，此时若再回退到剪贴板粘贴，
+    这部分文字会重复上屏，因此调用方必须放弃回退。
+    """
+
+    def __init__(self, message: str, partial: bool = False):
+        super().__init__(message)
+        self.partial = partial
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -68,13 +81,6 @@ if IS_WINDOWS:
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
     _user32.SendInput.restype = wintypes.UINT
-    # 句柄必须声明成指针宽度，否则 64 位下默认 c_int 返回值会被截断
-    _user32.GetForegroundWindow.argtypes = ()
-    _user32.GetForegroundWindow.restype = wintypes.HWND
-    _user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
-    _user32.GetClassNameW.restype = ctypes.c_int
-    _user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-    _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 else:  # pragma: no cover - 仅为让模块在非 Windows 平台可导入（测试/静态检查）
     INPUT = None
     _user32 = None
@@ -159,15 +165,16 @@ def _batch(groups: List[List["INPUT"]]) -> List[List["INPUT"]]:
 
 
 def _send(events: List["INPUT"]) -> None:
-    """调用 SendInput 注入一批事件，未全部注入则抛 RuntimeError"""
+    """调用 SendInput 注入一批事件，未全部注入则抛 SendTextError"""
     count = len(events)
     array = (INPUT * count)(*events)
     sent = _user32.SendInput(count, array, ctypes.sizeof(INPUT))
     if sent != count:
         err = ctypes.get_last_error()
-        raise RuntimeError(
+        raise SendTextError(
             f"SendInput 注入失败: 期望 {count} 个事件，实际 {sent} 个 (WinError {err})。"
-            "目标窗口以管理员权限运行时需要 PhoneMic 同样以管理员权限运行。"
+            "目标窗口以管理员权限运行时需要 PhoneMic 同样以管理员权限运行。",
+            partial=sent > 0,
         )
 
 
@@ -175,7 +182,8 @@ def send_text(text: str) -> None:
     """
     以模拟键盘的方式逐字符输入文本，不使用剪贴板。
 
-    失败时抛 RuntimeError，调用方可回退到剪贴板粘贴。
+    失败时抛 SendTextError；其 partial 属性为 False 时表示一个字符都没进去，
+    调用方可以安全地回退到剪贴板粘贴。
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
@@ -183,7 +191,7 @@ def send_text(text: str) -> None:
         logger.warning("send_text called with empty text, doing nothing")
         return
     if not IS_WINDOWS:
-        raise RuntimeError("模拟键盘输入仅在 Windows 上可用")
+        raise SendTextError("模拟键盘输入仅在 Windows 上可用")
 
     # 统一换行，避免 \r\n 触发两次回车
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -197,102 +205,11 @@ def send_text(text: str) -> None:
     for index, batch in enumerate(batches):
         if index:
             time.sleep(BATCH_INTERVAL_SEC)
-        _send(batch)
+        try:
+            _send(batch)
+        except SendTextError as e:
+            # 第一批之后再失败，前面的字符已经上屏，回退粘贴会造成重复
+            if index and not e.partial:
+                raise SendTextError(str(e), partial=True) from e
+            raise
     logger.debug(f"模拟输入完成: {len(normalized)} 字符 / {len(batches)} 批")
-
-
-# ---------- 前台窗口探测（供"自动"模式判断是否为终端类程序） ----------
-
-# 终端类窗口的窗口类名（小写比较）
-TERMINAL_WINDOW_CLASSES = {
-    "consolewindowclass",             # conhost: cmd.exe / powershell.exe
-    "cascadia_hosting_window_class",  # Windows Terminal
-    "virtualconsoleclass",            # ConEmu / Cmder
-    "mintty",                         # Git Bash / MSYS2 / Cygwin
-    "putty",                          # PuTTY / KiTTY
-}
-
-# 终端类程序的进程名（小写比较）
-TERMINAL_PROCESS_NAMES = {
-    "cmd.exe",
-    "powershell.exe",
-    "pwsh.exe",
-    "conhost.exe",
-    "openconsole.exe",
-    "windowsterminal.exe",
-    "wt.exe",
-    "wsl.exe",
-    "wslhost.exe",
-    "ubuntu.exe",
-    "debian.exe",
-    "mintty.exe",
-    "bash.exe",
-    "sh.exe",
-    "putty.exe",
-    "kitty.exe",
-    "conemu.exe",
-    "conemu64.exe",
-    "mobaxterm.exe",
-    "xshell.exe",
-    "securecrt.exe",
-    "termius.exe",
-    "tabby.exe",
-    "hyper.exe",
-    "alacritty.exe",
-    "wezterm-gui.exe",
-    "warp.exe",
-    "finalshell.exe",
-    "xterm.exe",
-}
-
-
-def get_foreground_app() -> Tuple[str, str]:
-    """
-    返回当前前台窗口的 (窗口类名, 进程名)，均为小写；取不到的部分返回空串。
-    """
-    if not IS_WINDOWS:
-        return "", ""
-    try:
-        hwnd = _user32.GetForegroundWindow()
-        if not hwnd:
-            return "", ""
-
-        buf = ctypes.create_unicode_buffer(256)
-        _user32.GetClassNameW(hwnd, buf, 256)
-        class_name = buf.value.lower()
-
-        pid = wintypes.DWORD()
-        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        process_name = ""
-        if pid.value:
-            try:
-                import psutil
-
-                process_name = psutil.Process(pid.value).name().lower()
-            except Exception as e:
-                logger.debug(f"取前台进程名失败: {e}")
-        return class_name, process_name
-    except Exception as e:
-        logger.debug(f"探测前台窗口失败: {e}")
-        return "", ""
-
-
-def is_terminal_foreground(extra_processes: Optional[List[str]] = None) -> bool:
-    """
-    判断前台窗口是否为终端类程序（这类程序通常不支持 Ctrl+V 粘贴）。
-
-    extra_processes: 用户自定义补充的进程名列表，便于覆盖冷门终端。
-    """
-    class_name, process_name = get_foreground_app()
-    if not class_name and not process_name:
-        return False
-
-    if class_name in TERMINAL_WINDOW_CLASSES:
-        return True
-    if process_name in TERMINAL_PROCESS_NAMES:
-        return True
-    if extra_processes:
-        extras = {str(p).strip().lower() for p in extra_processes if str(p).strip()}
-        if process_name in extras or class_name in extras:
-            return True
-    return False

@@ -18,11 +18,10 @@ from phonemic.gui import text_input
 logger = logging.getLogger(__name__)
 
 # 上屏方式取值
-INPUT_MODE_PASTE = "paste"   # 始终走剪贴板 + Ctrl+V
-INPUT_MODE_TYPE = "type"     # 始终走模拟键盘输入
-INPUT_MODE_AUTO = "auto"     # 终端类窗口用模拟输入，其余走剪贴板
-VALID_INPUT_MODES = (INPUT_MODE_PASTE, INPUT_MODE_TYPE, INPUT_MODE_AUTO)
-DEFAULT_INPUT_MODE = INPUT_MODE_AUTO
+INPUT_MODE_PASTE = "paste"   # 剪贴板 + Ctrl+V
+INPUT_MODE_TYPE = "type"     # 模拟键盘逐字符输入
+VALID_INPUT_MODES = (INPUT_MODE_PASTE, INPUT_MODE_TYPE)
+DEFAULT_INPUT_MODE = INPUT_MODE_PASTE
 
 # 显式指定时优先于配置文件，供命令行/测试覆盖
 _input_mode_override: Optional[str] = None
@@ -50,24 +49,13 @@ def get_input_mode() -> str:
     return mode if mode in VALID_INPUT_MODES else DEFAULT_INPUT_MODE
 
 
-def _get_extra_terminal_apps() -> List[str]:
-    """自动模式下用户自定义补充的终端进程名（配置项 terminal_apps）"""
-    try:
-        from phonemic.utils.settings_manager import SettingsManager
-
-        extra = SettingsManager.instance().get("terminal_apps", [])
-        return list(extra) if isinstance(extra, (list, tuple)) else []
-    except Exception:
-        return []
-
-
 # ---------- 上屏入口 ----------
 def flash_insert(text: str) -> None:
     """
     将文本送到当前光标位置，具体方式由配置的上屏方式决定。
 
-    模拟输入失败时（例如目标窗口以管理员权限运行，SendInput 被 UIPI 拦截）
-    自动回退到剪贴板粘贴。
+    模拟输入若一个字符都没能注入（例如目标窗口以管理员权限运行，SendInput 被
+    UIPI 拦截），回退到剪贴板粘贴；若已注入了一部分则不回退，否则会重复上屏。
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
@@ -75,18 +63,14 @@ def flash_insert(text: str) -> None:
         logger.warning("flash_insert called with empty text, doing nothing")
         return
 
-    mode = get_input_mode()
-    if mode == INPUT_MODE_AUTO:
-        use_type = text_input.is_terminal_foreground(_get_extra_terminal_apps())
-        logger.debug(f"自动模式：前台{'是' if use_type else '不是'}终端类窗口")
-    else:
-        use_type = mode == INPUT_MODE_TYPE
-
-    if use_type:
+    if get_input_mode() == INPUT_MODE_TYPE:
         try:
             text_input.send_text(text)
             return
-        except Exception as e:
+        except text_input.SendTextError as e:
+            if e.partial:
+                logger.error(f"模拟键盘输入中断，已有部分文字上屏，不回退以免重复: {e}")
+                raise
             logger.warning(f"模拟键盘输入失败，回退到剪贴板粘贴: {e}")
 
     flash_insert_via_clipboard(text)
