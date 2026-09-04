@@ -1,25 +1,106 @@
 """
-上屏逻辑：模拟 Ctrl+V 粘贴文本，并恢复原剪贴板内容。
+上屏逻辑：把文本送到当前光标位置，两种方式可选——
+- 剪贴板粘贴：写剪贴板 + 模拟 Ctrl+V，随后恢复原剪贴板内容；
+- 模拟键盘输入：Win32 SendInput 逐字符注入，不碰剪贴板，
+  适用于终端 / SSH 客户端 / vim 等 Ctrl+V 不生效的场景。
+
 同时提供按键序列执行功能（支持逗号分隔多个组合）。
 """
 import logging
 import time
-from typing import Tuple, List
+from typing import Optional, Tuple, List
 
 import pyautogui
 import pyperclip
 
+from phonemic.gui import text_input
+
 logger = logging.getLogger(__name__)
 
-# ---------- 剪贴板粘贴（原有功能） ----------
+# 上屏方式取值
+INPUT_MODE_PASTE = "paste"   # 始终走剪贴板 + Ctrl+V
+INPUT_MODE_TYPE = "type"     # 始终走模拟键盘输入
+INPUT_MODE_AUTO = "auto"     # 终端类窗口用模拟输入，其余走剪贴板
+VALID_INPUT_MODES = (INPUT_MODE_PASTE, INPUT_MODE_TYPE, INPUT_MODE_AUTO)
+DEFAULT_INPUT_MODE = INPUT_MODE_AUTO
+
+# 显式指定时优先于配置文件，供命令行/测试覆盖
+_input_mode_override: Optional[str] = None
+
+
+def set_input_mode_override(mode: Optional[str]) -> None:
+    """强制指定上屏方式；传 None 恢复为读取配置"""
+    global _input_mode_override
+    if mode is not None and mode not in VALID_INPUT_MODES:
+        raise ValueError(f"未知上屏方式: {mode}")
+    _input_mode_override = mode
+
+
+def get_input_mode() -> str:
+    """当前生效的上屏方式"""
+    if _input_mode_override is not None:
+        return _input_mode_override
+    try:
+        from phonemic.utils.settings_manager import SettingsManager
+
+        mode = SettingsManager.instance().get("text_input_mode", DEFAULT_INPUT_MODE)
+    except Exception as e:
+        logger.debug(f"读取上屏方式配置失败，使用默认值: {e}")
+        return DEFAULT_INPUT_MODE
+    return mode if mode in VALID_INPUT_MODES else DEFAULT_INPUT_MODE
+
+
+def _get_extra_terminal_apps() -> List[str]:
+    """自动模式下用户自定义补充的终端进程名（配置项 terminal_apps）"""
+    try:
+        from phonemic.utils.settings_manager import SettingsManager
+
+        extra = SettingsManager.instance().get("terminal_apps", [])
+        return list(extra) if isinstance(extra, (list, tuple)) else []
+    except Exception:
+        return []
+
+
+# ---------- 上屏入口 ----------
 def flash_insert(text: str) -> None:
+    """
+    将文本送到当前光标位置，具体方式由配置的上屏方式决定。
+
+    模拟输入失败时（例如目标窗口以管理员权限运行，SendInput 被 UIPI 拦截）
+    自动回退到剪贴板粘贴。
+    """
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if text == "":
+        logger.warning("flash_insert called with empty text, doing nothing")
+        return
+
+    mode = get_input_mode()
+    if mode == INPUT_MODE_AUTO:
+        use_type = text_input.is_terminal_foreground(_get_extra_terminal_apps())
+        logger.debug(f"自动模式：前台{'是' if use_type else '不是'}终端类窗口")
+    else:
+        use_type = mode == INPUT_MODE_TYPE
+
+    if use_type:
+        try:
+            text_input.send_text(text)
+            return
+        except Exception as e:
+            logger.warning(f"模拟键盘输入失败，回退到剪贴板粘贴: {e}")
+
+    flash_insert_via_clipboard(text)
+
+
+# ---------- 剪贴板粘贴 ----------
+def flash_insert_via_clipboard(text: str) -> None:
     """
     将文本粘贴到当前光标位置，并恢复原剪贴板内容。
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
     if text == "":
-        logger.warning("flash_insert called with empty text, doing nothing")
+        logger.warning("flash_insert_via_clipboard called with empty text, doing nothing")
         return
 
     original_clipboard = None
@@ -38,7 +119,7 @@ def flash_insert(text: str) -> None:
     except pyautogui.FailSafeException as e:
         raise RuntimeError(f"PyAutoGUI failsafe triggered: {e}") from e
     except Exception as e:
-        raise RuntimeError(f"Unexpected error during flash_insert: {e}") from e
+        raise RuntimeError(f"Unexpected error during flash_insert_via_clipboard: {e}") from e
     finally:
         if original_clipboard is not None:
             try:

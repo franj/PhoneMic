@@ -56,6 +56,8 @@ class SettingsManager(QObject):
             "last_network_mac": None,             # 上次使用的网卡MAC
             "auto_start_silent": False,           # 开机自启时是否静默（不显示主窗口）
             "e2ee_algorithm": "none",             # 端到端加密: "none"(不加密), "auto"(加密，算法由客户端协商)
+            "text_input_mode": "auto",            # 上屏方式: "paste"(剪贴板+Ctrl+V), "type"(模拟键盘输入), "auto"(终端类窗口自动改用模拟输入)
+            "terminal_apps": [],                  # 自动模式下额外识别为终端的进程名/窗口类名
         }
         print(f"default lan is {default['language']}")
         
@@ -87,6 +89,14 @@ class SettingsManager(QObject):
                         loaded["e2ee_algorithm"] = "auto"
                     elif loaded["e2ee_algorithm"] not in ("none", "auto"):
                         loaded["e2ee_algorithm"] = default["e2ee_algorithm"]
+                # 校验 text_input_mode
+                if loaded.get("text_input_mode") not in ("paste", "type", "auto"):
+                    loaded["text_input_mode"] = default["text_input_mode"]
+                # 校验 terminal_apps 必须为字符串列表
+                if not isinstance(loaded.get("terminal_apps"), list):
+                    loaded["terminal_apps"] = list(default["terminal_apps"])
+                else:
+                    loaded["terminal_apps"] = [str(a) for a in loaded["terminal_apps"] if str(a).strip()]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置

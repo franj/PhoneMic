@@ -7,7 +7,16 @@
 import pytest
 import pyperclip
 import pyautogui
+from phonemic.gui import keyboard
 from phonemic.gui.keyboard import flash_insert
+
+
+@pytest.fixture(autouse=True)
+def force_paste_mode():
+    """本文件的 flash_insert 用例针对剪贴板路径，固定上屏方式避免受配置/前台窗口影响"""
+    keyboard.set_input_mode_override("paste")
+    yield
+    keyboard.set_input_mode_override(None)
 
 
 class TestFlashInsert:
@@ -276,3 +285,87 @@ def test_send_keys_invalid_sequence_logs_error(mock_hotkey, caplog):
     assert "按键序列非法" in caplog.text
 
 # 注意：原有的 validate_key_combination 仍然可正常工作，无需额外测试
+
+# ---------- 上屏方式分发 ----------
+from phonemic.gui.keyboard import get_input_mode, set_input_mode_override
+
+
+@pytest.fixture
+def restore_mode():
+    yield
+    set_input_mode_override(None)
+
+
+def test_get_input_mode_override(restore_mode):
+    set_input_mode_override("type")
+    assert get_input_mode() == "type"
+    set_input_mode_override(None)
+    # 取消覆盖后回落到配置/默认值，取值必须合法
+    assert get_input_mode() in ("paste", "type", "auto")
+
+
+def test_set_input_mode_override_rejects_unknown(restore_mode):
+    with pytest.raises(ValueError):
+        set_input_mode_override("nonsense")
+
+
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_type_mode_uses_send_text(mock_clip, mock_send_text, restore_mode):
+    """type 模式走模拟键盘输入，完全不碰剪贴板"""
+    set_input_mode_override("type")
+    flash_insert("hello")
+    mock_send_text.assert_called_once_with("hello")
+    mock_clip.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_paste_mode_uses_clipboard(mock_clip, mock_send_text, restore_mode):
+    set_input_mode_override("paste")
+    flash_insert("hello")
+    mock_clip.assert_called_once_with("hello")
+    mock_send_text.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.text_input.send_text", side_effect=RuntimeError("UIPI 拦截"))
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_falls_back_to_clipboard(mock_clip, mock_send_text, caplog, restore_mode):
+    """模拟输入失败时回退到剪贴板粘贴，不向上抛异常"""
+    set_input_mode_override("type")
+    with caplog.at_level("WARNING"):
+        flash_insert("hello")
+    mock_send_text.assert_called_once_with("hello")
+    mock_clip.assert_called_once_with("hello")
+    assert "回退到剪贴板粘贴" in caplog.text
+
+
+@patch("phonemic.gui.keyboard.text_input.is_terminal_foreground", return_value=True)
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_auto_mode_terminal(mock_clip, mock_send_text, mock_is_term, restore_mode):
+    """auto 模式下前台是终端 -> 模拟键盘输入"""
+    set_input_mode_override("auto")
+    flash_insert("ls -la")
+    mock_send_text.assert_called_once_with("ls -la")
+    mock_clip.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.text_input.is_terminal_foreground", return_value=False)
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_auto_mode_non_terminal(mock_clip, mock_send_text, mock_is_term, restore_mode):
+    """auto 模式下前台不是终端 -> 剪贴板粘贴"""
+    set_input_mode_override("auto")
+    flash_insert("普通文本")
+    mock_clip.assert_called_once_with("普通文本")
+    mock_send_text.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_empty_text_no_dispatch(mock_clip, mock_send_text, restore_mode):
+    set_input_mode_override("type")
+    flash_insert("")
+    mock_send_text.assert_not_called()
+    mock_clip.assert_not_called()
