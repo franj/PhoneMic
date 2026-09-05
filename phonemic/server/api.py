@@ -507,6 +507,10 @@ async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
     # 完成 WebSocket 握手
     await websocket.accept()
 
+    # 打印客户端 UA，便于排查不同浏览器的兼容性问题
+    user_agent = websocket.headers.get("user-agent", "unknown")
+    logger.info(f"WebSocket client UA: {user_agent}")
+
     # 该连接独立的握手上下文，与活动连接互不干扰
     session = _secure_channel.new_session()
 

@@ -182,8 +182,59 @@
             cursor: pointer;
             transition: all 0.2s;
             min-width: 70px;
+            display: none;
+            align-items: center;
+            justify-content: center;
         }
-        .auto-mode #btn-send {
+        #btn-plus {
+            background-color: var(--send-btn-bg);
+            color: var(--send-btn-color);
+            border: none;
+            border-radius: 8px;
+            width: 40px;
+            height: 40px;
+            margin-bottom: 5px;
+            flex-shrink: 0;
+            cursor: pointer;
+            transition: all 0.2s;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #btn-plus .hamburger {
+            width: 18px;
+            height: 2px;
+            background: currentColor;
+            position: relative;
+            border-radius: 1px;
+        }
+        #btn-plus .hamburger::before,
+        #btn-plus .hamburger::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: currentColor;
+            border-radius: 1px;
+        }
+        #btn-plus .hamburger::before { top: -6px; }
+        #btn-plus .hamburger::after { top: 6px; }
+        #btn-plus:active {
+            transform: scale(0.92);
+        }
+        #accessory-panel {
+            height: 0;
+            overflow: hidden;
+            flex-shrink: 0;
+            background-color: var(--bar-bg);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-top: 1px solid #e5e5e5;
+            transition: none;
+        }
+        .auto-mode #btn-send, .auto-mode #btn-plus {
             background-color: #ff9800;
             box-shadow: 0 2px 8px rgba(255,152,0,0.3);
         }
@@ -192,7 +243,7 @@
             color: #999;
             box-shadow: inset 0 0 0 1px #ccc;
         }
-        #btn-send:disabled, #mode-toggle:disabled {
+        #btn-send:disabled, #mode-toggle:disabled, #btn-plus:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
@@ -284,8 +335,10 @@
             <textarea id="input-box" rows="1"></textarea>
             <button id="mode-toggle">⚡</button>
         </div>
+        <button id="btn-plus"><span class="hamburger"></span></button>
         <button id="btn-send"></button>
     </div>
+    <div id="accessory-panel"></div>
 </div>
 
 <script id="i18n-data" type="application/json">
@@ -339,16 +392,180 @@ __I18N_JSON__
 
 <script>
     // ========== 0. 视口大小全局监听器 ==========
+    window._cachedKeyboardHeight = 0;
+    window._maxViewportHeight = 0;
+
+    // ========== 0.5 键盘附件面板状态机 ==========
+    /**
+     * 键盘附件面板控制器：用状态机管理面板的显示/隐藏，
+     * 内置超时兜底和竞态保护，避免因 resize 事件不可靠导致状态卡死。
+     *
+     * 状态：
+     *   hidden  — 面板完全隐藏（高度为 0）
+     *   visible — 面板可见（高度 = 缓存键盘高度 - 当前键盘高度）
+     *   hiding  — 面板正在隐藏中（等待键盘弹出把面板"挤没"，带超时兜底）
+     *
+     * 外部通过 update(kh) 传入当前键盘高度，状态机自行计算面板高度和状态转换。
+     */
+    class KeyboardAccessoryPanel {
+        constructor(element, options = {}) {
+            this.el = element;
+            this.state = 'hidden';       // hidden | visible | hiding
+            this._kh = 0;                // 当前键盘高度
+            this._cached = options.defaultHeight || 300;
+            this._hideTimeoutMs = options.hideTimeout || 500;
+            this._hideTimer = null;
+            this._dbgLabel = '';
+        }
+
+        setCachedHeight(h) {
+            this._cached = h;
+        }
+
+        get isVisible() {
+            return this.state === 'visible';
+        }
+
+        get isHiding() {
+            return this.state === 'hiding';
+        }
+
+        /**
+         * 显示面板：立即进入 visible 状态，根据当前键盘高度设置面板高度。
+         * 竞态保护：清掉上一次 hiding 的定时器。
+         */
+        show() {
+            if (this.state === 'visible') return;
+            this._clearTimers();
+            this.state = 'visible';
+            this._applyHeight();
+            this._dbg('show');
+        }
+
+        /**
+         * 隐藏面板：进入 hiding 状态，等待键盘弹出把面板高度挤到 0。
+         * 如果 resize 事件不可靠导致迟迟收不到尾帧，超时后强制收尾。
+         */
+        hide() {
+            if (this.state === 'hidden') return;
+            this._clearTimers();
+            this.state = 'hiding';
+            this._dbg('hide-start');
+            // 超时兜底：防止 resize 事件不完整导致状态卡死
+            this._hideTimer = setTimeout(() => {
+                if (this.state === 'hiding') {
+                    this.state = 'hidden';
+                    this.el.style.height = '0';
+                    this._dbg('hide-timeout-fallback');
+                }
+            }, this._hideTimeoutMs);
+        }
+
+        /**
+         * 切换：显示 ↔ 隐藏。
+         * 注意：切换判断基于面板自身状态，不依赖输入框焦点。
+         * 如果外部想以输入框焦点为判断依据，自己在外面判断再调用 show/hide。
+         */
+        toggle() {
+            if (this.state === 'hidden') {
+                this.show();
+            } else {
+                this.hide();
+            }
+        }
+
+        /**
+         * 每帧更新：传入当前键盘高度，状态机自行计算面板高度和状态转换。
+         * 由外部的 resize 事件驱动调用。
+         */
+        update(keyboardHeight) {
+            this._kh = keyboardHeight;
+            if (this.state === 'visible') {
+                this._applyHeight();
+            } else if (this.state === 'hiding') {
+                this._applyHeight();
+                // 自然收尾：面板被键盘挤没了，进入终态
+                const ph = Math.max(0, this._cached - keyboardHeight);
+                if (ph < 5) {
+                    this._clearTimers();
+                    this.state = 'hidden';
+                    this.el.style.height = '0';
+                    this._dbg('hide-complete');
+                }
+            }
+        }
+
+        _applyHeight() {
+            const ph = Math.max(0, this._cached - this._kh);
+            this.el.style.height = ph + 'px';
+        }
+
+        _clearTimers() {
+            if (this._hideTimer) {
+                clearTimeout(this._hideTimer);
+                this._hideTimer = null;
+            }
+        }
+
+        _dbg(label) {
+            if (!window._dbgPanel) return;
+            window._dbgPanel(label, {
+                state: this.state,
+                cached: this._cached,
+                kh: this._kh,
+            });
+        }
+    }
+
+    // 调试工具：显示面板相关状态到状态栏和控制台
+    window._dbgPanel = function(label, extra) {
+        const bar = document.getElementById('status-bar');
+        if (!bar) return;
+        const vh = window.visualViewport ? window.visualViewport.height : 0;
+        const kh = window._maxViewportHeight - vh;
+        const panel = document.getElementById('accessory-panel');
+        const ph = panel ? panel.offsetHeight : 0;
+        const inputFocused = document.activeElement && document.activeElement.id === 'input-box';
+        const state = extra && extra.state ? extra.state : (window._accessoryPanel ? window._accessoryPanel.state : '?');
+        const cached = extra && extra.cached !== undefined ? extra.cached : window._cachedKeyboardHeight;
+        const curKh = extra && extra.kh !== undefined ? extra.kh : kh;
+        const info = `[${label}] state=${state} vh=${vh.toFixed(0)} maxVH=${window._maxViewportHeight.toFixed(0)} kh=${curKh.toFixed(0)} cached=${cached.toFixed(0)} ph=${ph} inFocus=${inputFocused}`;
+        bar.style.display = 'block';
+        bar.classList.remove('loading');
+        bar.classList.add('debug');
+        bar.innerText = info;
+        console.log(info);
+    };
+
     (function() {
         const app = document.getElementById('app');
+        const panelEl = document.getElementById('accessory-panel');
+        window._accessoryPanel = new KeyboardAccessoryPanel(panelEl, {
+            defaultHeight: 300,
+            hideTimeout: 500,
+        });
+
         function adjustViewport() {
             if (window.visualViewport) {
                 const height = window.visualViewport.height;
+                if (height > window._maxViewportHeight) {
+                    window._maxViewportHeight = height;
+                }
+                const keyboardHeight = window._maxViewportHeight - height;
+                // 仅在面板不可见时更新缓存键盘高度
+                if (keyboardHeight > 10 && !window._accessoryPanel.isVisible) {
+                    window._cachedKeyboardHeight = keyboardHeight;
+                    window._accessoryPanel.setCachedHeight(keyboardHeight);
+                }
                 app.style.height = `${height}px`;
+                // 让状态机自己处理面板高度和状态
+                window._accessoryPanel.update(keyboardHeight);
+                if (window._dbgPanel) window._dbgPanel('resize');
                 window.scrollTo(0, 0);
                 if (window.chatManagerInstance) window.chatManagerInstance.scrollToBottom();
             }
         }
+        window._adjustViewport = adjustViewport;
         if (window.visualViewport) {
             window.visualViewport.addEventListener('resize', adjustViewport);
             window.visualViewport.addEventListener('scroll', adjustViewport);
@@ -1120,6 +1337,8 @@ __I18N_JSON__
             this.config = configManager;
             this.autoMode = true;
             this.unifiedVoiceObserver = null;
+            this.btnPlus = document.getElementById('btn-plus');
+            this.panel = window._accessoryPanel;
 
             this.btnClear.setAttribute('aria-label', window.i18n.btn_clear_aria);
             this.initEventListeners();
@@ -1133,6 +1352,7 @@ __I18N_JSON__
                 this.adjustHeight();
                 this.wsClient.send('preview', this.inputBox.value);
                 this.updateModeToggleVisibility();
+                this.updatePlusSendVisibility();
             });
 
             // 跨平台统一语音特征检测
@@ -1149,6 +1369,12 @@ __I18N_JSON__
                 this.inputBox.focus();
             });
 
+            this.btnPlus.addEventListener('click', (e) => {
+                if (!this.wsClient.getConnected()) return;
+                e.preventDefault();
+                this.showAccessoryPanel();
+            });
+
             this.inputBox.addEventListener('keydown', (e) => {
                 if (!this.wsClient.getConnected()) return;
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -1163,6 +1389,7 @@ __I18N_JSON__
                 this.adjustHeight();
                 this.wsClient.send('preview', '');
                 this.updateModeToggleVisibility();
+                this.updatePlusSendVisibility();
                 this.inputBox.focus();
             });
             this.btnClear.addEventListener('touchstart', (e) => { e.preventDefault(); this.btnClear.click(); });
@@ -1178,6 +1405,7 @@ __I18N_JSON__
             });
             
             this.inputBox.addEventListener('focus', () => {
+                this.hideAccessoryPanel();
                 this.chatManager.scrollToBottom();
                 setTimeout(() => this.chatManager.scrollToBottom(), 50);
                 setTimeout(() => this.chatManager.scrollToBottom(), 150);
@@ -1207,6 +1435,7 @@ __I18N_JSON__
             this.adjustHeight();
             this.wsClient.send('preview', '');
             this.updateModeToggleVisibility();
+            this.updatePlusSendVisibility();
         }
         adjustHeight() {
             this.inputBox.style.height = 'auto';
@@ -1223,6 +1452,7 @@ __I18N_JSON__
                 document.body.classList.remove('auto-mode');
                 this.inputBox.placeholder = window.i18n.input_placeholder_manual;
             }
+            this.updatePlusSendVisibility();
         }
         updateModeToggleVisibility() {
             if (!this.wsClient.getConnected()) {
@@ -1230,6 +1460,34 @@ __I18N_JSON__
                 return;
             }
             this.modeToggle.style.display = (this.inputBox.value.trim() === '') ? 'block' : 'none';
+        }
+        updatePlusSendVisibility() {
+            if (!this.wsClient.getConnected()) {
+                this.btnPlus.style.display = 'none';
+                this.btnSend.style.display = 'none';
+                return;
+            }
+            const hasText = this.inputBox.value.trim() !== '';
+            this.btnPlus.style.display = hasText ? 'none' : 'flex';
+            this.btnSend.style.display = hasText ? 'flex' : 'none';
+        }
+        showAccessoryPanel() {
+            if (this.panel.isVisible) {
+                // 面板可见 → 切换到键盘（聚焦输入框）
+                this.panel.hide();
+                this.inputBox.focus();
+                if (window._dbgPanel) window._dbgPanel('toggle→focus');
+                return;
+            }
+            // 面板不可见 → 显示面板（收起键盘）
+            this.panel.show();
+            this.inputBox.blur();
+            if (window._adjustViewport) window._adjustViewport();
+            if (window._dbgPanel) window._dbgPanel('toggle→panel');
+        }
+        hideAccessoryPanel() {
+            // 输入框获得焦点 → 面板应该隐藏
+            this.panel.hide();
         }
         onConnectionChange(connected, message, type) {
             const statusBar = document.getElementById('status-bar');
@@ -1241,6 +1499,7 @@ __I18N_JSON__
                 chatListDiv.classList.remove('offline');
                 this.inputBox.disabled = false;
                 this.btnSend.disabled = false;
+                this.btnPlus.disabled = false;
                 this.btnClear.disabled = false;
                 this.modeToggle.disabled = false;
                 this.updateSendButtonUI();
@@ -1253,6 +1512,8 @@ __I18N_JSON__
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
+                this.btnPlus.disabled = true;
+                this.btnPlus.style.display = 'none';
                 this.btnClear.disabled = true;
                 this.modeToggle.disabled = true;
                 this.modeToggle.style.display = 'none';
