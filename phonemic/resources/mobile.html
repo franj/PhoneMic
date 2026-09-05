@@ -391,9 +391,6 @@ __I18N_JSON__
 </script>
 
 <script>
-    // ========== 0. 视口大小全局监听器 ==========
-    window._cachedKeyboardHeight = 0;
-    window._maxViewportHeight = 0;
 
     // ========== 0.5 键盘附件面板状态机 ==========
     /**
@@ -413,9 +410,9 @@ __I18N_JSON__
             this.state = 'hidden';       // hidden | visible | hiding
             this._kh = 0;                // 当前键盘高度
             this._cached = options.defaultHeight || 300;
+            this._maxVH = 0;             // 历史最大视口高度，用于推算键盘高度
             this._hideTimeoutMs = options.hideTimeout || 500;
             this._hideTimer = null;
-            this._dbgLabel = '';
         }
 
         setCachedHeight(h) {
@@ -439,7 +436,6 @@ __I18N_JSON__
             this._clearTimers();
             this.state = 'visible';
             this._applyHeight();
-            this._dbg('show');
         }
 
         /**
@@ -450,13 +446,11 @@ __I18N_JSON__
             if (this.state === 'hidden') return;
             this._clearTimers();
             this.state = 'hiding';
-            this._dbg('hide-start');
             // 超时兜底：防止 resize 事件不完整导致状态卡死
             this._hideTimer = setTimeout(() => {
                 if (this.state === 'hiding') {
                     this.state = 'hidden';
                     this.el.style.height = '0';
-                    this._dbg('hide-timeout-fallback');
                 }
             }, this._hideTimeoutMs);
         }
@@ -490,9 +484,23 @@ __I18N_JSON__
                     this._clearTimers();
                     this.state = 'hidden';
                     this.el.style.height = '0';
-                    this._dbg('hide-complete');
                 }
             }
+        }
+
+        /**
+         * 视口变化时由外部调用：传入当前 visualViewport 高度，
+         * 自行推算键盘高度、维护缓存（面板不可见时刷新）、驱动状态机。
+         * 把"键盘高度推算 + 缓存维护 + 面板高度更新"收敛到面板内部，
+         * 调用方只需负责容器高度与滚动，不再感知键盘高度细节。
+         */
+        syncViewport(height) {
+            if (height > this._maxVH) this._maxVH = height;
+            const keyboardHeight = this._maxVH - height;
+            if (keyboardHeight > 10 && this.state !== 'visible') {
+                this._cached = keyboardHeight;
+            }
+            this.update(keyboardHeight);
         }
 
         _applyHeight() {
@@ -506,36 +514,7 @@ __I18N_JSON__
                 this._hideTimer = null;
             }
         }
-
-        _dbg(label) {
-            if (!window._dbgPanel) return;
-            window._dbgPanel(label, {
-                state: this.state,
-                cached: this._cached,
-                kh: this._kh,
-            });
-        }
     }
-
-    // 调试工具：显示面板相关状态到状态栏和控制台
-    window._dbgPanel = function(label, extra) {
-        const bar = document.getElementById('status-bar');
-        if (!bar) return;
-        const vh = window.visualViewport ? window.visualViewport.height : 0;
-        const kh = window._maxViewportHeight - vh;
-        const panel = document.getElementById('accessory-panel');
-        const ph = panel ? panel.offsetHeight : 0;
-        const inputFocused = document.activeElement && document.activeElement.id === 'input-box';
-        const state = extra && extra.state ? extra.state : (window._accessoryPanel ? window._accessoryPanel.state : '?');
-        const cached = extra && extra.cached !== undefined ? extra.cached : window._cachedKeyboardHeight;
-        const curKh = extra && extra.kh !== undefined ? extra.kh : kh;
-        const info = `[${label}] state=${state} vh=${vh.toFixed(0)} maxVH=${window._maxViewportHeight.toFixed(0)} kh=${curKh.toFixed(0)} cached=${cached.toFixed(0)} ph=${ph} inFocus=${inputFocused}`;
-        bar.style.display = 'block';
-        bar.classList.remove('loading');
-        bar.classList.add('debug');
-        bar.innerText = info;
-        console.log(info);
-    };
 
     (function() {
         const app = document.getElementById('app');
@@ -548,19 +527,9 @@ __I18N_JSON__
         function adjustViewport() {
             if (window.visualViewport) {
                 const height = window.visualViewport.height;
-                if (height > window._maxViewportHeight) {
-                    window._maxViewportHeight = height;
-                }
-                const keyboardHeight = window._maxViewportHeight - height;
-                // 仅在面板不可见时更新缓存键盘高度
-                if (keyboardHeight > 10 && !window._accessoryPanel.isVisible) {
-                    window._cachedKeyboardHeight = keyboardHeight;
-                    window._accessoryPanel.setCachedHeight(keyboardHeight);
-                }
                 app.style.height = `${height}px`;
-                // 让状态机自己处理面板高度和状态
-                window._accessoryPanel.update(keyboardHeight);
-                if (window._dbgPanel) window._dbgPanel('resize');
+                // 键盘高度推算、缓存维护与面板高度更新收敛到面板内部
+                window._accessoryPanel.syncViewport(height);
                 window.scrollTo(0, 0);
                 if (window.chatManagerInstance) window.chatManagerInstance.scrollToBottom();
             }
@@ -1476,14 +1445,12 @@ __I18N_JSON__
                 // 面板可见 → 切换到键盘（聚焦输入框）
                 this.panel.hide();
                 this.inputBox.focus();
-                if (window._dbgPanel) window._dbgPanel('toggle→focus');
                 return;
             }
             // 面板不可见 → 显示面板（收起键盘）
             this.panel.show();
             this.inputBox.blur();
             if (window._adjustViewport) window._adjustViewport();
-            if (window._dbgPanel) window._dbgPanel('toggle→panel');
         }
         hideAccessoryPanel() {
             // 输入框获得焦点 → 面板应该隐藏
