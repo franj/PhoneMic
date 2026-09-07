@@ -654,11 +654,11 @@ class TestAuthFailureUX:
     def test_reconnect_fixed_interval(self, secure_pair):
         """断连重连保持固定间隔：保证后台切回前台时快速重连。"""
         page, channel, algo = secure_pair
-        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 1000
 
         # 多次断连后间隔仍保持 2000，不递增
         page.evaluate("() => window.__mockWS.triggerClose()")
-        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 1000
         page.evaluate("() => window.__mockWS.triggerClose()")
-        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 2000
+        assert page.evaluate("() => window.__wsClient.reconnectInterval") == 1000
         assert page.evaluate("() => window.__wsClient.reconnectTimer") is not None

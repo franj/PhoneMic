@@ -924,7 +924,7 @@ __I18N_JSON__
                         this.isConnected = true;
                         const t2 = Date.now();
                         this._setDebugStatus(window.i18n.dbg_ready_plain.replace('{ms}', t2 - t0));
-                        setTimeout(() => this._notifyStatusChange(true), 500);
+                        this._notifyStatusChange(true);
                     }
                 };
                 this.ws.onmessage = (event) => {
@@ -936,7 +936,7 @@ __I18N_JSON__
                             if (this.secure.handleAuthAck(data)) {
                                 this.isConnected = true;
                                 this._setDebugStatus(window.i18n.dbg_auth_ok.replace('{ms}', t2 - t0));
-                                setTimeout(() => this._notifyStatusChange(true), 500);
+                                this._notifyStatusChange(true);
                             } else {
                                 // 密钥不匹配（如旧二维码），重试结果相同：停止自动重连并提示重新扫码
                                 this.authRejected = true;
@@ -982,10 +982,10 @@ __I18N_JSON__
                     this._clearConnectTimer();
                     const t3 = Date.now();
                     console.log(window.i18n.log_ws_disconnected, `(${t3 - t0}ms)`);
-                    this._setDebugStatus(window.i18n.dbg_closed.replace('{ms}', this.reconnectInterval));
                     this.isConnected = false;
                     this.secure._authenticated = false;
                     if (this.authRejected) return; // 保持认证失败提示，不再自动重连
+                    this._setDebugStatus(window.i18n.dbg_closed.replace('{ms}', this.reconnectInterval));
                     this._notifyStatusChange(false);
                     this._scheduleReconnect();
                 };
