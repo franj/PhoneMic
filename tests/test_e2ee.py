@@ -6,13 +6,14 @@ SecureChannel / SecureSession 单元测试。
 import base64
 import json
 import time
+from hashlib import blake2b
 
 import pytest
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.utils import random as random_bytes
+from nacl.bindings import crypto_scalarmult
+from nacl.public import PrivateKey, SealedBox
 
 from phonemic.tunnel.e2ee import SecureChannel
-from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
+from phonemic.tunnel.crypto import OFFERED_ALGORITHMS, create_provider
 
 ALGO = "xsalsa20"  # 客户端从 a= 列表中协商选择的算法
 
@@ -26,13 +27,19 @@ def make_session(phone_algo=ALGO, mode="lan"):
 
 
 def make_phone_auth(sc, algorithm=ALGO):
-    """模拟手机端：用 sealed box 加密手机公钥。"""
+    """模拟手机端：密封 {"algo","pk"} JSON——algo 在密文内部，不明文传输。"""
     phone_private = PrivateKey.generate()
     phone_public = phone_private.public_key
+    inner = json.dumps(
+        {
+            "algo": algorithm,
+            "pk": base64.urlsafe_b64encode(bytes(phone_public)).decode().rstrip("="),
+        }
+    ).encode("utf-8")
     sb = SealedBox(sc.pc_private.public_key)
-    sealed = sb.encrypt(bytes(phone_public))
+    sealed = sb.encrypt(inner)
     sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
-    return {"type": "auth", "algo": algorithm, "data": sealed_b64}
+    return {"type": "auth", "data": sealed_b64}
 
 
 class TestSecureChannelKeys:
@@ -102,27 +109,46 @@ class TestSecureChannelAuth:
     def test_receive_auth_fails_with_garbage(self):
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
-        bad = {"type": "auth", "algo": ALGO, "data": "not_valid_base64!!!"}
+        bad = {"type": "auth", "data": "not_valid_base64!!!"}
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
     def test_receive_auth_fails_with_wrong_key(self):
+        """用错误公钥密封的 auth：PC 端解封失败。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         other_pc = PrivateKey.generate()
         phone_private = PrivateKey.generate()
+        inner = json.dumps(
+            {
+                "algo": ALGO,
+                "pk": base64.urlsafe_b64encode(
+                    bytes(phone_private.public_key)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
         sb = SealedBox(other_pc.public_key)
-        sealed = sb.encrypt(bytes(phone_private.public_key))
-        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
-        bad = {"type": "auth", "algo": ALGO, "data": sealed_b64}
+        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
+        bad = {"type": "auth", "data": sealed_b64}
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
     def test_receive_auth_fails_with_unsupported_algo(self):
-        """客户端回传的算法不在服务端下发列表中：拒绝。"""
+        """密封在密文内的算法不在服务端下发列表中：拒绝。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
-        auth_msg = {"type": "auth", "algo": "aes-256-gcm", "data": "whatever"}
+        phone_private = PrivateKey.generate()
+        inner = json.dumps(
+            {
+                "algo": "aes-256-gcm",
+                "pk": base64.urlsafe_b64encode(
+                    bytes(phone_private.public_key)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
+        sb = SealedBox(sc.pc_private.public_key)
+        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
+        auth_msg = {"type": "auth", "data": sealed_b64}
         assert session.receive_auth(auth_msg) is False
         assert session.is_rejected is True
 
@@ -133,8 +159,9 @@ class TestSecureChannelAuth:
         session = sc.new_session()
         assert session.receive_auth(make_phone_auth(sc, algorithm=phone_algo)) is True
         assert session.is_authenticated is True
-        # auth_ack 回显协商出的算法
-        assert session.make_auth_ack()["algo"] == phone_algo
+        # 成功的 auth_ack 整帧加密且不带明文 algo（algo 已在 auth 密文内协商）
+        ack = session.make_auth_ack()
+        assert "algo" not in ack
         # 协商结果可通过属性查询（供状态栏展示）
         assert session.negotiated_algorithm == phone_algo
 
@@ -172,20 +199,26 @@ class TestSecureChannelAuth:
         assert len(ack["data"]) > 0
 
     def test_auth_ack_decrypts_correctly(self):
+        """手机端独立推导会话密钥后可解开 auth_ack（首帧 seq=0）。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
         phone_public = phone_private.public_key
+        inner = json.dumps(
+            {
+                "algo": ALGO,
+                "pk": base64.urlsafe_b64encode(bytes(phone_public)).decode().rstrip("="),
+            }
+        ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
-        sealed = sb.encrypt(bytes(phone_public))
-        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
-        session.receive_auth({"type": "auth", "algo": ALGO, "data": sealed_b64})
+        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
+        session.receive_auth({"type": "auth", "data": sealed_b64})
         ack = session.make_auth_ack()
-        phone_box = Box(phone_private, sc.pc_private.public_key)
+        # 手机端：ECDH + blake2b 派生同一会话密钥
+        shared = crypto_scalarmult(bytes(phone_private), bytes(sc.pc_private.public_key))
+        session_key = blake2b(shared, digest_size=32).digest()
         raw = base64.urlsafe_b64decode(ack["data"] + "==")
-        nonce = raw[: Box.NONCE_SIZE]
-        ct = raw[Box.NONCE_SIZE :]
-        pt = phone_box.decrypt(ct, nonce)
+        pt = create_provider(ALGO, session_key).decrypt(raw)
         msg = json.loads(pt)
         assert msg["status"] == "OK"
         assert "ts" in msg
@@ -195,16 +228,22 @@ class TestSecureChannelEncryptDecrypt:
     """测试数据加解密。"""
 
     def _setup_authenticated(self):
-        """建立已完成握手的会话，返回 (session, phone_box)。"""
+        """建立已完成握手的会话（手机端密封 {"algo","pk"} JSON）。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
+        inner = json.dumps(
+            {
+                "algo": ALGO,
+                "pk": base64.urlsafe_b64encode(
+                    bytes(phone_private.public_key)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
-        sealed = sb.encrypt(bytes(phone_private.public_key))
-        sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
-        session.receive_auth({"type": "auth", "algo": ALGO, "data": sealed_b64})
-        phone_box = Box(phone_private, sc.pc_private.public_key)
-        return session, phone_box
+        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
+        session.receive_auth({"type": "auth", "data": sealed_b64})
+        return session, phone_private
 
     def test_wrap_unwrap_roundtrip(self):
         sc, _ = self._setup_authenticated()
@@ -268,29 +307,24 @@ class TestSecureChannelEncryptDecrypt:
         assert sc.unwrap(envelope) is None
 
     def test_out_of_order_rejected(self):
-        """乱序消息（先 seq=1 再 seq=0）：拒绝。"""
+        """乱序消息（先 seq=1 再 seq=0）：第 2 帧拒绝，第 1 帧正常。"""
         sc, _ = self._setup_authenticated()
         e1 = sc.wrap({"type": "preview", "text": "a"})
         e2 = sc.wrap({"type": "preview", "text": "b"})
-        assert sc.unwrap(e2) == {"type": "preview", "text": "b"}
-        assert sc.unwrap(e1) is None
+        # 期望 seq=0 却收到 seq=1：拒绝，计数器不推进
+        assert sc.unwrap(e2) is None
+        assert sc.unwrap(e1) == {"type": "preview", "text": "a"}
 
     def test_seq_stripped_from_inner(self):
-        """seq 是传输层字段，unwrap 后不暴露给业务层。"""
+        """seq 由加密层承载，unwrap 后不暴露给业务层。"""
         sc, _ = self._setup_authenticated()
         inner = sc.unwrap(sc.wrap({"type": "send", "text": "x"}))
         assert inner == {"type": "send", "text": "x"}
         assert "seq" not in inner
 
-    def test_missing_seq_rejected(self):
-        """密文中没有 seq 字段：按防重放失败处理。"""
-        sc, _ = self._setup_authenticated()
-        # 直接加密不含 seq 的明文
-        raw_pt = b'{"type":"send","text":"x"}'
-        encrypted = sc._provider.encrypt(raw_pt)
-        import base64
-        envelope = {"type": "data", "data": base64.urlsafe_b64encode(encrypted).decode().rstrip("=")}
-        assert sc.unwrap(envelope) is None
+    # 注：旧的 test_missing_seq_rejected（密文中无 seq）已删除——
+    # seq 内化到 CryptoProvider 后，调用方无法绕过加密层构造"不带 seq 的密文"，
+    # 该状态在线上不可达，正是内化的设计目标。
 
 
 class TestSecureChannelStateMachine:
@@ -333,7 +367,7 @@ class TestSessionIsolation:
         """新连接认证失败，不得让已认证会话退回明文。"""
         sc, session_a = make_session()
         session_b = sc.new_session()
-        assert session_b.receive_auth({"type": "auth", "algo": ALGO, "data": "bad"}) is False
+        assert session_b.receive_auth({"type": "auth", "data": "bad"}) is False
         assert session_a.is_authenticated is True
         assert session_a.wrap({"type": "send", "text": "x"})["type"] == "data"
 

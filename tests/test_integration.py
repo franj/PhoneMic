@@ -184,12 +184,17 @@ class TestHandshake:
         assert page.evaluate("() => window.__wsClient.isConnected") is True
 
     def test_algorithm_selected_correctly(self, secure_pair):
-        """JS 选择的算法与指定的优先算法一致。"""
+        """JS 选择的算法与指定的优先算法一致。
+
+        algo 密封在 auth.data 内（线上不明文），通过服务端解封后的
+        协商结果验证；线上仅能确认 auth 帧不带明文 algo。
+        """
         page, channel, algo = secure_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
-        assert auth_msg["algo"] == algo
+        assert "algo" not in auth_msg  # 线上不泄露算法
+        assert channel.negotiated_algorithm == algo
 
     def test_auth_ack_received(self, secure_pair):
         """auth_ack 被正确处理，SecureClient 已认证。"""
@@ -352,7 +357,8 @@ class TestAlgorithmRejection:
 
         assert channel.receive_auth(auth_msg) is False
         assert channel.is_rejected
-        assert "not allowed" in channel.reject_reason
+        # 新协议下 algo 在密封 blob 内：none 算法走不到密钥交换，以解封失败被拒
+        assert channel.reject_reason
 
         ack = channel.make_auth_ack()
         page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(ack))
@@ -406,12 +412,13 @@ class TestAlgorithmNegotiation:
         assert "a=xchacha20,xsalsa20" in url
 
     def test_auth_echoes_client_choice(self, secure_pair):
-        """auth 消息回传客户端协商出的算法，服务端 accept 并在 ack 中回显。"""
+        """客户端协商出的算法密封在 auth.data 内，服务端解封后按其建 Provider。"""
         page, channel, algo = secure_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
-        assert auth_msg["algo"] == algo
+        assert "algo" not in auth_msg  # algo 在密封 blob 内，不明文回传
+        assert channel.negotiated_algorithm == algo
 
 
 # ---------- 断线处理 ----------

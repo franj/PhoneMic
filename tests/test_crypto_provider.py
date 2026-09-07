@@ -1,7 +1,9 @@
-"""CryptoProvider 单元测试。
+"""CryptoProvider / KeyExchange 单元测试。
 
-测试每种加密算法提供者的加解密往返和 auth 握手。
-使用 PyNaCl 模拟手机端操作。
+新架构（与 docs/wire-protocol.md §4.1 一致）：
+- KeyExchange：算法无关的密钥交换（SealedBox 解封 -> 读 algo -> ECDH -> KDF）
+- CryptoProvider：纯对称 AEAD 封装，构造只收 session_key；
+  防重放 seq 在 Provider 内部承载（AAD 优先 / 8 字节前缀兜底），外部不可见
 """
 
 import base64
@@ -10,16 +12,18 @@ from hashlib import blake2b
 
 import pytest
 from nacl.bindings import crypto_scalarmult
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.secret import Aead
+from nacl.public import PrivateKey, SealedBox
 from nacl.utils import random as random_bytes
 
 from phonemic.tunnel.crypto import (
-    CryptoProvider,
+    OFFERED_ALGORITHMS,
+    KeyExchange,
     NaClBoxProvider,
     PlainProvider,
     XChaCha20Provider,
+    create_provider,
 )
+from phonemic.tunnel.crypto.errors import CryptoError, DecryptError, ReplayError
 
 
 def _to_b64(data: bytes) -> str:
@@ -30,278 +34,227 @@ def _from_b64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "==")
 
 
+def make_phone_auth_blob(algo: str, pc_public_key, phone_private=None):
+    """模拟手机端：密封 {"algo","pk"} JSON，返回 (sealed_bytes, phone_private)。"""
+    if phone_private is None:
+        phone_private = PrivateKey.generate()
+    inner = json.dumps(
+        {"algo": algo, "pk": _to_b64(bytes(phone_private.public_key))}
+    ).encode("utf-8")
+    sealed = SealedBox(pc_public_key).encrypt(inner)
+    return sealed, phone_private
+
+
+# ---------- KeyExchange ----------
+
+class TestKeyExchange:
+    def test_handle_auth_succeeds_for_each_algo(self):
+        """密封 {"algo","pk"} 后可解出算法名与会话密钥。"""
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        for algo in OFFERED_ALGORITHMS:
+            sealed, _ = make_phone_auth_blob(algo, pc_private.public_key)
+            got_algo, session_key = kx.handle_auth(sealed)
+            assert got_algo == algo
+            assert len(session_key) == 32
+
+    def test_session_key_matches_phone_side_derivation(self):
+        """会话密钥与手机端独立推导结果一致（ECDH + blake2b）。"""
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        sealed, phone_private = make_phone_auth_blob(
+            "xchacha20", pc_private.public_key
+        )
+        _, session_key = kx.handle_auth(sealed)
+        shared = crypto_scalarmult(
+            bytes(phone_private), bytes(pc_private.public_key)
+        )
+        expected = blake2b(shared, digest_size=32).digest()
+        assert session_key == expected
+
+    def test_unsupported_algo_rejected(self):
+        """密封的 algo 不在下发列表中：拒绝。"""
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        sealed, _ = make_phone_auth_blob("aes-256-gcm", pc_private.public_key)
+        with pytest.raises(CryptoError):
+            kx.handle_auth(sealed)
+
+    def test_garbage_rejected(self):
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        with pytest.raises(CryptoError):
+            kx.handle_auth(b"not a sealed box")
+        with pytest.raises(CryptoError):
+            kx.handle_auth(b"")
+
+    def test_wrong_pc_key_cannot_decrypt(self):
+        """用错误公钥密封的 auth：PC 端解封失败。"""
+        pc_private = PrivateKey.generate()
+        other_pc = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        sealed, _ = make_phone_auth_blob("xsalsa20", other_pc.public_key)
+        with pytest.raises(CryptoError):
+            kx.handle_auth(sealed)
+
+    def test_public_key_b64_roundtrip(self):
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        b64 = kx.public_key_b64
+        assert "=" not in b64
+        assert _from_b64(b64) == bytes(pc_private.public_key)
+
+
+# ---------- 对称 Provider：往返与防篡改 ----------
+
+PROVIDERS = [XChaCha20Provider, NaClBoxProvider]
+
+
+@pytest.mark.parametrize("cls", PROVIDERS, ids=lambda c: c.algorithm_name())
+class TestProviderRoundtrip:
+    def test_algorithm_name(self, cls):
+        assert cls.algorithm_name() in OFFERED_ALGORITHMS
+
+    def test_roundtrip(self, cls):
+        p = cls(random_bytes(32))
+        data = "你好世界 hello".encode("utf-8")
+        assert p.decrypt(p.encrypt(data)) == data
+
+    def test_roundtrip_empty(self, cls):
+        p = cls(random_bytes(32))
+        assert p.decrypt(p.encrypt(b"")) == b""
+
+    def test_random_nonce_produces_different_ciphertexts(self, cls):
+        p = cls(random_bytes(32))
+        assert p.encrypt(b"same") != p.encrypt(b"same")
+
+    def test_tampered_ciphertext_rejected(self, cls):
+        p = cls(random_bytes(32))
+        ct = bytearray(p.encrypt(b"hello"))
+        ct[-1] ^= 0xFF
+        with pytest.raises(DecryptError):
+            p.decrypt(bytes(ct))
+
+    def test_wrong_key_rejected(self, cls):
+        ct = cls(random_bytes(32)).encrypt(b"hello")
+        with pytest.raises(DecryptError):
+            cls(random_bytes(32)).decrypt(ct)
+
+
+# ---------- 对称 Provider：seq 内化（防重放） ----------
+
+@pytest.mark.parametrize("cls", PROVIDERS, ids=lambda c: c.algorithm_name())
+class TestProviderSeqInternalized:
+    def test_replay_rejected(self, cls):
+        """同一密文重放：seq 未递增，拒绝。"""
+        p = cls(random_bytes(32))
+        ct = p.encrypt(b"hello")
+        assert p.decrypt(ct) == b"hello"
+        with pytest.raises((DecryptError, ReplayError)):
+            p.decrypt(ct)
+
+    def test_out_of_order_rejected(self, cls):
+        """乱序（先收第 2 帧再收第 1 帧）：第 2 帧拒绝，第 1 帧正常。"""
+        p = cls(random_bytes(32))
+        c1 = p.encrypt(b"first")
+        c2 = p.encrypt(b"second")
+        # 期望 seq=0 却收到 seq=1：AAD 路径 MAC 失败 / 前缀路径 ReplayError
+        with pytest.raises((DecryptError, ReplayError)):
+            p.decrypt(c2)
+        # 计数器未推进，第 1 帧仍可正常解密
+        assert p.decrypt(c1) == b"first"
+
+    def test_seq_not_in_plaintext(self, cls):
+        """seq 由加密层承载，不污染应用层明文。"""
+        p = cls(random_bytes(32))
+        pt = p.decrypt(p.encrypt(b"plain"))
+        assert pt == b"plain"  # 明文就是应用层原样字节，无 seq 前缀
+
+    def test_skip_forward_rejected(self, cls):
+        """跳号（seq 前进了但中间帧缺失）：拒绝。"""
+        p = cls(random_bytes(32))
+        c1 = p.encrypt(b"a")
+        p.encrypt(b"b")  # c2 丢失
+        c3 = p.encrypt(b"c")
+        assert p.decrypt(c1) == b"a"
+        # 收到 seq=2（期望 1）：AAD 路径 MAC 失败 / 前缀路径 ReplayError
+        with pytest.raises((DecryptError, ReplayError)):
+            p.decrypt(c3)
+
+    def test_reset_allows_resync(self, cls):
+        """reset() 归零计数器：seq 从 0 的帧重新可解。"""
+        p = cls(random_bytes(32))
+        ct = p.encrypt(b"hello")
+        assert p.decrypt(ct) == b"hello"
+        p.reset()
+        # 新会话中同样的 seq=0 帧（不同密钥实例语义下模拟 rekey）
+        p2 = cls(random_bytes(32))
+        p2._tx_seq = 0
+        assert p2.decrypt(p2.encrypt(b"world")) == b"world"
+        # reset 后 rx 从 0 重新计数
+        assert p._rx_seq == 0
+
+    def test_tx_rx_counters_independent(self, cls):
+        """发送计数与接收计数互不干扰。"""
+        p = cls(random_bytes(32))
+        p.encrypt(b"a")
+        p.encrypt(b"b")
+        assert p._tx_seq == 2
+        assert p._rx_seq == 0  # 未收过任何帧
+
+
+# ---------- 前缀路径专属（XSalsa20 能明确区分重放） ----------
+
+class TestPrefixPathReplayDistinct:
+    def test_xsalsa20_replay_raises_replay_error(self):
+        """xsalsa20 前缀路径：解密成功后可读 seq，能明确判定为重放。"""
+        p = NaClBoxProvider(random_bytes(32))
+        ct = p.encrypt(b"hello")
+        p.decrypt(ct)
+        with pytest.raises(ReplayError):
+            p.decrypt(ct)
+
+
+class TestAadPathReplayFolded:
+    def test_xchacha20_replay_is_decrypt_error(self):
+        """xchacha20 AAD 路径：重放表现为 MAC 失败，折叠进 DecryptError。"""
+        p = XChaCha20Provider(random_bytes(32))
+        ct = p.encrypt(b"hello")
+        p.decrypt(ct)
+        with pytest.raises(DecryptError) as exc_info:
+            p.decrypt(ct)
+        assert not isinstance(exc_info.value, ReplayError)
+
+
 # ---------- PlainProvider ----------
 
 class TestPlainProvider:
     def test_algorithm_name(self):
         assert PlainProvider.algorithm_name() == "none"
 
-    def test_no_public_key(self):
-        p = PlainProvider()
-        assert p.get_public_key_b64() is None
-
-    def test_auth_no_data(self):
-        p = PlainProvider()
-        assert p.receive_auth(None) is True
-
-    def test_auth_ack_no_data(self):
-        p = PlainProvider()
-        assert p.make_auth_ack_data() is None
-
     def test_encrypt_decrypt_roundtrip(self):
         p = PlainProvider()
-        data = b"hello world"
-        encrypted = p.encrypt(data)
-        assert encrypted == data  # 明文不变
-        decrypted = p.decrypt(encrypted)
-        assert decrypted == data
+        assert p.decrypt(p.encrypt(b"hello")) == b"hello"
+
+    def test_reset_noop(self):
+        PlainProvider().reset()  # 不应抛异常
+
+    def test_accepts_none_session_key(self):
+        PlainProvider(None).encrypt(b"x")  # 明文模式无密钥也可用
 
 
-# ---------- NaClBoxProvider ----------
+# ---------- create_provider ----------
 
-class TestNaClBoxProvider:
-    def test_algorithm_name(self):
-        assert NaClBoxProvider.algorithm_name() == "xsalsa20"
+class TestCreateProvider:
+    @pytest.mark.parametrize("algo", OFFERED_ALGORITHMS)
+    def test_creates_each_offered_algo(self, algo):
+        p = create_provider(algo, random_bytes(32))
+        assert p.algorithm_name() == algo
 
-    def test_has_public_key(self):
-        p = NaClBoxProvider()
-        pub = p.get_public_key_b64()
-        assert pub is not None
-        assert len(_from_b64(pub)) == 32  # X25519 public key
+    def test_creates_none(self):
+        p = create_provider("none", None)
+        assert p.algorithm_name() == "none"
 
-    def test_auth_handshake(self):
-        """模拟手机端 sealed box 认证"""
-        pc = NaClBoxProvider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        # 手机端：生成密钥对，用 sealed box 密封公钥
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        sealed = sb.encrypt(bytes(phone_pub))
-        auth_data = _to_b64(sealed)
-
-        assert pc.receive_auth(auth_data) is True
-
-    def test_auth_ack_decryption(self):
-        """验证 auth_ack 能被手机端解密"""
-        pc = NaClBoxProvider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        auth_data = _to_b64(sb.encrypt(bytes(phone_pub)))
-
-        pc.receive_auth(auth_data)
-        ack_b64 = pc.make_auth_ack_data()
-        assert ack_b64 is not None
-
-        # 手机端解密 auth_ack
-        box = Box(phone_priv, pc_pub)
-        raw = _from_b64(ack_b64)
-        pt = box.decrypt(raw)
-        ack_msg = json.loads(pt)
-        assert ack_msg["status"] == "OK"
-        assert "ts" in ack_msg
-
-    def test_encrypt_decrypt_roundtrip(self):
-        """PC 端加密，模拟手机端解密"""
-        pc = NaClBoxProvider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        # PC 加密
-        plaintext = b'{"type":"preview","text":"hello"}'
-        encrypted = pc.encrypt(plaintext)
-
-        # 手机端解密
-        box = Box(phone_priv, pc_pub)
-        decrypted = box.decrypt(encrypted)
-        assert decrypted == plaintext
-
-    def test_phone_to_pc_decryption(self):
-        """模拟手机端加密，PC 端解密"""
-        pc = NaClBoxProvider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        # 手机端加密
-        box = Box(phone_priv, pc_pub)
-        plaintext = b'{"type":"send","text":"world"}'
-        nonce = random_bytes(Box.NONCE_SIZE)
-        encrypted = bytes(box.encrypt(plaintext, nonce))
-
-        # PC 端解密
-        decrypted = pc.decrypt(encrypted)
-        assert decrypted == plaintext
-
-    def test_invalid_auth_data(self):
-        pc = NaClBoxProvider()
-        assert pc.receive_auth("invalid_base64_data!!!") is False
-
-    def test_auth_without_data(self):
-        pc = NaClBoxProvider()
-        assert pc.receive_auth(None) is False
-
-
-# ---------- XChaCha20Provider ----------
-
-class TestXChaCha20Provider:
-    def test_algorithm_name(self):
-        assert XChaCha20Provider.algorithm_name() == "xchacha20"
-
-    def test_has_public_key(self):
-        p = XChaCha20Provider()
-        pub = p.get_public_key_b64()
-        assert pub is not None
-        assert len(_from_b64(pub)) == 32
-
-    def test_auth_handshake(self):
-        """模拟手机端 sealed box 认证 + ECDH"""
-        pc = XChaCha20Provider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        # 手机端：生成密钥对，用 sealed box 密封公钥
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        sealed = sb.encrypt(bytes(phone_pub))
-        auth_data = _to_b64(sealed)
-
-        assert pc.receive_auth(auth_data) is True
-
-    def test_auth_ack_decryption(self):
-        """验证 auth_ack 能被手机端用 XChaCha20 解密"""
-        pc = XChaCha20Provider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        ack_b64 = pc.make_auth_ack_data()
-        assert ack_b64 is not None
-
-        # 手机端：ECDH + BLAKE2b KDF 得到会话密钥，用 Aead 解密
-        shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(blake2b(shared, digest_size=32).digest())
-        raw = _from_b64(ack_b64)
-        pt = aead.decrypt(raw)
-        ack_msg = json.loads(pt)
-        assert ack_msg["status"] == "OK"
-        assert "ts" in ack_msg
-
-    def test_encrypt_decrypt_roundtrip(self):
-        """PC 端加密，模拟手机端解密"""
-        pc = XChaCha20Provider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        # PC 加密
-        plaintext = b'{"type":"preview","text":"hello"}'
-        encrypted = pc.encrypt(plaintext)
-
-        # 手机端解密（ECDH + BLAKE2b KDF）
-        shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(blake2b(shared, digest_size=32).digest())
-        decrypted = aead.decrypt(encrypted)
-        assert decrypted == plaintext
-
-    def test_phone_to_pc_decryption(self):
-        """模拟手机端加密，PC 端解密"""
-        pc = XChaCha20Provider()
-        pc_pub_b64 = pc.get_public_key_b64()
-        pc_pub = PublicKey(_from_b64(pc_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(pc_pub)
-        pc.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        # 手机端加密（ECDH + BLAKE2b KDF）
-        shared = crypto_scalarmult(bytes(phone_priv), bytes(pc_pub))
-        aead = Aead(blake2b(shared, digest_size=32).digest())
-        plaintext = b'{"type":"send","text":"world"}'
-        encrypted = bytes(aead.encrypt(plaintext))
-
-        # PC 端解密
-        decrypted = pc.decrypt(encrypted)
-        assert decrypted == plaintext
-
-    def test_invalid_auth_data(self):
-        pc = XChaCha20Provider()
-        assert pc.receive_auth("invalid_base64_data!!!") is False
-
-    def test_auth_without_data(self):
-        pc = XChaCha20Provider()
-        assert pc.receive_auth(None) is False
-
-
-# ---------- 跨算法交叉测试 ----------
-
-class TestCrossAlgorithm:
-    """验证不同算法之间无法互通（密钥不兼容）。"""
-
-    def test_xsalsa20_cannot_decrypt_xchacha20(self):
-        """XSalsa20 Provider 无法解密 XChaCha20 的密文"""
-        # 设置 XChaCha20 Provider
-        xchacha = XChaCha20Provider()
-        xchacha_pub_b64 = xchacha.get_public_key_b64()
-        xchacha_pub = PublicKey(_from_b64(xchacha_pub_b64))
-
-        phone_priv = PrivateKey.generate()
-        phone_pub = phone_priv.public_key
-        sb = SealedBox(xchacha_pub)
-        xchacha.receive_auth(_to_b64(sb.encrypt(bytes(phone_pub))))
-
-        # 用 XChaCha20 加密
-        plaintext = b"secret data"
-        xchacha_ct = xchacha.encrypt(plaintext)
-
-        # 设置 NaClBox Provider（不同的密钥对）
-        nacl = NaClBoxProvider()
-        nacl_pub_b64 = nacl.get_public_key_b64()
-        nacl_pub = PublicKey(_from_b64(nacl_pub_b64))
-
-        # 用 NaClBox 手机端（不同密钥对）尝试认证
-        phone2_priv = PrivateKey.generate()
-        phone2_pub = phone2_priv.public_key
-        sb2 = SealedBox(nacl_pub)
-        nacl.receive_auth(_to_b64(sb2.encrypt(bytes(phone2_pub))))
-
-        # NaClBox Provider 无法解密 XChaCha20 的密文
-        with pytest.raises(Exception):
-            nacl.decrypt(xchacha_ct)
-
-    def test_all_providers_implement_interface(self):
-        """所有 Provider 都实现了 CryptoProvider 接口"""
-        providers = [PlainProvider(), NaClBoxProvider(), XChaCha20Provider()]
-        for p in providers:
-            assert isinstance(p, CryptoProvider)
-            assert isinstance(p.algorithm_name(), str)
-            assert hasattr(p, "get_public_key_b64")
-            assert hasattr(p, "receive_auth")
-            assert hasattr(p, "make_auth_ack_data")
-            assert hasattr(p, "encrypt")
-            assert hasattr(p, "decrypt")
+    def test_unknown_algo_raises(self):
+        with pytest.raises(ValueError):
+            create_provider("aes-256-gcm", random_bytes(32))

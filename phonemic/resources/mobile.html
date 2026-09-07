@@ -907,9 +907,7 @@
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
-            // 防重放：每方向独立递增的序列号
-            this._sendSeq = 0;
-            this._recvSeq = -1;
+            // 防重放 seq 由 CryptoProvider 内部承载（AAD/前缀），此处不感知
         }
         get needsAuth() { return this._pcPublicKeyB64 !== null; }
         get isEncrypted() { return this._selectedAlgo !== 'none'; }
@@ -965,11 +963,17 @@
         _fromB64(str) { return sodium.from_base64(str, this._b64Variant); }
 
         makeAuth() {
-            const auth = { type: 'auth', algo: this._selectedAlgo };
+            const auth = { type: 'auth' };
+            // 每个连接是独立会话：握手开始时归零 Provider 内部 seq 计数器
+            //（服务端每连接新建 Provider，从 0 计数，两端必须对齐）
+            if (this._provider && this._provider.reset) this._provider.reset();
             const authData = this._provider.makeAuthData();
             if (authData instanceof Uint8Array) {
+                // 加密模式：密封 blob 内含 {"algo","pk"}，线上不泄露算法
                 auth.data = this._toB64(authData);
             } else if (authData) {
+                // none+CF：token 明文携带，无密封层，需标明 algo=none
+                auth.algo = 'none';
                 auth.data = authData;
             }
             return auth;
@@ -984,8 +988,6 @@
                 const raw = this._fromB64(ackMsg.data);
                 if (this._provider.handleAuthAck(raw)) {
                     this._authenticated = true;
-                    this._sendSeq = 0;
-                    this._recvSeq = -1;
                     console.log('[SEC] Authenticated by server');
                     return true;
                 }
@@ -999,8 +1001,8 @@
 
         encrypt(msg) {
             if (!this.isEncrypted) return msg;
-            const payload = Object.assign({}, msg, { seq: this._sendSeq++ });
-            const pt = sodium.from_string(JSON.stringify(payload));
+            // seq 由 Provider 在加密层自动打上，不进应用层 JSON
+            const pt = sodium.from_string(JSON.stringify(msg));
             const encrypted = this._provider.encrypt(pt);
             return { type: 'data', data: this._toB64(encrypted) };
         }
@@ -1008,14 +1010,9 @@
         decrypt(envelope) {
             if (!this.isEncrypted) return envelope;
             const raw = this._fromB64(envelope.data);
+            // 重放/乱序/篡改由 Provider 校验并抛错，此处不重复检查
             const pt = this._provider.decrypt(raw);
-            const inner = JSON.parse(sodium.to_string(pt));
-            // 防重放：seq 必须严格递增，重放/乱序直接抛错由调用方处理
-            if (typeof inner.seq !== 'number' || inner.seq <= this._recvSeq) {
-                throw new Error('[SEC] replay detected');
-            }
-            this._recvSeq = inner.seq;
-            return inner;
+            return JSON.parse(sodium.to_string(pt));
         }
     }
 
@@ -1092,7 +1089,8 @@
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
                         this.ws.send(JSON.stringify(authMsg));
-                        console.log('[SEC] Auth sent, algo:', authMsg.algo);
+                        // algo 在密封 blob 内，线上不可见；此处仅记录本地协商结果
+                        console.log('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
                     } else {
                         this.isConnected = true;
                         const t2 = Date.now();

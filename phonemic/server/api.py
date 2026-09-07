@@ -283,7 +283,7 @@ async def _handle_auth(websocket, session) -> bool:
 
     ack = session.make_auth_ack()
     await websocket.send_text(json.dumps(ack, ensure_ascii=False))
-    logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
+    logger.info(f"Auth succeeded, algorithm={session.negotiated_algorithm}, auth_ack sent")
     return True
 
 

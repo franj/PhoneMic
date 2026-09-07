@@ -12,8 +12,9 @@ import urllib.error
 
 import pytest
 from websockets.sync.client import connect as ws_connect
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.utils import random as random_bytes
+from hashlib import blake2b
+from nacl.bindings import crypto_scalarmult
+from nacl.public import PrivateKey, PublicKey, SealedBox
 
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import (
@@ -21,6 +22,7 @@ from phonemic.server.api import (
     set_secure_channel, send_to_phone,
 )
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.crypto import create_provider
 
 from conftest import get_test_port
 
@@ -54,49 +56,82 @@ def ws_url(host, port, sc):
 
 
 class PhoneSimulator:
-    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。"""
+    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。
 
-    def __init__(self, pc_public_key_b64: str):
+    与 JS 端 SecureClient / CryptoProvider 行为一致：
+    - auth：密封 {"algo","pk"} JSON（algo 不明文传输）
+    - 会话密钥：ECDH + blake2b(32) 派生，交给 CryptoProvider
+    - 防重放 seq 由 Provider 在加密层承载，不进应用层 JSON
+    """
+
+    def __init__(self, pc_public_key_b64: str, algo: str = "xsalsa20"):
+        self._algo = algo
+        if algo == "none":
+            # none+CF：pc_public_key_b64 实为 token
+            self._token = pc_public_key_b64
+            self._provider = None
+            return
         pc_pub_bytes = base64.urlsafe_b64decode(pc_public_key_b64 + "==")
         self._pc_public = PublicKey(pc_pub_bytes)
         self._phone_private = PrivateKey.generate()
         self._phone_public = self._phone_private.public_key
-        self._box = Box(self._phone_private, self._pc_public)
-        self._seq = 0
+        shared = crypto_scalarmult(bytes(self._phone_private), pc_pub_bytes)
+        session_key = blake2b(shared, digest_size=32).digest()
+        self._provider = create_provider(algo, session_key)
 
-    def make_auth(self, algo: str = "xsalsa20") -> dict:
-        """模拟手机端 auth：algo 为客户端从 a= 列表中协商选择的算法。"""
-        sb = SealedBox(self._pc_public)
-        sealed = sb.encrypt(bytes(self._phone_public))
+    def make_auth(self, algo: str = None) -> dict:
+        """模拟手机端 auth：加密模式密封 {"algo","pk"}；none+CF 明文 token。
+
+        每次握手（= 新连接/新会话）开始时归零 seq 计数器，与服务端对齐。
+        """
+        algo = algo or self._algo
+        if self._provider is not None and hasattr(self._provider, "reset"):
+            self._provider.reset()
+        if algo == "none":
+            return {"type": "auth", "algo": "none", "data": self._token}
+        inner = json.dumps(
+            {
+                "algo": algo,
+                "pk": base64.urlsafe_b64encode(
+                    bytes(self._phone_public)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
+        sealed = SealedBox(self._pc_public).encrypt(inner)
         return {
             "type": "auth",
-            "algo": algo,
             "data": base64.urlsafe_b64encode(sealed).decode().rstrip("="),
         }
 
     def verify_auth_ack(self, ack_data: str) -> bool:
-        raw = base64.urlsafe_b64decode(ack_data + "==")
-        nonce = raw[:Box.NONCE_SIZE]
-        ct = raw[Box.NONCE_SIZE:]
+        """模拟 JS 端 handleAuthAck：解密 ack（首帧 seq=0）。"""
         try:
-            pt = self._box.decrypt(ct, nonce)
+            raw = base64.urlsafe_b64decode(ack_data + "==")
+            pt = self._provider.decrypt(raw)
             msg = json.loads(pt)
             return msg.get("status") == "OK"
         except Exception:
             return False
 
     def encrypt(self, msg: dict) -> dict:
-        # 与手机端 JS 一致：明文中注入递增 seq 供服务端防重放
-        payload = dict(msg)
-        payload["seq"] = self._seq
-        self._seq += 1
-        pt = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        nonce = random_bytes(Box.NONCE_SIZE)
-        encrypted = self._box.encrypt(pt, nonce)
+        # none 模式：信封即消息本身（与 JS SecureClient 一致）
+        if self._provider is None:
+            return msg
+        pt = json.dumps(msg, ensure_ascii=False).encode("utf-8")
+        # seq 由 Provider 在加密层自动打上
+        encrypted = self._provider.encrypt(pt)
         return {
             "type": "data",
             "data": base64.urlsafe_b64encode(bytes(encrypted)).decode().rstrip("="),
         }
+
+    def decrypt(self, envelope: dict) -> dict:
+        if self._provider is None:
+            return envelope
+        raw = base64.urlsafe_b64decode(envelope["data"] + "==")
+        # 重放/乱序/篡改由 Provider 校验并抛错
+        pt = self._provider.decrypt(raw)
+        return json.loads(pt)
 
 
 # ---------- Fixtures ----------
