@@ -210,6 +210,7 @@ class SecureSession:
             plaintext = self._provider.decrypt(raw)
             return json.loads(plaintext)
         except Exception:
+            # TODO: wire-protocol 需区分两类异常DecryptError, ReplayError映射 error.code 
             return None
 
 

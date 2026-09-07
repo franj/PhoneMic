@@ -10,7 +10,7 @@ class PlainProvider(CryptoProvider):
     仅适用于完全信任的局域网环境。
     """
 
-    def __init__(self, session_key: bytes = None):
+    def __init__(self, session_key: bytes = b""):
         # 明文模式无会话密钥，参数仅为了保持与其他 Provider 的构造签名一致
         self._session_key = session_key
 
