@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+<html lang="zh-CN" data-page-node-id="OdDZ0JrbLdGfTGAOHmoYSu">
+<head data-page-node-id="q1cVDYXEhzxDo1WXSci2gi">
+    <meta charset="UTF-8" data-page-node-id="Fln4GtuE48PfyKHh6NZGki">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" data-page-node-id="K4prVEkhpn7pbiFcp4F54P">
     <title>📱🎙️PhoneMic💬💻</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="icon" type="image/x-icon" href="favicon.ico" data-page-node-id="qBgFHmT0lBATGS2YtEW321">
     <script src="sodium.js" defer></script>
+    <script src="msgpack.min.js" defer></script>
     <script src="crypto_providers.js" defer></script>
     <style>
         /* ========== 基础样式 ========== */
@@ -322,23 +323,23 @@
         }
     </style>
 </head>
-<body>
-<div id="app">
-    <div id="status-bar"></div>
-    <div id="chat-list">
+<body data-page-node-id="ozgAGjuilWqVKDdnG8ntQq">
+<div id="app" data-page-node-id="mmmqOPqHEqtHhp8ZYUGa1u">
+    <div id="status-bar" data-page-node-id="oWFzYhoNPDhNSNebGhhZlI"></div>
+    <div id="chat-list" data-page-node-id="8Nymt2h4GWDacOgDyXHTSo">
         <!-- Spacer 占位符置于顶部 -->
-        <div id="chat-spacer" class="chat-spacer"></div>
+        <div id="chat-spacer" class="chat-spacer" data-page-node-id="9yOVA5lEKLYVOeKXwhkoQ8"></div>
     </div>
-    <div id="bottom-bar">
-        <button id="btn-clear" aria-label="清空输入框">🗑️</button>
-        <div class="input-wrapper">
+    <div id="bottom-bar" data-page-node-id="gHAkPVZHq2dGAEdhjMJvDG">
+        <button id="btn-clear" aria-label="清空输入框" data-page-node-id="Mp1u43hgDFQ8bQ1CC0uodU">🗑️</button>
+        <div class="input-wrapper" data-page-node-id="xE28wa2nk0Xl7jmR42Qmwc">
             <textarea id="input-box" rows="1"></textarea>
-            <button id="mode-toggle">⚡</button>
+            <button id="mode-toggle" data-page-node-id="NQ0W5iXZWejDTUyEOEimOR">⚡</button>
         </div>
-        <button id="btn-plus"><span class="hamburger"></span></button>
-        <button id="btn-send"></button>
+        <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="hamburger" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
+        <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
     </div>
-    <div id="accessory-panel"></div>
+    <div id="accessory-panel" data-page-node-id="TtXHgO8KQFQHMPE6e9Hxhf"></div>
 </div>
 
 <script>
@@ -970,7 +971,8 @@
             const authData = this._provider.makeAuthData();
             if (authData instanceof Uint8Array) {
                 // 加密模式：密封 blob 内含 {"algo","pk"}，线上不泄露算法
-                auth.data = this._toB64(authData);
+                // msgpack 原生 bin 类型，密文直接入帧，不再 base64 包裹
+                auth.data = authData;
             } else if (authData) {
                 // none+CF：token 明文携带，无密封层，需标明 algo=none
                 auth.algo = 'none';
@@ -979,40 +981,57 @@
             return auth;
         }
 
-        handleAuthAck(ackMsg) {
-            if (ackMsg.rejected) {
-                console.error('[SEC] Auth rejected:', ackMsg.reason);
-                return false;
-            }
-            if (ackMsg.data) {
-                const raw = this._fromB64(ackMsg.data);
-                if (this._provider.handleAuthAck(raw)) {
+        handleAuthAck(rawBytes) {
+            // 成功 ack = 整帧加密（服务端会话密钥已建立）；失败 ack = 明文 msgpack
+            //（服务端无会话密钥可加密，只能明文 rejected + 关闭）。
+            if (this.isEncrypted) {
+                // 加密模式：先走统一解密路径（seq=0 校验并推进 _rxSeq）
+                if (this._provider.handleAuthAck(rawBytes)) {
                     this._authenticated = true;
                     console.log('[SEC] Authenticated by server');
                     return true;
                 }
-            } else {
-                this._authenticated = true;
-                console.log('[SEC] Authenticated by server');
-                return true;
+                // 解密失败 → 明文 rejected 帧；无法识别同样按失败处理
+                try {
+                    const msg = MessagePack.decode(rawBytes);
+                    if (msg && msg.rejected) {
+                        console.error('[SEC] Auth rejected:', msg.reason);
+                        return false;
+                    }
+                } catch (e) { /* 非 msgpack，按无法识别处理 */ }
+                return false;
             }
+            // 明文模式（none+CF）：ack 一律明文 msgpack
+            try {
+                const msg = MessagePack.decode(rawBytes);
+                if (msg && msg.type === 'auth_ack') {
+                    if (msg.rejected) {
+                        console.error('[SEC] Auth rejected:', msg.reason);
+                        return false;
+                    }
+                    this._authenticated = true;
+                    console.log('[SEC] Authenticated by server');
+                    return true;
+                }
+            } catch (e) { /* 非 msgpack，按无法识别处理 */ }
             return false;
         }
 
         encrypt(msg) {
-            if (!this.isEncrypted) return msg;
-            // seq 由 Provider 在加密层自动打上，不进应用层 JSON
-            const pt = sodium.from_string(JSON.stringify(msg));
-            const encrypted = this._provider.encrypt(pt);
-            return { type: 'data', data: this._toB64(encrypted) };
+            // 产出线上字节：加密模式整帧加密，明文模式直接 msgpack 编码。
+            // 无外层信封——是否加密由会话状态机决定，不靠帧内容判别。
+            const pt = MessagePack.encode(msg);
+            if (!this.isEncrypted) return pt;
+            // seq 由 Provider 在加密层自动打上，不进应用层报文
+            return this._provider.encrypt(pt);
         }
 
-        decrypt(envelope) {
-            if (!this.isEncrypted) return envelope;
-            const raw = this._fromB64(envelope.data);
-            // 重放/乱序/篡改由 Provider 校验并抛错，此处不重复检查
-            const pt = this._provider.decrypt(raw);
-            return JSON.parse(sodium.to_string(pt));
+        decrypt(rawBytes) {
+            // 还原应用层报文：加密帧先解密，明文帧直接解码。
+            // 重放/乱序/篡改由 Provider 校验并抛错，此处不重复检查。
+            if (!this.isEncrypted) return MessagePack.decode(rawBytes);
+            const pt = this._provider.decrypt(rawBytes);
+            return MessagePack.decode(pt);
         }
     }
 
@@ -1068,6 +1087,8 @@
             this._clearConnectTimer();
             try {
                 this.ws = new WebSocket(this.url);
+                // 协议走 binary 帧（msgpack），文本帧一律不予处理
+                this.ws.binaryType = 'arraybuffer';
                 this._setDebugStatus(t('dbg_handshake_wait'));
 
                 // 连接超时：3 秒内没握手成功就主动放弃，快速失败以便下一轮重试
@@ -1088,7 +1109,7 @@
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
-                        this.ws.send(JSON.stringify(authMsg));
+                        this.ws.send(MessagePack.encode(authMsg));
                         // algo 在密封 blob 内，线上不可见；此处仅记录本地协商结果
                         console.log('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
                     } else {
@@ -1100,11 +1121,12 @@
                 };
                 this.ws.onmessage = (event) => {
                     try {
-                        const data = JSON.parse(event.data);
+                        const rawBytes = new Uint8Array(event.data);
 
-                        if (data.type === 'auth_ack') {
+                        // 已发 auth、尚未确认：等待的是 auth_ack（成功=密文 / 拒绝=明文 msgpack）
+                        if (!this.isConnected && this.secure.needsAuth) {
                             const t2 = Date.now();
-                            if (this.secure.handleAuthAck(data)) {
+                            if (this.secure.handleAuthAck(rawBytes)) {
                                 this.isConnected = true;
                                 this._setDebugStatus(t('dbg_auth_ok', {ms: t2 - t0}));
                                 this._notifyStatusChange(true);
@@ -1117,36 +1139,22 @@
                             return;
                         }
 
-                        if (this.secure.isEncrypted) {
-                            if (data.type === 'data') {
-                                let inner;
-                                try {
-                                    inner = this.secure.decrypt(data);
-                                } catch (e) {
-                                    console.error('[SEC] Decrypt failed:', e);
-                                    return;
-                                }
-                                if (!this.isConnected) {
-                                    this.isConnected = true;
-                                    this._notifyStatusChange(true);
-                                }
-                                const handler = this.messageHandlers.get(inner.type);
-                                if (handler) handler(inner);
-                                else console.warn(t('log_ws_unknown_type'), inner.type);
-                                return;
-                            }
-                        } else {
-                            if (!this.isConnected) {
-                                this.isConnected = true;
-                                this._notifyStatusChange(true);
-                            }
-                            const handler = this.messageHandlers.get(data.type);
-                            if (handler) handler(data);
-                            else console.warn(t('log_ws_unknown_type'), data.type);
+                        // 已认证：下行数据帧（加密=裸密文，明文=msgpack），解密失败即丢弃
+                        let inner;
+                        try {
+                            inner = this.secure.decrypt(rawBytes);
+                        } catch (e) {
+                            console.error('[SEC] Decrypt failed:', e);
                             return;
                         }
 
-                        console.warn('[WS] Unexpected message type:', data.type);
+                        if (!this.isConnected) {
+                            this.isConnected = true;
+                            this._notifyStatusChange(true);
+                        }
+                        const handler = this.messageHandlers.get(inner.type);
+                        if (handler) handler(inner);
+                        else console.warn(t('log_ws_unknown_type'), inner.type);
                     } catch (err) { console.error(t('log_ws_parse_error'), err); }
                 };
                 this.ws.onclose = () => {
@@ -1198,8 +1206,8 @@
         }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-            const encrypted = this.secure.encrypt({ type, text });
-            this.ws.send(JSON.stringify(encrypted));
+            // encrypt 已产出线上字节（加密=密文 / 明文=msgpack），直接上帧
+            this.ws.send(this.secure.encrypt({ type, text }));
             return true;
         }
         getConnected() { return this.isConnected; }

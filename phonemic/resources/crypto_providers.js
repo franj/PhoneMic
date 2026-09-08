@@ -1,16 +1,18 @@
 /**
  * CryptoProvider 加密算法提供者接口及具体实现。
  *
- * 依赖全局 sodium 对象（libsodium.js），需在 sodium.ready 后使用。
+ * 依赖全局 sodium 对象（libsodium.js）与 MessagePack（msgpack.min.js），
+ * 需在 sodium.ready 后使用。
  *
  * 接口约定（与 Python 端 phonemic/tunnel/crypto/ 一一对应）：
  * - encrypt(plaintextBytes) → nonce+ciphertext 拼接的 Uint8Array
  * - decrypt(ciphertextBytes) → plaintext Uint8Array
  * - 防重放 seq 由 Provider 内部承载（AAD 优先 / 8 字节前缀兜底），
- *   不进应用层 JSON，调用方不可见
+ *   不进应用层报文，调用方不可见
  * - makeAuthData(): 用 PC 公钥 SealedBox 密封 {"algo","pk"} JSON——
- *   algo 在密文内部，不再明文传输
- * - 所有 base64 编解码由 SecureClient 处理，Provider 只操作原始字节
+ *   algo 在密文内部，不再明文传输。握手内层刻意用 JSON：它不依赖上层
+ *   编解码器（见 crypto-design.md §3），避免"先有解码器才能解握手"的鸡生蛋
+ * - Provider 只操作原始字节；帧编解码均由上层 SecureClient 处理
  */
 
 // 8 字节大端 seq 编解码（与 Python 端 _SEQ_LEN=8 / to_bytes(8,'big') 一致）
@@ -99,7 +101,7 @@ class NaClBoxProvider {
         try {
             // 首个下行帧：走统一 decrypt 路径（seq=0 校验并推进 _rxSeq）
             const pt = this.decrypt(rawBytes);
-            const msg = JSON.parse(sodium.to_string(pt));
+            const msg = MessagePack.decode(pt);
             return msg.status === 'OK';
         } catch (e) {
             console.error('[SEC] auth_ack decrypt failed:', e);
@@ -171,7 +173,7 @@ class XChaCha20Provider {
         try {
             // 首个下行帧：走统一 decrypt 路径（seq=0 校验并推进 _rxSeq）
             const pt = this.decrypt(rawBytes);
-            const msg = JSON.parse(sodium.to_string(pt));
+            const msg = MessagePack.decode(pt);
             return msg.status === 'OK';
         } catch (e) {
             console.error('[SEC] auth_ack decrypt failed:', e);

@@ -24,14 +24,14 @@
 
 ### 为什么要换
 
-下个版本要完成整个控制面板，新增 `key` / `mouse` 等 op，并预留 `file` / `photo`。继续用 JSON 有两个硬伤：
+下个版本要完成整个控制面板，新增 `key` / `mouse` 等消息类型，并预留 `file` / `photo`。继续用 JSON 有两个硬伤：
 
 1. **二进制内容必须 base64**，体积 +33%，且 uvicorn 默认 `ws_max_size = 16MB`，单条 WS 消息超限会被直接拒绝——传文件/图片会提前撞上这个上限。
 2. 每帧约 35 字节的信封开销。mouse 以 60fps 发送时约 2 KB/s，虽可接受，但没必要。
 
 ### 为什么不自己设计字节格式
 
-字段编号、长度前缀、紧凑整数、版本演进——这些是 protobuf / MessagePack / CBOR 已经解决的问题，自造等于重复一遍且没有它们的成熟测试。protobuf 需要 `protoc` 代码生成，会侵入 `uv + Nuitka + NSIS` 构建链，对本项目的十来个简单 op 不划算。
+字段编号、长度前缀、紧凑整数、版本演进——这些是 protobuf / MessagePack / CBOR 已经解决的问题，自造等于重复一遍且没有它们的成熟测试。protobuf 需要 `protoc` 代码生成，会侵入 `uv + Nuitka + NSIS` 构建链，对项目这十来个简单消息类型不划算。
 
 **选 MessagePack**：自描述（像 JSON，无 schema）、无构建步骤、`bin` 是原生类型（免 base64）、Python 与 JS 都有成熟小体积实现。
 
@@ -64,20 +64,20 @@
 | MessagePack 类型 | 用于 | 说明 |
 |---|---|---|
 | `map` | 每条消息本身 | 键为 `str` |
-| `str` | 所有文本、字段名、**op 值** | 必须是合法 UTF-8 |
+| `str` | 所有文本、字段名、**`type` 字段值** | 必须是合法 UTF-8 |
 | `int` | 坐标、块号、文件大小 | 变长编码，小整数只占 1 字节（`seq` 不在此列——它由加密层承载，不进 msgpack，见 `crypto-design.md` §5） |
 | `bin` | 文件/图片分块、`auth` 的 `data` | **原生类型，不做 base64** |
 
 文本与二进制可以在同一个 map 里混编，解码端按类型头精确还原，边界不会混淆：
 
 ```
-{"op":"file", "a":"data", "id":7, "n":13, "chunk":<bin>}
+{"type":"file", "a":"data", "id":7, "n":13, "chunk":<bin>}
    ↑str         ↑str        ↑int   ↑int    ↑bin 原始字节
 ```
 
-### op 用字符串而不是整数
+### type 字段用字符串而不是整数
 
-**理由不是"省掉枚举"，而是少一层定义**：每侧反正都要有一张 op → 处理函数的分派表，
+**理由不是"省掉枚举"，而是少一层定义**：每侧反正都要有一张 type → 处理函数的分派表，
 
 ```python
 HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
@@ -87,11 +87,11 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 
 - **字节代价可忽略**：mouse 整帧字符串版约 30 字节、整数版约 20 字节，60fps 下差约 600 B/s。
 - **方向校验自动化**：服务端分派表里没有 `config`，收到即回 `error`——不再需要"下行用 0x40 位段"这类约定。
-- **代价**：拼写错误不会在发送端报错，靠接收端"未知 op"回 `error` 暴露。
+- **代价**：拼写错误不会在发送端报错，靠接收端"未知 type"回 `error` 暴露。
 
 ### 字段名用完整拼写
 
-`op` / `seq` / `text` / `dx` 而非 `o` / `s` / `t`。单帧多花约 3 字节（60fps 下 180 B/s），换取代码可读性。
+`type` / `seq` / `text` / `dx` 而非 `o` / `s` / `t`。单帧多花约 3 字节（60fps 下 180 B/s），换取代码可读性。
 
 ### 必坑项
 
@@ -113,9 +113,9 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `op` | str | **必需**，见第 6 节 |
+| `type` | str | **必需**，见第 6 节 |
 
-> **`seq` 不属于 msgpack 报文**：防重放的 `seq` 是加密层防护，不进 msgpack map，且完全在 `CryptoProvider` 内部维护，调用方不可见（`crypto-design.md` §5）。这样将来换掉 MessagePack（→ CBOR 等）也不需要改动 `seq` 的承载方式与状态。各 op 示例都不含 `seq`，因为它根本不出现在应用层报文里。
+> **`seq` 不属于 msgpack 报文**：防重放的 `seq` 是加密层防护，不进 msgpack map，且完全在 `CryptoProvider` 内部维护，调用方不可见（`crypto-design.md` §5）。这样将来换掉 MessagePack（→ CBOR 等）也不需要改动 `seq` 的承载方式与状态。下文各消息的示例都不含 `seq`，因为它根本不出现在应用层报文里。
 
 ### 帧信封
 
@@ -124,8 +124,8 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 加密模式：  WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决定，见 crypto-design.md §6）
 ```
 
-- 加密层的输入输出都是字节：明文方向吃 `msgpack(map)`，密文方向原样上帧。密文内部布局（nonce、seq 承载路径）是加密层内部事务，编码层与 op 表不感知。
-- 加密覆盖**整个 map，包括 `op`**——元数据不泄露（攻击端看不出你在发 mouse 还是 file）。
+- 加密层的输入输出都是字节：明文方向吃 `msgpack(map)`，密文方向原样上帧。密文内部布局（nonce、seq 承载路径）是加密层内部事务，编码层与 type 表都不感知。
+- 加密覆盖**整个 map，包括 `type`**——元数据不泄露（攻击端看不出你在发 mouse 还是 file）。
 
 ---
 
@@ -137,8 +137,8 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 
 | 帧 | 加密方式 |
 |---|---|
-| `auth` | **唯一明文帧**：`op` 明文（服务端要先知道这是 auth）；`data` 为 SealedBox 密文，内含 `algo` 与手机临时 X25519 公钥，均不出现在线上明文 |
-| `auth_ack` 及之后所有帧 | **对称整帧加密**（含 `op`），Provider 输出直接上帧（`none+LAN` 无此帧，全程明文） |
+| `auth` | **唯一明文帧**：`type` 明文（服务端要先知道这是 auth）；`data` 为 SealedBox 密文，内含 `algo` 与手机临时 X25519 公钥，均不出现在线上明文 |
+| `auth_ack` 及之后所有帧 | **对称整帧加密**（含 `type`），Provider 输出直接上帧（`none+LAN` 无此帧，全程明文） |
 
 - **会话状态是权威**：`is_encrypted` 握手时确定、之后不变，接收端永远知道该不该解；**绝不"解密失败就当明文"**（安全论证见 `crypto-design.md` §7）。
 - **CF 强制加密**：Cloudflare 模式下 `none` 被归一为 `auto`（`mode.py` 的 `effective_algorithm`），**不存在明文 CF**（历史模式 `none`+CF 已删）。因此 `needs_auth` 对所有非 `none+LAN` 连接为真。
@@ -160,30 +160,30 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 ```
 手机                                           服务端
  │  WS 连接
- │──── auth（明文帧）{"op":"auth","data":<bin>} ─────►│   仅 needs_auth 模式
- │◄─── auth_ack（加密帧）{"op":"auth_ack"} ────────────────│   握手成功
+ │──── auth（明文帧）{"type":"auth","data":<bin>} ─────►│   仅 needs_auth 模式
+ │◄─── auth_ack（加密帧）{"type":"auth_ack"} ────────────────│   握手成功
  │◄─── 或 WS 关闭（close 4001 + reason）──────────────│   握手失败，无密钥可用
  │
- │──── hello {"op":"hello","v":1} ─────────────►│   总是发
- │◄─── config {"op":"config","key","value"} ─────│   或 error {"op":"error","code":"version"}
+ │──── hello {"type":"hello","v":1} ─────────────►│   总是发
+ │◄─── config {"type":"config","key","value"} ─────│   或 error {"type":"error","code":"version"}
  │
  │  …… 正常数据消息 ……
 ```
 
 - `auth` / `auth_ack` 仅在 `needs_auth` 时出现。**`none+LAN` 没有 auth**（`e2ee.py:268` `needs_auth` 为 False）。
-- `auth.data` 的密封内容与密钥交换流程见 `crypto-design.md` §3；本文档只定义其 op 帧格式（见第 7 节）。
+- `auth.data` 的密封内容与密钥交换流程见 `crypto-design.md` §3；本文档只定义 `auth` 消息的帧格式（见第 7 节）。
 - **`hello` 总是发**，正是靠它补上 `none+LAN` 下"模式/版本不一致时连报错机会都没有"这个洞。
 - **版本天然一致**：`mobile.html` 由服务端下发（`api.py` 里 `html.replace` 注入），两端永远同版本，无灰度兼容问题。`hello` 的实际作用退化为**检测手机上那个页面还没刷新**——版本不符回 `error(code:"version")`，页面提示"请刷新"。
 
 ---
 
-## 6. op 表
+## 6. type 表
 
-op 为字符串。上行（手机 → 服务端）与下行（服务端 → 手机）不共用命名空间，由各侧分派表天然保证方向正确。
+`type` 取值为字符串。上行（手机 → 服务端）与下行（服务端 → 手机）不共用取值空间，由各侧分派表天然保证方向正确。
 
 ### 上行
 
-| op | 说明 | payload 字段 |
+| type | 说明 | payload 字段 |
 |---|---|---|
 | `auth` | 密钥交换（加密模式，仅 needs_auth） | `data`(bin) |
 | `hello` | 版本声明 | `v` |
@@ -196,9 +196,9 @@ op 为字符串。上行（手机 → 服务端）与下行（服务端 → 手�
 
 ### 下行
 
-| op | 说明 | payload 字段 | 来源 |
+| type | 说明 | payload 字段 | 来源 |
 |---|---|---|---|
-| `auth_ack` | 握手应答 | 成功时为加密空帧 `{"op":"auth_ack"}`；失败不回消息帧，以 WS close（4001 + reason）传递 | 迁移已有 |
+| `auth_ack` | 握手应答 | 成功时为加密空帧 `{"type":"auth_ack"}`；失败不回消息帧，以 WS close（4001 + reason）传递 | 迁移已有 |
 | `config` | 单键配置推送 | `key`、`value` | 迁移 `push_config` |
 | `reconnect` | 要求重新扫码 | `reason` | 迁移 `request_client_rescan` |
 | `rekey` | 密钥轮换 | — | 预留 |
@@ -206,20 +206,19 @@ op 为字符串。上行（手机 → 服务端）与下行（服务端 → 手�
 | `ack` | 分块确认 | `ref`、`id`、`n`、`received` | 新增 |
 | `status` | 状态同步 | `muted`、`mode` | 新增 |
 
-心跳**不占 op**，用 WebSocket 原生 ping/pong。
+心跳**不进 type 表**，用 WebSocket 原生 ping/pong。
 
-> 断线重连策略：**不做地址重定向**。连接断开后手机端重新扫码连接即可，因此不设 `redirect` op。
+> 断线重连策略：**不做地址重定向**。连接断开后手机端重新扫码连接即可，因此 type 表里不需要 `redirect` 这一项。
 
 ---
 
-## 7. 各 op 详细定义
+## 7. 各 type 详细定义
 
 ### auth / auth_ack
 
-**线上帧的明文部分只有 `op`**：
-
+**线上帧的明文部分只有 `type`**：
 ```
-{"op":"auth", "data":<bin>}
+{"type":"auth", "data":<bin>}
 ```
 
 `data` 是用 PC 公钥 `SealedBox` 密封的**不透明字节**，消息层不解释其内容——内层结构 `{"algo","pk"}`（JSON 编码）、`algo` 校验、ECDH/KDF 全在 `crypto-design.md` §3。要点：
@@ -227,10 +226,10 @@ op 为字符串。上行（手机 → 服务端）与下行（服务端 → 手�
 - `algo` 取自二维码 fragment 的 `a=` 列表，服务端解封后校验其属于下发列表。**`algo` 只在密文里出现，从不以明文传输**。
 - 新协议已无 `none`+CF 明文模式，因此 `data` 在所有 `needs_auth` 会话里都是 SealedBox 密文，不再有 token 分支。
 
-加密帧（会话密钥已建立，整帧加密，含 `op`）：
+加密帧（会话密钥已建立，整帧加密，含 `type`）：
 
 ```
-{"op":"auth_ack"}
+{"type":"auth_ack"}
 ```
 
 - **无 `data`、无明文 `algo`**：手机能解开这一帧即证明 PC 持有正确会话密钥，且 `algo` 在 `auth.data` 里早已协商过（`crypto-design.md` §7）。
@@ -248,24 +247,24 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 ### key
 
 ```
-{"op":"key", "keys":"ctrl+z"}
-{"op":"key", "keys":"ctrl+a, delete"}
+{"type":"key", "keys":"ctrl+z"}
+{"type":"key", "keys":"ctrl+a, delete"}
 ```
 
 `keys` 直接喂给 `phonemic/gui/keyboard.py:send_keys()`，格式与 `validate_key_sequence()` 一致：`+` 连接修饰键，`,` 分隔多个组合（最多 10 个）。**不做二进制编码**——符号键二进制化没有收益，且失去可读性。
 
-**安全边界**：`key` 走 `send_keys()` → `validate_key_sequence()`，只能表达 pyautogui 键名，**无法执行程序**。除非将来新增 exec 类 op，否则手机端不具备命令执行能力。
+**安全边界**：`key` 走 `send_keys()` → `validate_key_sequence()`，只能表达 pyautogui 键名，**无法执行程序**。除非将来新增 `exec` 这样的消息类型，否则手机端不具备命令执行能力。
 
-> 面板快捷键按钮**直接发 `key` op**，与 `VoiceCommand` 无关。`VoiceCommand` 是"语音文本 → 按键动作"的映射（如"确定" → enter），在 PC 端拦截 `send` 文本时生效，属 PC 本地配置，不进入本协议。
+> 面板快捷键按钮**直接发 `type` 为 `key` 的消息**，与 `VoiceCommand` 无关。`VoiceCommand` 是"语音文本 → 按键动作"的映射（如"确定" → enter），在 PC 端拦截 `send` 文本时生效，属 PC 本地配置，不进入本协议。
 
 ### mouse
 
 ```
-{"op":"mouse", "a":"move",  "dx":12, "dy":-3}
-{"op":"mouse", "a":"click", "btn":"left"}
-{"op":"mouse", "a":"down",  "btn":"left"}
-{"op":"mouse", "a":"up",    "btn":"left"}
-{"op":"mouse", "a":"wheel", "delta":-120}
+{"type":"mouse", "a":"move",  "dx":12, "dy":-3}
+{"type":"mouse", "a":"click", "btn":"left"}
+{"type":"mouse", "a":"down",  "btn":"left"}
+{"type":"mouse", "a":"up",    "btn":"left"}
+{"type":"mouse", "a":"wheel", "delta":-120}
 ```
 
 - 采用**速度模型**（摇杆远快近慢），`dx`/`dy` 是**每帧相对位移像素**，由 `requestAnimationFrame` 循环驱动，约 60 次/秒。
@@ -275,7 +274,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 ### config
 
 ```
-{"op":"config", "key":"mobile_max_records", "value":50}
+{"type":"config", "key":"mobile_max_records", "value":50}
 ```
 
 **单键单值**结构，迁移自 `api.py:188 push_config`。现有代码发的是扁平形式 `{"type":"config","mobile_max_records":50}`，新协议统一规范为 `key` / `value` 两字段，便于通用分派。
@@ -285,7 +284,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 ### reconnect
 
 ```
-{"op":"reconnect", "reason":"config_changed"}
+{"type":"reconnect", "reason":"config_changed"}
 ```
 
 语义：算法/模式切换导致 URL（随机路径、公钥、token）变化，旧连接重连必然失败。手机端收到后**停止自动重连、提示重新扫码**；服务端随后关闭连接（`api.py:228`）。
@@ -301,7 +300,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | `decrypt` | 解密失败 / 密钥失效 | 提示"请刷新页面"，连续 N 次则断连 |
 | `replay` | seq 未递增 | 丢弃，连续 N 次则断连 |
 | `ratelimit` | 限流 | 退避重试 |
-| `malformed` | 非法消息 / 未知 op | 记录日志，丢弃 |
+| `malformed` | 非法消息 / 未知 type | 记录日志，丢弃 |
 
 ### status
 
@@ -329,10 +328,10 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 子协议用 map 字段表达，**不需要设计字节子头**：
 
 ```
-{"op":"file", "a":"start", "id":7, "name":"a.pdf", "size":1048576, "chunks":16}
-{"op":"file", "a":"data",  "id":7, "n":0, "chunk":<bin 256KB>}
-{"op":"file", "a":"data",  "id":7, "n":1, "chunk":<bin 256KB>}
-{"op":"file", "a":"end",   "id":7}
+{"type":"file", "a":"start", "id":7, "name":"a.pdf", "size":1048576, "chunks":16}
+{"type":"file", "a":"data",  "id":7, "n":0, "chunk":<bin 256KB>}
+{"type":"file", "a":"data",  "id":7, "n":1, "chunk":<bin 256KB>}
+{"type":"file", "a":"end",   "id":7}
 ```
 
 - **分块大小固定 256KB**。uvicorn 16MB 上限下有 64 倍余量；分块是为了出进度条，以及让 mouse 帧能插进来不被大块堵住。
@@ -343,7 +342,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 ### 9.1 两个 sink：file 落盘、photo 剪贴板
 
-`file` 与 `photo` 的**线格式完全相同**（同一套 `start`/`data`/`end` 子协议、`id`/`size`/`chunks`/`n`/`chunk` 字段），区别只在接收端的"落地方式"——这正是它俩必须拆成两个 op 的根因：
+`file` 与 `photo` 的**线格式完全相同**（同一套 `start`/`data`/`end` 子协议、`id`/`size`/`chunks`/`n`/`chunk` 字段），区别只在接收端的"落地方式"——这正是它俩必须拆成两个独立消息类型（type）的根因：
 
 - **`file` → 磁盘**：字节重组后写入本地文件（路径/目录见 §13 #3）。**文件不进剪贴板**——即便是图片文件，也走 `file`（落到磁盘），不走高亮 `photo`。
 - **`photo` → 剪贴板**：字节重组后**直接写入系统剪贴板**，不写任何磁盘文件。设计目的就是"手机拍一张 → 电脑剪贴板里能直接 Ctrl+V 粘贴"。因此 `photo` 的 `name` 字段对剪贴板无意义（剪贴板里没有文件名概念），可忽略或省略。
@@ -366,7 +365,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | 加密 | 解密成功（provider 内部已校验 seq 单调，外部不可见） | OK | 按分派表处理 |
 | 加密 | 解密抛 `ReplayError`（仅前缀路径；AAD 路径下重放表现为 MAC 失败，归入下一行） | REPLAY | 丢弃，回 `error(code:"replay")` |
 | 加密 | 解密失败 | DECRYPT_FAIL | 丢弃，回 `error(code:"decrypt")`；连续 N 次断连 |
-| 任意 | `op` 不在分派表内（含方向错误） | BAD_OP | 丢弃，回 `error(code:"malformed")` |
+| 任意 | `type` 不在分派表内（含方向错误） | BAD_TYPE | 丢弃，回 `error(code:"malformed")` |
 | 任意 | WS text 帧 | 未刷新的旧页面 | 关闭连接，手机端提示重新扫码 |
 
 > 补充：格式问题与编码方式无关，现有 JSON 协议里也有同样的洞——`none+LAN` 下未刷新的旧页面发来 `{type:"data",...}`，`inner.get("text","")` 返回空串，`bridge.emit("send","")` 什么都不发生。`hello` + `error` 是唯一能修掉它的东西。

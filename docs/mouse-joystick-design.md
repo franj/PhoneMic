@@ -31,12 +31,12 @@ PhoneMic 的附件面板原计划「鼠标」Tab 用**触摸板（相对位移�
 - `maxSpeed`：约 800–1500 px/s，可调（原型默认 1200）
 - `deadzone`：约 0.1–0.15，中心附近不漂移（原型默认 0.12）
 - 曲线：线性或 ease-out，轻推慢、满推快；手感靠用户使用积累
-- 走 WS 发给 PC 的 `mouse.move(相对位移)`
+- 走 WS 发 `mouse` 消息给 PC（动作 `a:"move"` + 相对位移，见 §5.1）
 
 点击 / 拖拽单独处理：
-- 轻点摇杆底盘 = 左键单击（带涟漪反馈）
+- 轻点摇杆底盘 = 左键单击（`a:"click"`，带涟漪反馈）
 - 独立「右键」按钮 = 右击
-- 「拖拽」开关 = 按住期间 `mouse down`，松开才 `up`
+- 「拖拽」开关 = 按住期间发 `a:"down"`，松开才发 `a:"up"`
 
 ## 3. 组件设计
 
@@ -99,20 +99,20 @@ class MouseJoystick {
 
 ## 5. WebSocket 接口
 
-现有链路：`WSClient.send(type, text)` → 加密为 `{type:'data', data}` →
-服务端 `api.py` 解密后 `bridge.emit(type, text)` → PC 端 `PhoneMic.py` 槽消费。
-目前只处理 `preview` / `send` 两类。
+链路以 `wire-protocol.md` 为准：`WSClient.send(type, obj)` 发送 `{type, ...}` 帧 →
+服务端解密后按 `type` 分派、`bridge.emit(type, ...)` → PC 端 `PhoneMic.py` 槽消费。
+目前只处理 `preview` / `send` 两类（载荷为 `text` 字符串）。
 
 ### 5.1 新增 `mouse` 消息类型
 
-payload 用对象（非字符串）：
+帧格式与 `wire-protocol.md` §7 mouse 保持一致：二级动作字段用 `a`、按键字段用 `btn`。payload 用对象（非字符串）：
 
 ```
-{ "type": "mouse", "action": "move",  "dx": 12,  "dy": -5 }   // 相对位移，每帧一次
-{ "type": "mouse", "action": "click", "button": "left" }       // 或 "right"
-{ "type": "mouse", "action": "down",  "button": "left" }       // 拖拽开始
-{ "type": "mouse", "action": "up",    "button": "left" }       // 拖拽结束
-{ "type": "mouse", "action": "wheel", "delta": 3 }             // 可选：滚动
+{ "type": "mouse", "a": "move",  "dx": 12,  "dy": -5 }   // 相对位移，每帧一次
+{ "type": "mouse", "a": "click", "btn": "left" }          // 或 "right"
+{ "type": "mouse", "a": "down",  "btn": "left" }          // 拖拽开始
+{ "type": "mouse", "a": "up",    "btn": "left" }          // 拖拽结束
+{ "type": "mouse", "a": "wheel", "delta": -120 }          // 可选：滚动
 ```
 
 ### 5.2 服务端改动（`phonemic/server/api.py`）
@@ -126,14 +126,15 @@ if msg_type in ("preview", "send"):
     _manager.bridge.emit(msg_type, text)
 ```
 
-改为同时取结构化 payload（保留 `text` 兼容旧类型）：
+`mouse` 不走 `text`，其结构化字段（`a` / `dx` / `dy` / `btn` / `delta`）平铺在帧顶层，服务端把整帧交给 PC 端：
 
 ```python
 msg_type = inner.get("type")
-text = inner.get("text", "")
-payload = inner.get("payload", text)   # mouse 等新类型走 payload
-if msg_type in ("preview", "send", "mouse"):
-    _manager.bridge.emit(msg_type, payload)
+if msg_type in ("preview", "send"):
+    text = inner.get("text", "")
+    _manager.bridge.emit(msg_type, text)
+elif msg_type == "mouse":
+    _manager.bridge.emit("mouse", inner)   # 结构化帧整帧透传
 ```
 
 ### 5.3 PC 端新增（`phonemic/gui/mouse.py`）
@@ -151,4 +152,4 @@ if msg_type in ("preview", "send", "mouse"):
 2. **CSS 方案**：A（注入 style，推荐）还是 B（Web Component）？
 3. **默认参数**：沿用 `maxSpeed=1200 / deadzone=0.12`，还是另定？
 4. **v1 范围**：最小集 `move/click/drag`，还是带 `wheel` 滚动？
-5. **payload 字段**：服务端新增 `payload` 字段（干净），还是复用 `text` 传 JSON 字符串（改动最小）？
+5. **mouse 载荷传递**：已定——字段平铺于帧顶层（见 §5.1），**不**加 `payload` 包装字段，也**不**复用 `text` 传 JSON 字符串。`WSClient.send("mouse", payload)` 的第二个参数直接就是含 `a`/`dx`/`dy`/`btn` 的对象。

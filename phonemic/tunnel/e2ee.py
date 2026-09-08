@@ -5,8 +5,8 @@
     ``{"algo", "pk"}`` 密封发送给 PC。PC 端由 KeyExchange 解封、读 algo、做
     ECDH + KDF 得到会话密钥，再据此实例化对应 CryptoProvider。algo 只出现在
     密文内部（非明文），公钥在此部署中等价于带外 token。
-  - none+LAN：无认证，明文 JSON，兼容原始协议（不影响 nginx 反代 HTTPS 的用户）
-  - none+Cloudflare：token 认证（随机 token 通过 QR 码传递），明文 JSON
+  - none+LAN：无认证，明文 msgpack，兼容原始协议（不影响 nginx 反代 HTTPS 的用户）
+  - none+Cloudflare：token 认证（随机 token 通过 QR 码传递），明文 msgpack
 
 连接模型：
   SecureChannel 持有跨连接的长期配置（算法、模式、PC 密钥对或 token）与
@@ -20,28 +20,28 @@
   needs_auth=True:  S0 (未认证) → 收到 auth → 验证 → S1 (已认证)，S0 超时 10 秒断开
   needs_auth=False: 连接即 S1，直接处理消息
 
-协议格式：
+协议格式（全部帧统一 msgpack 编码，WS 走 binary 帧，密文用 bin 类型、无 base64）：
   URL fragment:
     none+LAN:  无
     none+CF:   #k=<token>&a=none
     加密:      #k=<pubkey>&a=<algo1,algo2,...>（服务端支持的算法，按优先级排序）
   auth（加密模式）:
-    {"type":"auth", "data":"<b64( SealedBox( {"algo":..., "pk":<手机公钥 b64>} ) )>"}
+    {"type":"auth", "data":<bin SealedBox( {"algo":..., "pk":<手机公钥 b64>} )>}
     仅 type 为明文；algo 与手机公钥均在密封 blob 内。解密失败即认证失败。
   auth（none+CF）:
     {"type":"auth", "algo":"none", "data":"<token>"}
   auth_ack:
     {"type":"auth_ack", "rejected":true, "reason":"..."}（失败，明文）
-    或 {"type":"auth_ack", "algo":..., "data":"<b64( 对称加密帧 )>"}（成功，整帧加密）
+    或整帧对称加密的 {"type":"auth_ack", "status":"OK"}（成功，无明文字段）
   消息（加密模式）:
-    {"type":"data", "data":"<b64( nonce || AEAD(明文) )>"}
+    整帧对称加密：WS binary 帧 = AEAD(msgpack(消息))，无外层信封——
+    加密状态由会话状态机决定，不靠帧内容判别。
     防重放 seq 由 CryptoProvider 在加密层承载（AAD 优先 / 8 字节前缀兜底），
-    不进应用层 JSON，调用方不可见。
+    不进应用层报文，调用方不可见。
 """
 
 import base64
 import hmac
-import json
 import os
 import secrets
 import time
@@ -52,6 +52,8 @@ from nacl.public import PrivateKey
 from phonemic.tunnel.crypto import OFFERED_ALGORITHMS, create_provider
 from phonemic.tunnel.crypto import KeyExchange
 from phonemic.tunnel.crypto.errors import CryptoError
+from phonemic.tunnel.frame import decode as decode_frame
+from phonemic.tunnel.frame import encode as encode_frame
 
 _AUTH_TIMEOUT = 10  # 秒
 
@@ -121,7 +123,7 @@ class SecureSession:
             True 如果认证成功，False 如果被拒绝。
         """
         if not self.is_encrypted:
-            # none 模式：token 认证（明文 JSON，依赖 WSS 保护）
+            # none 模式：token 认证（明文，依赖 WSS 保护）
             if auth_msg.get("algo") != "none":
                 self._rejected = True
                 self._reject_reason = "algorithm not allowed in plaintext mode"
@@ -142,13 +144,12 @@ class SecureSession:
             self._rejected = True
             self._reject_reason = "missing auth data"
             return False
-        try:
-            sealed = base64.urlsafe_b64decode(data + "==")
-        except Exception:
-            # base64 编码非法（长度/字符集错误），与解封失败同等对待
+        if not isinstance(data, (bytes, bytearray)):
+            # msgpack 的 bin 类型是密封 blob 的唯一合法承载；str 属协议错误
             self._rejected = True
             self._reject_reason = "invalid auth data encoding"
             return False
+        sealed = bytes(data)
         try:
             algo, session_key = self._channel.key_exchange.handle_auth(sealed)
         except CryptoError as e:
@@ -160,7 +161,12 @@ class SecureSession:
         return True
 
     def make_auth_ack(self) -> dict:
-        """生成 auth_ack 消息。"""
+        """生成 auth_ack 帧（不含加密，加密由 wrap() 统一出口完成）。
+
+        成功帧不带任何明文字段，也不带 data 信封：手机能解开这一帧本身
+        就证明 PC 持有正确的会话密钥，且 algo 在 auth.data 密文内早已
+        协商过（不明文回显）。
+        """
         if self._rejected:
             return {
                 "type": "auth_ack",
@@ -168,47 +174,33 @@ class SecureSession:
                 "reason": self._reject_reason,
             }
 
-        if not self.is_encrypted:
-            return {"type": "auth_ack", "status": "OK"}
-
-        # 加密模式：用刚协商出的会话密钥加密整个应答帧
-        payload = json.dumps(
-            {"status": "OK", "ts": int(time.time() * 1000)},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        data = base64.urlsafe_b64encode(self._provider.encrypt(payload)).decode().rstrip("=")
-        # 成功帧不带 algo：手机能解开这一帧即证明会话密钥正确，
-        # 且 algo 在 auth.data 密文内早已协商过（不明文回显）
-        return {"type": "auth_ack", "data": data}
+        return {"type": "auth_ack", "status": "OK", "ts": int(time.time() * 1000)}
 
     # ---- 数据加解密 ----
 
-    def wrap(self, message: dict) -> dict:
-        """加密并包装消息。none 模式直接返回明文 JSON。
+    def wrap(self, message: dict) -> bytes:
+        """把应用层帧编成线上字节：加密模式整帧加密，明文模式直接编码。
+
+        是否加密以 Provider 是否已建立为唯一判据——握手成功才有 Provider，
+        握手失败（rejected）时按明文发送，避免"该不该加密"出现第二种真相。
+        调用方只拿到字节，不再感知信封与编码。
 
         防重放 seq 由 CryptoProvider 在加密层承载，此处不感知、也不注入。
         """
-        if not self.is_encrypted:
-            return message
-        plaintext = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        encrypted = self._provider.encrypt(plaintext)
-        return {
-            "type": "data",
-            "data": base64.urlsafe_b64encode(encrypted).decode().rstrip("="),
-        }
+        plaintext = encode_frame(message)
+        if self._provider is None:
+            return plaintext
+        return self._provider.encrypt(plaintext)
 
-    def unwrap(self, envelope: dict) -> Optional[dict]:
-        """解密消息。none 模式直接返回明文 JSON。
+    def unwrap(self, raw: bytes) -> Optional[dict]:
+        """把线上字节还原成应用层帧：加密模式先解密，明文模式直接解码。
 
         解密失败（密钥错 / 篡改 / 重放）由 CryptoProvider 以异常表达，
         SecureSession 统一归为 None（视为不可用帧丢弃）。
         """
-        if not self.is_encrypted:
-            return envelope
         try:
-            raw = base64.urlsafe_b64decode(envelope["data"] + "==")
-            plaintext = self._provider.decrypt(raw)
-            return json.loads(plaintext)
+            plaintext = self._provider.decrypt(raw) if self._provider is not None else raw
+            return decode_frame(plaintext)
         except Exception:
             # TODO: wire-protocol 需区分两类异常DecryptError, ReplayError映射 error.code 
             return None

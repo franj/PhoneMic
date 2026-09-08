@@ -14,6 +14,8 @@ from nacl.public import PrivateKey, SealedBox
 
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.crypto import OFFERED_ALGORITHMS, create_provider
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 
 ALGO = "xsalsa20"  # 客户端从 a= 列表中协商选择的算法
 
@@ -37,9 +39,8 @@ def make_phone_auth(sc, algorithm=ALGO):
         }
     ).encode("utf-8")
     sb = SealedBox(sc.pc_private.public_key)
-    sealed = sb.encrypt(inner)
-    sealed_b64 = base64.urlsafe_b64encode(sealed).decode().rstrip("=")
-    return {"type": "auth", "data": sealed_b64}
+    # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
+    return {"type": "auth", "data": sb.encrypt(inner)}
 
 
 class TestSecureChannelKeys:
@@ -109,7 +110,7 @@ class TestSecureChannelAuth:
     def test_receive_auth_fails_with_garbage(self):
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
-        bad = {"type": "auth", "data": "not_valid_base64!!!"}
+        bad = {"type": "auth", "data": b"not a sealed box!!!"}
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
@@ -128,8 +129,7 @@ class TestSecureChannelAuth:
             }
         ).encode("utf-8")
         sb = SealedBox(other_pc.public_key)
-        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
-        bad = {"type": "auth", "data": sealed_b64}
+        bad = {"type": "auth", "data": sb.encrypt(inner)}
         assert session.receive_auth(bad) is False
         assert session.is_authenticated is False
 
@@ -147,8 +147,7 @@ class TestSecureChannelAuth:
             }
         ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
-        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
-        auth_msg = {"type": "auth", "data": sealed_b64}
+        auth_msg = {"type": "auth", "data": sb.encrypt(inner)}
         assert session.receive_auth(auth_msg) is False
         assert session.is_rejected is True
 
@@ -195,11 +194,14 @@ class TestSecureChannelAuth:
         session.receive_auth(make_phone_auth(sc))
         ack = session.make_auth_ack()
         assert ack["type"] == "auth_ack"
-        assert "data" in ack
-        assert len(ack["data"]) > 0
+        assert ack["status"] == "OK"
+        # 成功 ack 走 wrap 统一出口：整帧加密成线上字节（无明文泄漏、无信封）
+        wrapped = session.wrap(ack)
+        assert isinstance(wrapped, bytes)
+        assert session.unwrap(wrapped) == ack
 
     def test_auth_ack_decrypts_correctly(self):
-        """手机端独立推导会话密钥后可解开 auth_ack（首帧 seq=0）。"""
+        """手机端独立推导会话密钥后可解开整帧加密的 auth_ack（首帧 seq=0）。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
@@ -211,15 +213,15 @@ class TestSecureChannelAuth:
             }
         ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
-        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
-        session.receive_auth({"type": "auth", "data": sealed_b64})
+        session.receive_auth({"type": "auth", "data": sb.encrypt(inner)})
         ack = session.make_auth_ack()
+        wrapped = session.wrap(ack)
         # 手机端：ECDH + blake2b 派生同一会话密钥
         shared = crypto_scalarmult(bytes(phone_private), bytes(sc.pc_private.public_key))
         session_key = blake2b(shared, digest_size=32).digest()
-        raw = base64.urlsafe_b64decode(ack["data"] + "==")
-        pt = create_provider(ALGO, session_key).decrypt(raw)
-        msg = json.loads(pt)
+        pt = create_provider(ALGO, session_key).decrypt(wrapped)
+        msg = frame_decode(pt)
+        assert msg["type"] == "auth_ack"
         assert msg["status"] == "OK"
         assert "ts" in msg
 
@@ -241,16 +243,15 @@ class TestSecureChannelEncryptDecrypt:
             }
         ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
-        sealed_b64 = base64.urlsafe_b64encode(sb.encrypt(inner)).decode().rstrip("=")
-        session.receive_auth({"type": "auth", "data": sealed_b64})
+        session.receive_auth({"type": "auth", "data": sb.encrypt(inner)})
         return session, phone_private
 
     def test_wrap_unwrap_roundtrip(self):
         sc, _ = self._setup_authenticated()
         original = {"type": "preview", "text": "你好世界"}
         encrypted = sc.wrap(original)
-        assert encrypted["type"] == "data"
-        assert "data" in encrypted
+        # 无外层信封：wrap 直接产出线上字节（密文），调用方只拿到 bytes
+        assert isinstance(encrypted, bytes)
         decrypted = sc.unwrap(encrypted)
         assert decrypted == original
 
@@ -280,23 +281,27 @@ class TestSecureChannelEncryptDecrypt:
         msg = {"type": "preview", "text": "hello"}
         ct1 = sc.wrap(msg)
         ct2 = sc.wrap(msg)
-        assert ct1["data"] != ct2["data"]
+        assert ct1 != ct2
 
     def test_unwrap_returns_none_on_bad_data(self):
         sc, _ = self._setup_authenticated()
-        assert sc.unwrap({"type": "data", "data": "garbage!!!"}) is None
+        assert sc.unwrap(b"garbage!!!") is None
 
     def test_unwrap_returns_none_on_tampered(self):
         sc, _ = self._setup_authenticated()
         encrypted = sc.wrap({"type": "preview", "text": "hello"})
-        tampered = encrypted["data"][:-4] + "aaaa"
-        assert sc.unwrap({"type": "data", "data": tampered}) is None
+        tampered = encrypted[:-4] + b"aaaa"
+        assert sc.unwrap(tampered) is None
 
-    def test_wrap_without_auth_raises(self):
-        """未握手的会话没有 provider，wrap 会失败而非静默发送明文。"""
+    def test_wrap_without_auth_is_plaintext(self):
+        """未握手的会话没有 provider：wrap 退化为明文编码。
+
+        只用于 rejected ack 这类握手期帧（无会话密钥可加密）；
+        api.py 的数据出口只对已认证连接调用 wrap，不会明文发业务数据。
+        """
         session = SecureChannel(algorithm="auto").new_session()
-        with pytest.raises(AttributeError):
-            session.wrap({"type": "preview", "text": "test"})
+        msg = {"type": "preview", "text": "test"}
+        assert session.wrap(msg) == frame_encode(msg)
 
     def test_replay_envelope_rejected(self):
         """同一信封重放：seq 未递增，返回 None。"""
@@ -361,7 +366,9 @@ class TestSessionIsolation:
         sc, session_a = make_session()
         sc.new_session()  # 攻击者建立新连接，尚未认证
         assert session_a.is_authenticated is True
-        assert session_a.wrap({"type": "send", "text": "x"})["type"] == "data"
+        payload = session_a.wrap({"type": "send", "text": "x"})
+        assert isinstance(payload, bytes)
+        assert session_a.unwrap(payload) == {"type": "send", "text": "x"}
 
     def test_failed_auth_does_not_affect_authenticated_session(self):
         """新连接认证失败，不得让已认证会话退回明文。"""
@@ -369,7 +376,9 @@ class TestSessionIsolation:
         session_b = sc.new_session()
         assert session_b.receive_auth({"type": "auth", "data": "bad"}) is False
         assert session_a.is_authenticated is True
-        assert session_a.wrap({"type": "send", "text": "x"})["type"] == "data"
+        payload = session_a.wrap({"type": "send", "text": "x"})
+        assert isinstance(payload, bytes)
+        assert session_a.unwrap(payload) == {"type": "send", "text": "x"}
 
     def test_sessions_have_independent_keys(self):
         """两个会话各自持有独立密钥，互相无法解密对方报文。"""
@@ -410,12 +419,13 @@ class TestNoneMode:
     def test_none_lan_wrap_passthrough(self):
         sc = SecureChannel(algorithm="none", mode="lan")
         msg = {"type": "send", "text": "hello"}
-        assert sc.new_session().wrap(msg) == msg
+        # 明文模式：wrap 产出的就是 msgpack 编码字节，无加密、无信封
+        assert sc.new_session().wrap(msg) == frame_encode(msg)
 
     def test_none_lan_unwrap_passthrough(self):
         sc = SecureChannel(algorithm="none", mode="lan")
         msg = {"type": "send", "text": "hello"}
-        assert sc.new_session().unwrap(msg) == msg
+        assert sc.new_session().unwrap(frame_encode(msg)) == msg
 
     def test_none_cf_needs_auth(self):
         sc = SecureChannel(algorithm="none", mode="cloudflare")
@@ -464,12 +474,13 @@ class TestNoneMode:
     def test_none_cf_wrap_passthrough(self):
         sc = SecureChannel(algorithm="none", mode="cloudflare")
         msg = {"type": "send", "text": "hello"}
-        assert sc.new_session().wrap(msg) == msg
+        # 明文模式：wrap 产出的就是 msgpack 编码字节，无加密、无信封
+        assert sc.new_session().wrap(msg) == frame_encode(msg)
 
     def test_none_cf_unwrap_passthrough(self):
         sc = SecureChannel(algorithm="none", mode="cloudflare")
         msg = {"type": "send", "text": "hello"}
-        assert sc.new_session().unwrap(msg) == msg
+        assert sc.new_session().unwrap(frame_encode(msg)) == msg
 
     def test_none_cf_tokens_unique(self):
         sc1 = SecureChannel(algorithm="none", mode="cloudflare")

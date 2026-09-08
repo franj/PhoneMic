@@ -23,15 +23,20 @@ from nacl.secret import Aead, SecretBox
 from nacl.bindings import crypto_scalarmult
 from nacl.utils import random as random_bytes
 
+from phonemic.tunnel.frame import encode as frame_encode
+
 pytest.importorskip("playwright")
 
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
 SODIUM_JS = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
+# crypto_providers.js 的 handleAuthAck 用 MessagePack 解析 ack 载荷
+MSGPACK_JS = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
 CRYPTO_JS = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
 
 TEST_HTML = (
     "<!DOCTYPE html><html><head>"
     f"<script>{SODIUM_JS}</script>"
+    f"<script>{MSGPACK_JS}</script>"
     f"<script>{CRYPTO_JS}</script>"
     "</head><body></body></html>"
 )
@@ -270,8 +275,8 @@ class TestNaClBoxProvider:
         box = SecretBox(blake2b(shared, digest_size=32).digest())
 
         # Python 端：生成加密的 auth_ack——handleAuthAck 走统一 decrypt 路径，
-        # 期望首帧为 seq(8B)=0 前缀 + {"status":"OK"}
-        ack_payload = (0).to_bytes(8, "big") + json.dumps({"status": "OK"}).encode("utf-8")
+        # 期望首帧为 seq(8B)=0 前缀 + msgpack({"status":"OK"})
+        ack_payload = (0).to_bytes(8, "big") + frame_encode({"status": "OK"})
         ack_nonce = random_bytes(SecretBox.NONCE_SIZE)
         ack_encrypted = bytes(box.encrypt(ack_payload, ack_nonce))
         ack_b64 = _to_b64(ack_encrypted)

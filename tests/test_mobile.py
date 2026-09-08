@@ -4,20 +4,21 @@ mobile.html UI 测试
 依赖: pytest-playwright (需先运行 playwright install chromium)
 
 Mock 策略：
-- 内联加载 sodium.js 和 crypto_providers.js（set_content 无法加载外部脚本）
-- 设置 location.hash 为 #a=none&p=none，让 SecureClient 选择 PlainProvider（不加密）
-- Mock WS 自动回复 auth_ack，使 WSClient 进入已认证状态
-- triggerMessage 将消息包装为 {type:'data', data:base64(JSON)} 格式
-- sent_messages 解码 data 格式的消息，返回原始内容
+- 内联加载 sodium.js、msgpack.min.js 和 crypto_providers.js
+  （set_content 无法加载外部脚本）
+- 强制选择 PlainProvider（不加密，#a=none 语义），UI 全流程走明文帧
+- Mock WS 自动建立连接，使 WSClient 进入已连接状态
+- triggerMessage 经 secure.encrypt 编码下行帧（本文件的明文模式即 msgpack 字节）
+- sent_messages 返回解码后的上行原始内容
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("playwright")
-
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
 MOBILE_HTML_PATH = RES_DIR / "mobile.html"
 
@@ -35,15 +36,9 @@ window.__mockWS = {
 
     triggerMessage: function(data) {
         if (this.current && this.current.onmessage) {
-            if (window.__wsClient && window.__wsClient.secure.isEncrypted) {
-                // 加密模式：包装为 data 信封
-                var pt = sodium.from_string(JSON.stringify(data));
-                var b64 = sodium.to_base64(pt, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
-                this.current.onmessage({ data: JSON.stringify({type: 'data', data: b64}) });
-            } else {
-                // none 模式：明文 JSON
-                this.current.onmessage({ data: JSON.stringify(data) });
-            }
+            // 与真实服务端一致：经 secure.encrypt 产出线上字节
+            //（明文=msgpack / 加密=整帧密文，无外层信封）
+            this.current.onmessage({ data: window.__wsClient.secure.encrypt(data) });
         }
     },
     triggerClose: function() {
@@ -74,9 +69,9 @@ window.WebSocket = function(url) {
     this.send = function(data) {
         if (this.readyState !== 1) return false;
         try {
-            var msg = JSON.parse(data);
+            var msg = MessagePack.decode(data);
             window.__mockWS.sentMessages.push(msg);
-        } catch(e) { window.__mockWS.sentMessages.push({ raw: data }); }
+        } catch(e) { window.__mockWS.sentMessages.push({ raw: 'undecodable' }); }
         return true;
     };
 
@@ -109,8 +104,12 @@ def mobile_page(page):
     html = MOBILE_HTML_PATH.read_text(encoding="utf-8")
     # 内联外部脚本（set_content 无法加载 <script src> 相对路径）
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
+    msgpack_js = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
     html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
+    html = html.replace(
+        '<script src="msgpack.min.js" defer></script>', f"<script>{msgpack_js}</script>"
+    )
     html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
     html = html.replace(
         "window.i18n = {};",
@@ -118,6 +117,13 @@ def mobile_page(page):
         1,
     )
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
+    # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
+    html = re.sub(
+        r"<head[^>]*>",
+        lambda m: m.group(0) + "<script>" + MOCK_WS_SCRIPT + "</script>",
+        html,
+        count=1,
+    )
     # 暴露 wsClient 供 mock 检查 isEncrypted
     html = html.replace(
         "wsClient.connect();",
@@ -147,20 +153,8 @@ def mobile_page(page):
 
 
 def sent_messages(page):
-    """解码 sentMessages，将 {type:'data', data:base64} 还原为原始消息。"""
-    return page.evaluate("""
-        () => {
-            return window.__mockWS.sentMessages.map(msg => {
-                if (msg.type === 'data') {
-                    try {
-                        const raw = sodium.from_base64(msg.data, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
-                        return JSON.parse(sodium.to_string(raw));
-                    } catch(e) { return msg; }
-                }
-                return msg;
-            });
-        }
-    """)
+    """返回 mock WS 捕获的上行消息（已解码为原始对象）。"""
+    return page.evaluate("() => window.__mockWS.sentMessages")
 
 
 class TestPageLoad:

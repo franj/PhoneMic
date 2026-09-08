@@ -4,17 +4,19 @@
 
 **核心定位：内容无关的加密层。** 它的输入输出只有字节串——上层用 JSON、MessagePack、CBOR 还是裸二进制，加密层一概不感知；反过来上层换编码、换协议，加密层一行不改。两份文档的分工：
 
-| 内容 | 归属 |
-|---|---|
-| 哪些帧明文 / 加密、`auth` / `auth_ack` op 帧、WS close 4001、error code | `wire-protocol.md`（消息层） |
-| 信任模型、密钥交换、对称封装、seq 防重放、算法实现、线上密文布局 | 本文档（加密层） |
+| 内容                                                           | 归属                      |
+| ------------------------------------------------------------ | ----------------------- |
+| 哪些帧明文 / 加密、`auth` / `auth_ack` 消息帧、WS close 4001、error code | `wire-protocol.md`（消息层） |
+| 信任模型、密钥交换、对称封装、seq 防重放、算法实现、线上密文布局                           | 本文档（加密层）                |
+
+
 
 ---
 
 ## 1. 分层模型与接口
 
 ```
-应用消息   op map（{op:...}，任意结构）
+应用消息   type map（{type:...}，任意结构）
    ↓
 编码层     map → bytes（JSON / MessagePack / CBOR …… 任选，见 wire-protocol.md）
    ↓
@@ -46,11 +48,11 @@ class CryptoProvider(ABC):
 
 ### 1.2 内容无关承诺
 
-| 自由度 | 改动面 |
-|---|---|
-| 上层换编码（msgpack → CBOR 等） | 加密层**零改动** |
-| 加密层新增算法（AES-GCM、AEGIS-256…） | 编码层与 op 表**零改动** |
-| 明文 ↔ 加密切换（LAN `none` ↔ 加密） | 编码层零改动，由 `SecureSession.is_encrypted` 决定走不走加密层 |
+| 自由度                         | 改动面                                            |
+| --------------------------- | ---------------------------------------------- |
+| 上层换编码（msgpack → CBOR 等）     | 加密层**零改动**                                     |
+| 加密层新增算法（AES-GCM、AEGIS-256…） | 编码层与 type 表**零改动**                               |
+| 明文 ↔ 加密切换（LAN `none` ↔ 加密）  | 编码层零改动，由 `SecureSession.is_encrypted` 决定走不走加密层 |
 
 这套正交性正是 §3 把 `KeyExchange` 从 `Provider` 拆出来、§5 把 `seq` 内化进 `Provider` 的统一动机：**每一层只认字节与密钥，不认彼此的内部格式。**
 
@@ -60,11 +62,11 @@ class CryptoProvider(ABC):
 
 ### 场景
 
-| 模式 | 加密 | 原因 |
-|---|---|---|
-| `none` + LAN | 可选关闭 | 局域网内，用户自担风险 |
-| 加密 + LAN | 强制 | — |
-| 任何 + Cloudflare | 强制 | 流量出公网，TLS 在 CF 边缘终结，隧道段裸奔；`mode.py` 的 `effective_algorithm` 在 Cloudflare 下把 `none` 归一为 `auto`。**不存在明文 CF**（`none`+CF 历史模式已删除） |
+| 模式              | 加密   | 原因                                                                                                                            |
+| --------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `none` + LAN    | 可选关闭 | 局域网内，用户自担风险                                                                                                                   |
+| 加密 + LAN        | 强制   | —                                                                                                                             |
+| 任何 + Cloudflare | 强制   | 流量出公网，TLS 在 CF 边缘终结，隧道段裸奔；`mode.py` 的 `effective_algorithm` 在 Cloudflare 下把 `none` 归一为 `auto`。**不存在明文 CF**（`none`+CF 历史模式已删除） |
 
 ### bearer 认证：能密封即认证
 
@@ -86,6 +88,7 @@ PC 公钥在此部署中不是公开密钥，而是**带外分发的 bearer 能�
 - 而 `algo` 封在 `auth.data` 的密文里，解密它要先用 PC 身份私钥做 `SealedBox` 解封——这一步**与对称算法无关**，任何 Provider 都还没出生就能做。
 
 所以"解 auth"天然属于一个算法无关的 `KeyExchange` 类，不属于任何 Provider。把 `SealedBox`/ECDH/KDF 塞进 Provider，等于要求 Provider 在构造前先自行解开自己的构造参数，逻辑上不成立。
+
 
 ### 3.2 接口与实现
 
@@ -149,6 +152,7 @@ self._provider = create_provider(algo, session_key)                    # 才知�
 
 `CryptoProvider` 是**纯对称 AEAD 封装**：构造时直接拿 `session_key`，不碰 `pc_private`、不做 `SealedBox` / ECDH / KDF（那些归 §3 的 `KeyExchange`）。
 
+
 ### 4.1 三个算法
 
 ```python
@@ -196,7 +200,7 @@ class AESGCMProvider(CryptoProvider):
 
 ### 4.2 新增算法流程
 
-写一个 `CryptoProvider` 子类（决定走 AAD 路径还是前缀路径）→ 在 `create_provider(algo, session_key)` 注册 → 二维码 `a=` 列表加上算法名。`KeyExchange`、编码层、op 表零改动。
+写一个 `CryptoProvider` 子类（决定走 AAD 路径还是前缀路径）→ 在 `create_provider(algo, session_key)` 注册 → 二维码 `a=` 列表加上算法名。`KeyExchange`、编码层、type 表零改动。
 
 ---
 
@@ -232,14 +236,14 @@ class AESGCMProvider(CryptoProvider):
 
 加密模式下，**WS binary 帧 = `provider.encrypt(上层编码字节)` 的原始输出**，帧内布局由算法实现决定，上层协议不需要知道：
 
-| 路径 | 线上帧布局 | `decrypt` 返回给上层 |
-|---|---|---|
-| AAD（XChaCha20 / AES-GCM） | `nonce(24B) ‖ AEAD(上层编码字节)`，aad = `seq(8B)` | 上层编码字节 |
-| 前缀（XSalsa20） | `nonce(24B) ‖ AEAD(seq(8B) ‖ 上层编码字节)` | （内部剥 seq）上层编码字节 |
+| 路径                       | 线上帧布局                                       | `decrypt` 返回给上层 |
+| ------------------------ | ------------------------------------------- | --------------- |
+| AAD（XChaCha20 / AES-GCM） | `nonce(24B) ‖ AEAD(上层编码字节)`，aad = `seq(8B)` | 上层编码字节          |
+| 前缀（XSalsa20）             | `nonce(24B) ‖ AEAD(seq(8B) ‖ 上层编码字节)`       | （内部剥 seq）上层编码字节 |
 
 - PyNaCl 的 `Aead` / `SecretBox` `.encrypt()` 自带随机 nonce 前缀，无需手动拼帧。
-- 两种路径线上字节不同，但**上层编码的 map 内容完全一致**；换算法（或 Provider 优化布局）都不影响编码层与 op 表。
-- 加密覆盖**整个上层消息，包括 `op`**——元数据不泄露（攻击端看不出你在发 mouse 还是 file）。
+- 两种路径线上字节不同，但**上层编码的 map 内容完全一致**；换算法（或 Provider 优化布局）都不影响编码层与 type 表。
+- 加密覆盖**整个上层消息，包括 `type`**——元数据不泄露（攻击端看不出你在发 mouse 还是 file）。
 - 例外：**`auth` 帧不走此布局**——它是密钥交换本身的载体，见 §3.3 与 `wire-protocol.md` §7。
 
 > 现状说明：本节描述的是目标形态。当前代码处于中间态——`SecureSession.wrap/unwrap` 仍是 JSON 信封 + base64 包裹 provider 输出；切 msgpack 时（`wire-protocol.md` §12 阶段 1-3）一并去掉 base64，让 provider 输出直接上帧。
@@ -250,7 +254,7 @@ class AESGCMProvider(CryptoProvider):
 
 - **会话状态是权威**：`SecureSession.is_encrypted` 在握手时按连接确定，之后不变。接收端永远知道该解还是不该解，不需要"试一试"。
 - **原则：绝不"解密失败就当明文"。** 解密失败的可能原因（对端模式不同、版本不同、中间人篡改）处理动作完全一致——丢弃 + 回 `error`。区分它们没有价值。
-- **唯一明文帧是 `auth`**：会话密钥在服务端解出 `auth` 之后才建立，因此只有这一帧没有密钥可用；握手**成功**时从 `auth_ack` 起（含）全部整帧对称加密（含 `op`），握手**失败**时服务端不回消息层帧、直接关闭 WS（close 4001）——因此不存在"解密失败就当明文"的例外。实现上绝不能把 `auth` 帧塞进 `wrap()`。
+- **唯一明文帧是 `auth`**：会话密钥在服务端解出 `auth` 之后才建立，因此只有这一帧没有密钥可用；握手**成功**时从 `auth_ack` 起（含）全部整帧对称加密（含 `type`），握手**失败**时服务端不回消息层帧、直接关闭 WS（close 4001）——因此不存在"解密失败就当明文"的例外。实现上绝不能把 `auth` 帧塞进 `wrap()`。
 - **`auth_ack` 无 data 字段**：手机能成功解开这一帧，本身就是"PC 持有正确会话密钥"的证明，无需再塞 `{"status":"OK"}`；成功帧也不回显 `algo`（握手时早已协商）。
 - **判别不靠帧类型，靠会话状态机**：连接建立后按 `needs_auth` 决定期待 `auth` 还是 `hello`，之后按 `is_encrypted` 决定解不解密。（状态机表与 text 帧拒绝策略见 `wire-protocol.md` §10。）
 
@@ -260,7 +264,7 @@ class AESGCMProvider(CryptoProvider):
 
 消息层与加密层的全部接触面，收敛为四条：
 
-1. **握手判定**：`needs_auth` = not (`none` and LAN)（`e2ee.py` 的 `SecureChannel`）。为真时消息层期待 `auth` op 帧，把 `data`（bytes）交给 `KeyExchange.handle_auth`；成功后用返回的 `algo` + `session_key` 经 `create_provider` 建 Provider，`auth_ack` 起整帧走 Provider。失败 → WS close 4001 + reason（帧层语义见 `wire-protocol.md` §7）。
+1. **握手判定**：`needs_auth` = not (`none` and LAN)（`e2ee.py` 的 `SecureChannel`）。为真时消息层期待 `auth` 消息帧，把 `data`（bytes）交给 `KeyExchange.handle_auth`；成功后用返回的 `algo` + `session_key` 经 `create_provider` 建 Provider，`auth_ack` 起整帧走 Provider。失败 → WS close 4001 + reason（帧层语义见 `wire-protocol.md` §7）。
 2. **数据帧**：消息层把编码后的字节交给 `provider.encrypt()`，密文原样上 WS binary 帧；收到 binary 帧交给 `provider.decrypt()`，把返回的字节交给编码层解析。
 3. **错误映射**：`CryptoError` → `error(code:"decrypt")`；`ReplayError` → `error(code:"replay")`。统一丢弃 + 回 error，连续 N 次断连（code 表见 `wire-protocol.md` §7 的 error 小节）。
 4. **明文模式**：`none` + LAN 时消息层直接编解码，不经加密层，也没有 `auth` / `auth_ack` 帧（握手由 `hello` 完成）。
@@ -269,15 +273,15 @@ class AESGCMProvider(CryptoProvider):
 
 ## 9. 实现落点
 
-| 文件 | 职责 |
-|---|---|
-| `phonemic/tunnel/crypto/key_exchange.py` | `KeyExchange`：算法无关密钥交换（§3） |
-| `phonemic/tunnel/crypto/errors.py` | `CryptoError` / `DecryptError` / `ReplayError` |
-| `phonemic/tunnel/crypto/base.py` | `CryptoProvider` ABC（§1.1 / §4） |
-| `phonemic/tunnel/crypto/xchacha20.py` | `XChaCha20Provider`（AAD 路径） |
-| `phonemic/tunnel/crypto/nacl_box.py` | `XSalsa20Provider`（前缀路径） |
-| `phonemic/tunnel/e2ee.py` | `SecureChannel` / `SecureSession`：装配、握手判定、needs_auth |
-| `phonemic/resources/crypto_providers.js` | JS 端同构实现（密封 auth、seq 内化） |
-| `phonemic/resources/mobile.html` | `SecureClient`：JS 调用侧 |
+| 文件                                       | 职责                                                   |
+| ---------------------------------------- | ---------------------------------------------------- |
+| `phonemic/tunnel/crypto/key_exchange.py` | `KeyExchange`：算法无关密钥交换（§3）                           |
+| `phonemic/tunnel/crypto/errors.py`       | `CryptoError` / `DecryptError` / `ReplayError`       |
+| `phonemic/tunnel/crypto/base.py`         | `CryptoProvider` ABC（§1.1 / §4）                      |
+| `phonemic/tunnel/crypto/xchacha20.py`    | `XChaCha20Provider`（AAD 路径）                          |
+| `phonemic/tunnel/crypto/nacl_box.py`     | `XSalsa20Provider`（前缀路径）                             |
+| `phonemic/tunnel/e2ee.py`                | `SecureChannel` / `SecureSession`：装配、握手判定、needs_auth |
+| `phonemic/resources/crypto_providers.js` | JS 端同构实现（密封 auth、seq 内化）                             |
+| `phonemic/resources/mobile.html`         | `SecureClient`：JS 调用侧                                |
 
 依赖：Python `pynacl`（已有）；JS `sodium.js`（已 vendor）。新增算法时：AAD 路径优先选支持 aad 的库（`cryptography` 的 AESGCM）；无 aad 的库走前缀路径。
