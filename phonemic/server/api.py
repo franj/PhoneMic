@@ -16,7 +16,7 @@ from typing import Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import uvicorn
@@ -361,13 +361,14 @@ async def _serve_messages(websocket, session) -> None:
 # ---------- HTTP 资源处理 ----------
 
 def _serve_mobile() -> Response:
-    """返回手机端聊天页面（mobile.html），并替换 i18n 占位符。"""
+    """返回手机端聊天页面（mobile.html）。
+
+    页面不含任何翻译文本，语言包由手机端自行请求 /api/lang.json 获取。
+    """
     html_path = get_res_path("mobile.html")
     try:
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
-        i18n_data = I18n.instance().get_section("mobile")
-        html = html.replace("__I18N_JSON__", json.dumps(i18n_data, ensure_ascii=False))
         return HTMLResponse(content=html)
     except Exception as e:
         logger.error(f"Failed to load mobile.html: {e}")
@@ -375,6 +376,28 @@ def _serve_mobile() -> Response:
             content='<h3>Error: mobile.html not found. Please check resources/ directory.</h3>',
             status_code=404,
         )
+
+
+def _serve_lang_json() -> Response:
+    """返回当前 PC 端语言下的手机端翻译段（locales/{lang}.json 的 mobile 部分）。
+
+    仅包含界面文本，无敏感信息，可置于公开路径。禁用缓存，保证 PC 端
+    切换语言后手机端刷新即可拿到最新语言包。
+    """
+    try:
+        i18n = I18n.instance()
+        mobile_data = i18n.get_section("mobile")
+        return JSONResponse(
+            content=mobile_data,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to get language data: {e}")
+        return JSONResponse(content={}, status_code=500)
 
 
 def _serve_test() -> Response:
@@ -422,7 +445,14 @@ def _serve_crypto_providers() -> Response:
 
 
 # 明文模式放行的白名单（根路径入口）
-_PUBLIC_PATHS = {"/", "/favicon.ico", "/sodium.js", "/crypto_providers.js", "/ws"}
+_PUBLIC_PATHS = {
+    "/",
+    "/favicon.ico",
+    "/sodium.js",
+    "/crypto_providers.js",
+    "/ws",
+    "/api/lang.json",
+}
 
 
 def _normalize_path(path: str) -> Optional[str]:
@@ -456,6 +486,8 @@ async def _dispatch_http(request: Request, path: str) -> Response:
 
     if normalized == "/":
         return _serve_mobile()
+    if normalized == "/api/lang.json":
+        return _serve_lang_json()
     if normalized == "/sodium.js":
         return _serve_sodium(request)
     if normalized == "/crypto_providers.js":

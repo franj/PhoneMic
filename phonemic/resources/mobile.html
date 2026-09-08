@@ -288,53 +288,40 @@
     </div>
 </div>
 
-<script id="i18n-data" type="application/json">
-__I18N_JSON__
-</script>
-
 <script>
-    var DEFAULT_I18N = {
-        "input_placeholder_auto": "语音识别后自动发送...",
-        "input_placeholder_manual": "输入后点击发送",
-        "input_placeholder_disconnected": "连接已断开...",
-        "btn_send_auto": "自动",
-        "btn_send_manual": "发送",
-        "btn_clear_aria": "清空输入框",
-        "status_disconnected_text": "已断开连接，正在重连...",
-        "status_loading_text": "正在加载...",
-        "status_connecting_text": "正在连接服务器...",
-        "status_load_failed_text": "加密库加载失败，请刷新页面重试",
-        "confirm_resend": "重发这条消息？",
-        "log_ws_connected": "[WS] 已连接",
-        "log_ws_disconnected": "[WS] 断开",
-        "log_ws_unknown_type": "[WS] 未处理的消息类型:",
-        "log_ws_parse_error": "[WS] 解析消息失败",
-        "log_config_updated": "[Config] 更新 maxHistory = ",
-        "auth_rejected_text": "认证失败，请重新扫码",
-        "auth_nokey_text": "页面缺少密钥，请重新扫码",
-        "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
-        "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面",
-        "dbg_connect_start": "正在发起 WebSocket 连接...",
-        "dbg_handshake_wait": "WebSocket 已创建，等待握手...",
-        "dbg_handshake_ok": "握手成功({ms}ms)，正在认证...",
-        "dbg_auth_ok": "认证通过({ms}ms)，连接就绪",
-        "dbg_ready_plain": "连接就绪({ms}ms，明文模式)",
-        "dbg_error": "连接错误({ms}ms)，即将关闭...",
-        "dbg_closed": "连接关闭，{ms}ms 后重连...",
-        "dbg_timeout": "连接超时({ms}ms)，重试中..."
-    };
+    // ========== 0. 国际化：语言包由 PC 端通过 /api/lang.json 提供 ==========
+    // 相对路径请求，自动适配加密模式的 /{secret}/ 前缀
+    window.i18n = {};
 
-    var i18nData = {};
-    try {
-        var el = document.getElementById('i18n-data');
-        if (el && el.textContent.trim()) {
-            var parsed = JSON.parse(el.textContent);
-            if (typeof parsed === 'object') i18nData = parsed;
+    async function loadI18n() {
+        try {
+            const res = await fetch('api/lang.json');
+            if (res.ok) {
+                window.i18n = await res.json();
+            } else {
+                console.warn('i18n load failed, using fallback keys.');
+            }
+        } catch (e) {
+            console.warn('Network error loading i18n, using fallback keys.', e);
         }
-    } catch(e) {
-        console.warn("Failed to parse i18n data, using default.", e);
     }
-    window.i18n = Object.assign({}, DEFAULT_I18N, i18nData);
+
+    // 翻译函数：缺失时回退为键名（带参数时附带参数），便于定位未翻译项
+    function t(key, params) {
+        const text = window.i18n?.[key];
+        if (text === undefined || text === null) {
+            if (!params) return key;
+            const paramStr = Object.entries(params).map(([k, v]) => `${k}=${v}`).join(', ');
+            return `${key}(${paramStr})`;
+        }
+        if (params) {
+            return text.replace(/\{(\w+)\}/g, (match, p1) => {
+                const val = params[p1];
+                return val !== undefined ? String(val) : match;
+            });
+        }
+        return text;
+    }
 </script>
 
 <script>
@@ -894,17 +881,17 @@ __I18N_JSON__
                 return;
             }
             const t0 = Date.now();
-            this._setDebugStatus(window.i18n.dbg_connect_start);
+            this._setDebugStatus(t('dbg_connect_start'));
             this._clearConnectTimer();
             try {
                 this.ws = new WebSocket(this.url);
-                this._setDebugStatus(window.i18n.dbg_handshake_wait);
+                this._setDebugStatus(t('dbg_handshake_wait'));
 
                 // 连接超时：3 秒内没握手成功就主动放弃，快速失败以便下一轮重试
                 this._connectTimer = setTimeout(() => {
                     const elapsed = Date.now() - t0;
                     console.warn(`[WS] Connection timeout after ${elapsed}ms, closing`);
-                    this._setDebugStatus(window.i18n.dbg_timeout.replace('{ms}', elapsed));
+                    this._setDebugStatus(t('dbg_timeout', {ms: elapsed}));
                     if (this.ws) {
                         try { this.ws.close(); } catch(e) {}
                     }
@@ -913,8 +900,8 @@ __I18N_JSON__
                 this.ws.onopen = () => {
                     this._clearConnectTimer();
                     const t1 = Date.now();
-                    console.log(window.i18n.log_ws_connected, `(${t1 - t0}ms)`);
-                    this._setDebugStatus(window.i18n.dbg_handshake_ok.replace('{ms}', t1 - t0));
+                    console.log(t('log_ws_connected'), `(${t1 - t0}ms)`);
+                    this._setDebugStatus(t('dbg_handshake_ok', {ms: t1 - t0}));
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
@@ -923,7 +910,7 @@ __I18N_JSON__
                     } else {
                         this.isConnected = true;
                         const t2 = Date.now();
-                        this._setDebugStatus(window.i18n.dbg_ready_plain.replace('{ms}', t2 - t0));
+                        this._setDebugStatus(t('dbg_ready_plain', {ms: t2 - t0}));
                         this._notifyStatusChange(true);
                     }
                 };
@@ -935,7 +922,7 @@ __I18N_JSON__
                             const t2 = Date.now();
                             if (this.secure.handleAuthAck(data)) {
                                 this.isConnected = true;
-                                this._setDebugStatus(window.i18n.dbg_auth_ok.replace('{ms}', t2 - t0));
+                                this._setDebugStatus(t('dbg_auth_ok', {ms: t2 - t0}));
                                 this._notifyStatusChange(true);
                             } else {
                                 // 密钥不匹配（如旧二维码），重试结果相同：停止自动重连并提示重新扫码
@@ -961,7 +948,7 @@ __I18N_JSON__
                                 }
                                 const handler = this.messageHandlers.get(inner.type);
                                 if (handler) handler(inner);
-                                else console.warn(window.i18n.log_ws_unknown_type, inner.type);
+                                else console.warn(t('log_ws_unknown_type'), inner.type);
                                 return;
                             }
                         } else {
@@ -971,28 +958,28 @@ __I18N_JSON__
                             }
                             const handler = this.messageHandlers.get(data.type);
                             if (handler) handler(data);
-                            else console.warn(window.i18n.log_ws_unknown_type, data.type);
+                            else console.warn(t('log_ws_unknown_type'), data.type);
                             return;
                         }
 
                         console.warn('[WS] Unexpected message type:', data.type);
-                    } catch (err) { console.error(window.i18n.log_ws_parse_error, err); }
+                    } catch (err) { console.error(t('log_ws_parse_error'), err); }
                 };
                 this.ws.onclose = () => {
                     this._clearConnectTimer();
                     const t3 = Date.now();
-                    console.log(window.i18n.log_ws_disconnected, `(${t3 - t0}ms)`);
+                    console.log(t('log_ws_disconnected'), `(${t3 - t0}ms)`);
                     this.isConnected = false;
                     this.secure._authenticated = false;
                     if (this.authRejected) return; // 保持认证失败提示，不再自动重连
-                    this._setDebugStatus(window.i18n.dbg_closed.replace('{ms}', this.reconnectInterval));
+                    this._setDebugStatus(t('dbg_closed', {ms: this.reconnectInterval}));
                     this._notifyStatusChange(false);
                     this._scheduleReconnect();
                 };
                 this.ws.onerror = (err) => {
                     const t4 = Date.now();
                     console.error('WS error at', t4 - t0, 'ms:', err);
-                    this._setDebugStatus(window.i18n.dbg_error.replace('{ms}', t4 - t0));
+                    this._setDebugStatus(t('dbg_error', {ms: t4 - t0}));
                     this.ws.close();
                 };
             } catch (err) {
@@ -1014,16 +1001,16 @@ __I18N_JSON__
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
         }
         _showAuthRejected(hasKey) {
-            let text = hasKey ? window.i18n.auth_rejected_text : window.i18n.auth_nokey_text;
+            let text = hasKey ? t('auth_rejected_text') : t('auth_nokey_text');
             // 仅"页面缺少密钥"与微信内置浏览器丢失 hash 相关，认证失败与浏览器无关不提示
             if (!hasKey && /MicroMessenger/i.test(navigator.userAgent)) {
-                text += '。' + window.i18n.auth_wechat_hint;
+                text += '。' + t('auth_wechat_hint');
             }
             this._notifyStatusChange(false, text);
         }
         _showRescanRequired() {
             // PC 端配置变更与浏览器无关，不追加微信提示
-            this._notifyStatusChange(false, window.i18n.auth_reconfig_text);
+            this._notifyStatusChange(false, t('auth_reconfig_text'));
         }
         send(type, text) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
@@ -1061,7 +1048,7 @@ __I18N_JSON__
                     return;
                 }
                 if (!this.wsClient.getConnected()) return;
-                if (confirm(window.i18n.confirm_resend)) {
+                if (confirm(t('confirm_resend'))) {
                     this.ui.sendExternalMessage(msg.textContent);
                 }
             });
@@ -1121,7 +1108,7 @@ __I18N_JSON__
             this.autoMode = true;
             this.unifiedVoiceObserver = null;
 
-            this.btnClear.setAttribute('aria-label', window.i18n.btn_clear_aria);
+            this.btnClear.setAttribute('aria-label', t('btn_clear_aria'));
             this.initEventListeners();
             this.updateSendButtonUI();
             this.updateModeToggleVisibility();
@@ -1215,13 +1202,13 @@ __I18N_JSON__
         }
         updateSendButtonUI() {
             if (this.autoMode) {
-                this.btnSend.textContent = window.i18n.btn_send_auto;
+                this.btnSend.textContent = t('btn_send_auto');
                 document.body.classList.add('auto-mode');
-                this.inputBox.placeholder = window.i18n.input_placeholder_auto;
+                this.inputBox.placeholder = t('input_placeholder_auto');
             } else {
-                this.btnSend.textContent = window.i18n.btn_send_manual;
+                this.btnSend.textContent = t('btn_send_manual');
                 document.body.classList.remove('auto-mode');
-                this.inputBox.placeholder = window.i18n.input_placeholder_manual;
+                this.inputBox.placeholder = t('input_placeholder_manual');
             }
         }
         updateModeToggleVisibility() {
@@ -1247,7 +1234,7 @@ __I18N_JSON__
                 this.updateModeToggleVisibility();
             } else {
                 statusBar.style.display = 'block';
-                statusBar.innerText = message || window.i18n.status_disconnected_text;
+                statusBar.innerText = message || t('status_disconnected_text');
                 statusBar.classList.toggle('loading', type === 'loading');
                 statusBar.classList.remove('debug');
                 chatListDiv.classList.add('offline');
@@ -1256,7 +1243,7 @@ __I18N_JSON__
                 this.btnClear.disabled = true;
                 this.modeToggle.disabled = true;
                 this.modeToggle.style.display = 'none';
-                this.inputBox.placeholder = window.i18n.input_placeholder_disconnected;
+                this.inputBox.placeholder = t('input_placeholder_disconnected');
             }
         }
         setupScrollFix() {
@@ -1281,6 +1268,8 @@ __I18N_JSON__
 
     // ========== 7. 主程序入口 ==========
     window.onload = async () => {
+        await loadI18n();   // 必须先加载语言包，再初始化各组件
+
         const chatContainer = document.getElementById('chat-list');
         const inputBox = document.getElementById('input-box');
         const btnSend = document.getElementById('btn-send');
@@ -1322,7 +1311,7 @@ __I18N_JSON__
         wsClient.on('config', (data) => {
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
-                console.log(window.i18n.log_config_updated + data.mobile_max_records);
+                console.log(t('log_config_updated') + data.mobile_max_records);
             }
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
@@ -1336,16 +1325,16 @@ __I18N_JSON__
         });
 
         // 初始化安全通道（从 URL 提取 PC 公钥 + 生成手机密钥对）
-        uiController.onConnectionChange(false, window.i18n.status_loading_text, 'loading');
+        uiController.onConnectionChange(false, t('status_loading_text'), 'loading');
         try {
             await wsClient.secure.init();
         } catch (e) {
             console.error('[SEC] Init failed:', e);
-            uiController.onConnectionChange(false, window.i18n.status_load_failed_text);
+            uiController.onConnectionChange(false, t('status_load_failed_text'));
             return;
         }
 
-        uiController.onConnectionChange(false, window.i18n.status_connecting_text, 'loading');
+        uiController.onConnectionChange(false, t('status_connecting_text'), 'loading');
         wsClient.connect();
         chatManager.scrollToBottom();
         if (inputBox.value === '') modeToggle.style.display = 'block';

@@ -7,7 +7,6 @@ PhoneMic 后端服务单元测试
 import base64
 import json
 import multiprocessing
-import re
 import time
 import urllib.request
 import urllib.error
@@ -546,23 +545,20 @@ def test_get_root_returns_html(server_no_sc):
     assert len(body) > 0
 
 
-def test_root_html_i18n_replaced(server_no_sc):
-    """GET /{secret}/ 返回的 HTML 中 __I18N_JSON__ 占位符应被替换为有效 JSON"""
+def test_lang_json_route(server_no_sc):
+    """GET /{secret}/api/lang.json 返回当前语言的手机端翻译段，且禁用缓存"""
     host, port, _, sc = server_no_sc
-    url = http_url(host, port, sc, "/")
+    url = http_url(host, port, sc, "/api/lang.json")
     resp = urllib.request.urlopen(url, timeout=2)
-    body = resp.read().decode("utf-8")
+    assert resp.status == 200
+    assert "application/json" in resp.headers.get("content-type", "")
 
-    assert "__I18N_JSON__" not in body, "i18n placeholder was not replaced"
+    cache_control = resp.headers.get("cache-control", "")
+    assert "no-cache" in cache_control, f"Expected no-cache, got: {cache_control}"
 
-    match = re.search(
-        r'<script id="i18n-data" type="application/json">\s*(.*?)\s*</script>',
-        body, re.DOTALL
-    )
-    assert match is not None, "i18n-data script tag not found in HTML"
-    i18n_data = json.loads(match.group(1))
-    assert isinstance(i18n_data, dict)
-    assert len(i18n_data) > 0, "i18n data should not be empty"
+    data = json.loads(resp.read().decode("utf-8"))
+    assert isinstance(data, dict)
+    assert len(data) > 0, "language data should not be empty"
 
 
 def test_favicon_route(server_no_sc):

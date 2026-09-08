@@ -28,6 +28,12 @@ pytest.importorskip("playwright")
 
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
 
+# 手机端语言包由 /api/lang.json 提供，而 set_content 下无法真实 fetch。
+# 直接把 zh_CN 的 mobile 段注入 window.i18n，等价于服务端返回的内容。
+MOBILE_I18N = json.loads(
+    (RES_DIR / "locales" / "zh_CN.json").read_text(encoding="utf-8")
+)["mobile"]
+
 MOCK_WS_SCRIPT = """
 window.__mockWS = {
     sentMessages: [],
@@ -93,7 +99,11 @@ def _prepare_html(channel, offered, force_none_algo=False):
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
     html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
     html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
-    html = html.replace("__I18N_JSON__", "")
+    html = html.replace(
+        "window.i18n = {};",
+        "window.i18n = " + json.dumps(MOBILE_I18N, ensure_ascii=False) + ";",
+        1,
+    )
     html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
 
     # patch _parseUrlFragment：注入 PC 公钥/token 和 a= 算法列表
