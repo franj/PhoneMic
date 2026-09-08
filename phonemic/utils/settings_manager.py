@@ -56,6 +56,7 @@ class SettingsManager(QObject):
             "last_network_mac": None,             # 上次使用的网卡MAC
             "auto_start_silent": False,           # 开机自启时是否静默（不显示主窗口）
             "e2ee_algorithm": "none",             # 端到端加密: "none"(不加密), "auto"(加密，算法由客户端协商)
+            "text_input_mode": "paste",           # 上屏方式: "paste"(剪贴板+Ctrl+V), "type"(模拟键盘逐字符输入)
         }
         print(f"default lan is {default['language']}")
         
@@ -87,6 +88,9 @@ class SettingsManager(QObject):
                         loaded["e2ee_algorithm"] = "auto"
                     elif loaded["e2ee_algorithm"] not in ("none", "auto"):
                         loaded["e2ee_algorithm"] = default["e2ee_algorithm"]
+                # 校验 text_input_mode
+                if loaded.get("text_input_mode") not in ("paste", "type"):
+                    loaded["text_input_mode"] = default["text_input_mode"]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置
