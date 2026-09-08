@@ -262,6 +262,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 ```
 {"type":"mouse", "a":"move",  "dx":12, "dy":-3}
 {"type":"mouse", "a":"click", "btn":"left"}
+{"type":"mouse", "a":"double","btn":"left"}
 {"type":"mouse", "a":"down",  "btn":"left"}
 {"type":"mouse", "a":"up",    "btn":"left"}
 {"type":"mouse", "a":"wheel", "delta":-120}
@@ -269,7 +270,9 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 - 采用**速度模型**（摇杆远快近慢），`dx`/`dy` 是**每帧相对位移像素**，由 `requestAnimationFrame` 循环驱动，约 60 次/秒。
 - **加速曲线在手机端计算**：摇杆偏移 → 速度映射（具体曲线为客户端实现细节，如二次/指数映射）产出最终 `dx`/`dy`；PC 端只做 `moveRel(dx, dy)`，**不另做速度处理**。协议只规定 `dx`/`dy` 是已算好的相对位移，不规定曲线形状。
-- PC 端新增 `phonemic/gui/mouse.py`，用 pyautogui 的 `moveRel` / `click` / `mouseDown` / `mouseUp`，照搬 `keyboard.py` 的模式。
+- `dx`/`dy` 为**整数**（像素）。客户端按帧算出的是小数，需自行做余量累加（发整数部分、留小数部分到下一帧），否则每帧截断会累积出可感知的速度偏差。
+- PC 端新增 `phonemic/gui/mouse.py`，用 pyautogui 的 `moveRel` / `click` / `doubleClick` / `mouseDown` / `mouseUp`，照搬 `keyboard.py` 的模式。
+- **`double` 是独立动作，不拆成两帧 `click`**：双击判定依赖两次按下的时间间隔，手机 → WS → PC 这条链路的时延不可控，连发两帧 `click` 大概率被 OS 判成两次单击。由 PC 端用 `doubleClick()` 一次完成。
 
 ### config
 
