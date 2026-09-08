@@ -22,15 +22,10 @@ from phonemic.server.api import (
 )
 from phonemic.tunnel.e2ee import SecureChannel
 
+from conftest import get_test_port
+
 
 # ---------- 辅助函数 ----------
-_test_port_counter = 9900
-
-
-def get_test_port():
-    global _test_port_counter
-    _test_port_counter += 1
-    return _test_port_counter
 
 
 def wait_for_server_ready(host, port, secret_path="", timeout=5.0):

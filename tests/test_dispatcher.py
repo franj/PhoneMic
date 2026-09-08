@@ -20,14 +20,7 @@ from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import set_bridge, start_server, stop_server, set_secure_channel, get_secret_path
 from phonemic.tunnel.e2ee import SecureChannel
 
-
-_test_port_counter = 9500
-
-
-def get_test_port():
-    global _test_port_counter
-    _test_port_counter += 1
-    return _test_port_counter
+from conftest import get_test_port
 
 
 def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
