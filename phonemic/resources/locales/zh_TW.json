@@ -117,7 +117,11 @@
     "tray": "最小化到系統托盤（程式繼續背景執行）",
     "remember": "記住我的選擇（可在偏好設定中修改）"
   },
-  "mobile": {
+  "mobile": {    "panel_hint_mouse": "滑鼠面板 · 功能待對接",
+    "panel_hint_keys": "鍵盤面板 · 預留",
+    "panel_hint_file": "檔案面板 · 預留",
+    "panel_tune_speed": "速度",
+    "panel_tune_dead": "死區",
     "input_placeholder_auto": "語音辨識後自動傳送...",
     "input_placeholder_manual": "輸入後點擊傳送",
     "input_placeholder_disconnected": "連線已中斷...",

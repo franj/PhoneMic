@@ -116,7 +116,11 @@
     "tray": "Minimize to System Tray (continue running in background)",
     "remember": "Remember my choice (can be changed in Preferences)"
   },
-  "mobile": {
+  "mobile": {    "panel_hint_mouse": "Mouse panel · coming soon",
+    "panel_hint_keys": "Keyboard panel · reserved",
+    "panel_hint_file": "Files panel · coming soon",
+    "panel_tune_speed": "Speed",
+    "panel_tune_dead": "Deadzone",
     "input_placeholder_auto": "Recognition auto-send",
     "input_placeholder_manual": "Type and tap send",
     "input_placeholder_disconnected": "Disconnected...",

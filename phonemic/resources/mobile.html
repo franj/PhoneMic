@@ -235,6 +235,294 @@
             border-top: 1px solid #e5e5e5;
             transition: none;
         }
+        /* ========== 附件面板：子面板切换（鼠标 / 键盘 / 文件） ========== */
+        #accessory-panel {
+            position: relative;
+            box-sizing: border-box;
+        }
+        #panel-tabs {
+            /* 悬浮在输入条（bottom-bar）上方，不占用面板空间 */
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 6px);
+            transform: translateX(-50%);
+            z-index: 20;
+            height: 34px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 8px;
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.96);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+        #panel-tabs.hidden {
+            display: none;
+        }
+        #panel-tabs .tab {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 40px;
+            height: 28px;
+            padding: 0 11px;
+            border: none;
+            border-radius: 14px;
+            background: transparent;
+            color: #555;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: transform 0.08s, background-color 0.15s, color 0.15s;
+        }
+        #panel-tabs .tab:active {
+            transform: scale(0.93);
+        }
+        #panel-tabs .tab.active {
+            background-color: #07c160;
+            color: #ffffff;
+        }
+        #panel-tabs .tab .ico {
+            font-size: 17px;
+            line-height: 1;
+        }
+        #panel-views {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            overflow: hidden;
+        }
+        .panel-view {
+            display: none;
+            height: 100%;
+            box-sizing: border-box;
+        }
+        .panel-view.active {
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-view .pv-hint {
+            height: 16px;
+            flex-shrink: 0;
+            text-align: center;
+            font-size: 10px;
+            color: #aaa;
+            line-height: 16px;
+        }
+
+        /* --- 鼠标子面板（摇杆原型，仅界面未对接功能） --- */
+        #view-mouse .pv-tuning {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px 2px;
+        }
+        #view-mouse .pv-tune {
+            flex: 1 1 0;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        #view-mouse .pv-tune label {
+            font-size: 11px;
+            color: #888;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        #view-mouse .pv-tune input[type="range"] {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 3px;
+            accent-color: #07c160;
+            cursor: pointer;
+            touch-action: none;
+        }
+        #view-mouse .pv-tune .val {
+            font-size: 11px;
+            font-weight: 600;
+            color: #07c160;
+            min-width: 30px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+        }
+        #view-mouse .pv-control {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: stretch;
+            justify-content: center;
+            gap: 8px;
+            padding: 4px 8px;
+        }
+        #view-mouse .pv-grid {
+            flex: 3 1 0;
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 6px;
+        }
+        #view-mouse .pv-grid button {
+            min-width: 0;
+            min-height: 0;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #555;
+            font-size: 12px;
+            line-height: 1.1;
+            cursor: pointer;
+            touch-action: none;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            transition: transform 0.06s, background-color 0.1s;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+        #view-mouse .pv-grid button:active {
+            background: #eef2ee;
+            transform: scale(0.94);
+        }
+        #view-mouse .pv-grid button.on {
+            background: #07c160;
+            border-color: #07c160;
+            color: #ffffff;
+        }
+        #view-mouse .pv-enter {
+            border-color: #07c160;
+            color: #07c160;
+            font-weight: 600;
+        }
+        #view-mouse .pv-stick {
+            flex: 2 2 0;
+            min-width: 104px;
+            align-self: stretch;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #view-mouse .pv-stick-base {
+            position: relative;
+            width: 112px;
+            height: 112px;
+            border-radius: 50%;
+            background: #ffffff;
+            border: 1.5px solid #dcdcdc;
+            box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.06);
+            touch-action: none;
+            flex-shrink: 0;
+        }
+        #view-mouse .pv-stick-base .pv-cross-h,
+        #view-mouse .pv-stick-base .pv-cross-v {
+            position: absolute;
+            background: #f0f0f0;
+        }
+        #view-mouse .pv-stick-base .pv-cross-h {
+            left: 14%;
+            right: 14%;
+            top: 50%;
+            height: 1px;
+            transform: translateY(-50%);
+        }
+        #view-mouse .pv-stick-base .pv-cross-v {
+            top: 14%;
+            bottom: 14%;
+            left: 50%;
+            width: 1px;
+            transform: translateX(-50%);
+        }
+        #view-mouse .pv-knob {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 34%;
+            height: 34%;
+            margin: -17%;
+            border-radius: 50%;
+            background: radial-gradient(circle at 35% 35%, #7bd8c6, #07c160);
+            border: 2px solid rgba(7, 193, 96, 0.6);
+            box-shadow: 0 0 16px rgba(7, 193, 96, 0.35);
+        }
+
+        /* --- 键盘子面板（预留） --- */
+        #view-keys .pv-keys {
+            flex: 1;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+            align-content: center;
+            padding: 6px 16px 4px;
+            box-sizing: border-box;
+        }
+        #view-keys .pv-keys button {
+            height: 34px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #444;
+            font-size: 13px;
+            cursor: pointer;
+            touch-action: manipulation;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            transition: transform 0.06s, background-color 0.1s;
+        }
+        #view-keys .pv-keys button:active {
+            background: #eef2ee;
+            transform: scale(0.95);
+        }
+        #view-keys .pv-keys .wide {
+            grid-column: 1 / -1;
+        }
+        #view-keys .pv-keys .mod {
+            background: #f7f7f9;
+            color: #666;
+            font-size: 11px;
+        }
+
+        /* --- 文件子面板（预留） --- */
+        #view-file .pv-files {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            padding: 8px 16px;
+        }
+        #view-file .pv-files button {
+            flex: 1;
+            max-width: 104px;
+            height: 96px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            border: 1px dashed #c8c8c8;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.7);
+            color: #666;
+            font-size: 12px;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: transform 0.06s, background-color 0.1s;
+        }
+        #view-file .pv-files button:active {
+            background: #eef2ee;
+            transform: scale(0.96);
+        }
+        #view-file .pv-files .ico {
+            font-size: 30px;
+            line-height: 1;
+        }
         .auto-mode #btn-send, .auto-mode #btn-plus {
             background-color: #ff9800;
             box-shadow: 0 2px 8px rgba(255,152,0,0.3);
@@ -338,8 +626,92 @@
         </div>
         <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="hamburger" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
         <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
+        <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
+        <div id="panel-tabs" class="hidden">
+            <button type="button" class="tab active" data-panel="mouse" aria-label="鼠标"><span class="ico">🖱️</span></button>
+            <button type="button" class="tab" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
+            <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
+        </div>
     </div>
-    <div id="accessory-panel" data-page-node-id="TtXHgO8KQFQHMPE6e9Hxhf"></div>
+    <div id="accessory-panel">
+        <div id="panel-views">
+            <!-- 鼠标子面板（摇杆原型，功能待对接） -->
+            <section id="view-mouse" class="panel-view active">
+                <div class="pv-tuning">
+                    <div class="pv-tune">
+                        <label for="tune-speed" id="lbl-tune-speed">速度</label>
+                        <input id="tune-speed" type="range" min="200" max="2500" value="1100">
+                        <span class="val" id="val-tune-speed">1100</span>
+                    </div>
+                    <div class="pv-tune">
+                        <label for="tune-dead" id="lbl-tune-dead">死区</label>
+                        <input id="tune-dead" type="range" min="0" max="30" value="12">
+                        <span class="val" id="val-tune-dead">0.12</span>
+                    </div>
+                </div>
+                <div class="pv-control">
+                    <div class="pv-stick">
+                        <div class="pv-stick-base" id="pv-stick-base">
+                            <span class="pv-cross-h"></span>
+                            <span class="pv-cross-v"></span>
+                            <div class="pv-knob" id="pv-knob"></div>
+                        </div>
+                    </div>
+                    <div class="pv-grid">
+                        <button type="button" id="btn-pv-left">左键</button>
+                        <button type="button" id="btn-pv-right">右键</button>
+                        <button type="button" id="btn-pv-del">Del</button>
+                        <button type="button" id="btn-pv-enter" class="pv-enter">Enter</button>
+                        <button type="button" id="btn-pv-double">双击</button>
+                        <button type="button" id="btn-pv-drag">拖拽</button>
+                        <button type="button" id="btn-pv-esc">Esc</button>
+                        <button type="button" id="btn-pv-shiftenter" class="pv-enter" title="Shift+Enter">⇧↵</button>
+                        <button type="button" id="btn-pv-wheelup">滚↑</button>
+                        <button type="button" id="btn-pv-redo">Ctrl+Y</button>
+                        <button type="button" id="btn-pv-up">↑</button>
+                        <button type="button" id="btn-pv-undo">Ctrl+Z</button>
+                        <button type="button" id="btn-pv-wheeldown">滚↓</button>
+                        <button type="button" id="btn-pv-arrleft">←</button>
+                        <button type="button" id="btn-pv-arrdown">↓</button>
+                        <button type="button" id="btn-pv-arrright">→</button>
+                    </div>
+                </div>
+                <div class="pv-hint" id="hint-mouse"></div>
+            </section>
+            <!-- 键盘子面板（预留） -->
+            <section id="view-keys" class="panel-view">
+                <div class="pv-keys">
+                    <button type="button" class="mod">Esc</button>
+                    <button type="button" class="mod">Tab</button>
+                    <button type="button" class="mod">Shift</button>
+                    <button type="button" class="mod">Ctrl</button>
+                    <button type="button" class="mod">Alt</button>
+                    <button type="button" class="mod">Meta</button>
+                    <button type="button">⌫</button>
+                    <button type="button">Del</button>
+                    <button type="button">Home</button>
+                    <button type="button">End</button>
+                    <button type="button">PgUp</button>
+                    <button type="button">PgDn</button>
+                    <button type="button" class="wide">␣</button>
+                    <button type="button">←</button>
+                    <button type="button">↑</button>
+                    <button type="button">↓</button>
+                    <button type="button">→</button>
+                </div>
+                <div class="pv-hint" id="hint-keys"></div>
+            </section>
+            <!-- 文件子面板（预留） -->
+            <section id="view-file" class="panel-view">
+                <div class="pv-files">
+                    <button type="button"><span class="ico">🖼️</span>图片</button>
+                    <button type="button"><span class="ico">📄</span>文件</button>
+                    <button type="button"><span class="ico">📷</span>拍照</button>
+                </div>
+                <div class="pv-hint" id="hint-file"></div>
+            </section>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -1301,6 +1673,7 @@
             this.unifiedVoiceObserver = null;
             this.btnPlus = document.getElementById('btn-plus');
             this.panel = window._accessoryPanel;
+            this.panelTabs = document.getElementById('panel-tabs');
 
             this.btnClear.setAttribute('aria-label', t('btn_clear_aria'));
             this.initEventListeners();
@@ -1435,18 +1808,20 @@
         }
         showAccessoryPanel() {
             if (this.panel.isVisible) {
-                // 面板可见 → 切换到键盘（聚焦输入框）
-                this.panel.hide();
+                // 面板可见 → 收起面板（回到键盘输入）
+                this.hideAccessoryPanel();
                 this.inputBox.focus();
                 return;
             }
-            // 面板不可见 → 显示面板（收起键盘）
+            // 面板不可见 → 显示面板（收起键盘），并露出子面板切换条
             this.panel.show();
+            this.panelTabs.classList.remove('hidden');
             this.inputBox.blur();
             if (window._adjustViewport) window._adjustViewport();
         }
         hideAccessoryPanel() {
-            // 输入框获得焦点 → 面板应该隐藏
+            // 输入框获得焦点 → 面板与切换条一起隐藏
+            this.panelTabs.classList.add('hidden');
             this.panel.hide();
         }
         onConnectionChange(connected, message, type) {
@@ -1499,6 +1874,237 @@
             window.addEventListener('popstate', resetViewport);
         }
     }
+
+    // ========== 附件面板：子面板切换（鼠标 / 键盘 / 文件） ==========
+    (function () {
+        const tabsEl = document.getElementById('panel-tabs');
+        const tabButtons = tabsEl ? Array.prototype.slice.call(tabsEl.querySelectorAll('.tab')) : [];
+        const views = Array.prototype.slice.call(document.querySelectorAll('#accessory-panel .panel-view'));
+
+        function activatePanel(name) {
+            tabButtons.forEach(function (b) {
+                b.classList.toggle('active', b.dataset.panel === name);
+            });
+            views.forEach(function (v) {
+                v.classList.toggle('active', v.id === 'view-' + name);
+            });
+        }
+        window._activatePanel = activatePanel; // 供调试与后续对接使用
+
+        tabButtons.forEach(function (b) {
+            b.addEventListener('click', function (e) {
+                e.preventDefault();
+                activatePanel(this.dataset.panel);
+                if (navigator.vibrate) navigator.vibrate(15);
+            });
+        });
+
+        // 用 i18n 文案覆盖标签 / 提示 / HUD 词（键缺失时保留 HTML 中文兜底）
+        const i18nText = [
+            ['hint-mouse', 'panel_hint_mouse', false],
+            ['hint-keys', 'panel_hint_keys', false],
+            ['hint-file', 'panel_hint_file', false],
+            ['lbl-tune-speed', 'panel_tune_speed', false],
+            ['lbl-tune-dead', 'panel_tune_dead', false]
+        ];
+        if (window.i18n) {
+            i18nText.forEach(function (item) {
+                const text = window.i18n[item[1]];
+                if (!text) return;
+                const el = document.getElementById(item[0]);
+                if (!el) return;
+                el.textContent = text;
+                if (item[2] && el.parentElement) el.parentElement.setAttribute('aria-label', text);
+            });
+        }
+    })();
+
+    // ========== 鼠标子面板：摇杆交互（仅本地可视化，功能待对接，不发 WS） ==========
+    (function () {
+        const base = document.getElementById('pv-stick-base');
+        if (!base) return;
+        const knob = document.getElementById('pv-knob');
+
+        // 参数（默认值与 mouse-joystick-sample 一致；顶部滑块实时可调）
+        let maxSpeed = 1100;   // px/s 满推速度
+        let dead = 0.12;       // 死区比例
+
+        const speedEl = document.getElementById('tune-speed');
+        const speedVal = document.getElementById('val-tune-speed');
+        const deadEl = document.getElementById('tune-dead');
+        const deadVal = document.getElementById('val-tune-dead');
+        if (speedEl) {
+            maxSpeed = +speedEl.value || maxSpeed;
+            speedEl.addEventListener('input', function () {
+                maxSpeed = +this.value;
+                if (speedVal) speedVal.textContent = maxSpeed;
+            });
+        }
+        if (deadEl) {
+            dead = deadEl.value ? (+deadEl.value / 100) : dead;
+            deadEl.addEventListener('input', function () {
+                dead = +this.value / 100;
+                if (deadVal) deadVal.textContent = dead.toFixed(2);
+            });
+        }
+
+        let active = false;
+        let curDX = 0, curDY = 0, mag = 0;
+        let rafId = null;
+        let lastT = 0;
+
+        // 摇杆是速度模型：按住不动也应持续移动。rAF 帧循环按 dt 持续发位移
+        // （满推速度 × 扣除死区的有效幅度 × dt），pointermove 只负责 knob 视觉跟随与偏移采样
+        function tick(t) {
+            if (!active) return;
+            const dt = Math.min(50, t - lastT) / 1000;   // 上限 50ms，防切后台回来跳变
+            lastT = t;
+            const dist = Math.hypot(curDX, curDY);
+            if (dist > 0 && mag > dead) {
+                const eff = (mag - dead) / (1 - dead);   // 扣除死区的有效幅度 0~1
+                const step = maxSpeed * eff * dt;        // 本帧应移动的像素
+                if (window._onMouseStick) {
+                    window._onMouseStick(curDX / dist * step, curDY / dist * step, mag);
+                }
+            }
+            rafId = requestAnimationFrame(tick);
+        }
+
+        function updateStick(clientX, clientY) {
+            const rect = base.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let dx = clientX - cx;
+            let dy = clientY - cy;
+            const dist = Math.hypot(dx, dy);
+            const maxR = Math.max(8, (rect.width - knob.offsetWidth) / 2);
+            if (dist > maxR) {
+                dx = dx / dist * maxR;
+                dy = dy / dist * maxR;
+            }
+            curDX = dx;
+            curDY = dy;
+            mag = Math.min(1, dist / maxR);
+            knob.style.transition = 'none';
+            knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        }
+
+        function endStick() {
+            if (!active) return;
+            active = false;
+            if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+            curDX = curDY = 0;
+            mag = 0;
+            knob.style.transition = 'transform 0.18s ease-out';
+            knob.style.transform = 'translate(0,0)';
+        }
+
+        base.addEventListener('pointerdown', function (e) {
+            active = true;
+            try { base.setPointerCapture(e.pointerId); } catch (err) {}
+            updateStick(e.clientX, e.clientY);
+            lastT = performance.now();
+            rafId = requestAnimationFrame(tick);
+            e.preventDefault();
+        });
+        base.addEventListener('pointermove', function (e) {
+            if (!active) return;
+            updateStick(e.clientX, e.clientY);
+            e.preventDefault();
+        });
+        base.addEventListener('pointerup', endStick);
+        base.addEventListener('pointercancel', endStick);
+
+        // 自适应尺寸：底座尽量大（占满 .pv-stick 可用区域，保持圆形）
+        function fitStick() {
+            const stick = base.parentElement;
+            if (!stick) return;
+            const w = stick.clientWidth;
+            const h = stick.clientHeight;
+            if (w < 20 || h < 20) return;   // 面板收起/未激活时跳过
+            const s = Math.max(88, Math.min(w, h) - 8);
+            base.style.width = s + 'px';
+            base.style.height = s + 'px';
+        }
+        if (typeof ResizeObserver !== 'undefined') {
+            const ro = new ResizeObserver(fitStick);
+            ro.observe(base.parentElement);
+        }
+        window.addEventListener('resize', fitStick);
+        fitStick();
+
+        // 按钮动作：仅通过预留钩子对外发事件；未对接 WS 前钩子无监听者，不产生任何网络流量
+        function emit(meta) {
+            if (window._onMouseAction) window._onMouseAction(meta);
+        }
+        function buzz() {
+            if (navigator.vibrate) navigator.vibrate(10);
+        }
+
+        // 单击类按钮（点一下发一次）
+        const clickBtns = {
+            'btn-pv-left':       { a: 'click', btn: 'left' },
+            'btn-pv-right':      { a: 'click', btn: 'right' },
+            'btn-pv-double':     { a: 'double', btn: 'left' },
+            'btn-pv-del':        { a: 'key', key: 'delete' },
+            'btn-pv-enter':      { a: 'key', key: 'enter' },
+            'btn-pv-shiftenter': { a: 'key', key: 'shift+enter' },
+            'btn-pv-esc':        { a: 'key', key: 'esc' },
+            'btn-pv-redo':       { a: 'key', key: 'ctrl+y' },
+            'btn-pv-undo':       { a: 'key', key: 'ctrl+z' },
+            'btn-pv-up':         { a: 'key', key: 'up' },
+            'btn-pv-arrdown':    { a: 'key', key: 'down' },
+            'btn-pv-arrleft':    { a: 'key', key: 'left' },
+            'btn-pv-arrright':   { a: 'key', key: 'right' }
+        };
+        Object.keys(clickBtns).forEach(function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('pointerdown', function (e) {
+                e.preventDefault();
+                buzz();
+                emit(clickBtns[id]);
+            });
+        });
+
+        // 拖拽开关：非按下态 → 发 mouse down；按下态 → 发 mouse up（.on 类反映状态）
+        const dragBtn = document.getElementById('btn-pv-drag');
+        let dragOn = false;
+        if (dragBtn) {
+            dragBtn.addEventListener('pointerdown', function (e) {
+                e.preventDefault();
+                buzz();
+                dragOn = !dragOn;
+                dragBtn.classList.toggle('on', dragOn);
+                emit({ a: dragOn ? 'down' : 'up', btn: 'left' });
+            });
+        }
+
+        // 滚轮：点一下滚一格；按住先延迟 350ms，再每 140ms 连滚
+        [['btn-pv-wheelup', -120], ['btn-pv-wheeldown', 120]].forEach(function (pair) {
+            const el = document.getElementById(pair[0]);
+            if (!el) return;
+            const delta = pair[1];
+            let delayTimer = null, repeatTimer = null;
+            function stopRepeat() {
+                if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+                if (repeatTimer) { clearInterval(repeatTimer); repeatTimer = null; }
+            }
+            el.addEventListener('pointerdown', function (e) {
+                e.preventDefault();
+                buzz();
+                emit({ a: 'wheel', delta: delta });
+                delayTimer = setTimeout(function () {
+                    repeatTimer = setInterval(function () {
+                        emit({ a: 'wheel', delta: delta });
+                    }, 140);
+                }, 350);
+            });
+            el.addEventListener('pointerup', stopRepeat);
+            el.addEventListener('pointercancel', stopRepeat);
+            el.addEventListener('pointerleave', stopRepeat);
+        });
+    })();
 
     // ========== 7. 主程序入口 ==========
     window.onload = async () => {

@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>摇杆鼠标 · 齿轮设置</title>
+    <style>
+        /* ===== 全局重置 & 主题变量 ===== */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        :root {
+            --bg-primary: #1c1c20;
+            --bg-secondary: #26262c;
+            --bg-control: #1c1c20;
+            --bg-surface: #2b2b33;
+            --bg-surface-lighter: #383840;
+            --border-color: #3a3a42;
+            --border-light: #3d3d48;
+            --text-primary: #ddd;
+            --text-secondary: #9aa;
+            --text-muted: #666;
+            --accent-cyan: #4fd1c5;
+            --accent-orange: #f6ad55;
+            --accent-purple: #c9a0ff;
+            --accent-green: #7bcfa6;
+            --accent-pink: #ff7eb3;
+            --shadow-color: rgba(0, 0, 0, 0.4);
+            --ripple-border: rgba(255, 255, 255, 0.85);
+            --knob-bg: radial-gradient(circle at 35% 35%, rgba(79, 209, 197, 0.6), rgba(79, 209, 197, 0.2));
+            --knob-border: rgba(79, 209, 197, 0.7);
+            --hud-color: #9aa;
+            --hud-val: #4fd1c5;
+            --btn-text: #ccc;
+            --btn-bg: #2b2b33;
+            --btn-active: #3d3d4a;
+            --slider-track: #444;
+            --slider-thumb: #4fd1c5;
+            --indicator-bg: rgba(0, 0, 0, 0.7);
+            --thumb-shadow: rgba(0, 0, 0, 0.3);
+            --theme-btn-bg: rgba(255, 255, 255, 0.08);
+            --theme-btn-border: rgba(255, 255, 255, 0.15);
+            --gear-color: #aaa;
+            --overlay-bg: rgba(0, 0, 0, 0.75);
+            --overlay-border: rgba(255, 255, 255, 0.1);
+            --close-btn-bg: rgba(255, 255, 255, 0.08);
+            --close-btn-hover: rgba(255, 255, 255, 0.15);
+        }
+
+        [data-theme="light"] {
+            --bg-primary: #f0f0f4;
+            --bg-secondary: #e8e8ee;
+            --bg-control: #f0f0f4;
+            --bg-surface: #ffffff;
+            --bg-surface-lighter: #f5f5f8;
+            --border-color: #c8c8d0;
+            --border-light: #d0d0d8;
+            --text-primary: #222;
+            --text-secondary: #556;
+            --text-muted: #888;
+            --accent-cyan: #2a9d8f;
+            --accent-orange: #e76f51;
+            --accent-purple: #7b4c9e;
+            --accent-green: #4a9e6e;
+            --accent-pink: #d45a8a;
+            --shadow-color: rgba(0, 0, 0, 0.12);
+            --ripple-border: rgba(30, 30, 40, 0.7);
+            --knob-bg: radial-gradient(circle at 35% 35%, rgba(42, 157, 143, 0.4), rgba(42, 157, 143, 0.1));
+            --knob-border: rgba(42, 157, 143, 0.6);
+            --hud-color: #667;
+            --hud-val: #2a9d8f;
+            --btn-text: #333;
+            --btn-bg: #ffffff;
+            --btn-active: #d8d8e0;
+            --slider-track: #bbb;
+            --slider-thumb: #2a9d8f;
+            --indicator-bg: rgba(255, 255, 255, 0.9);
+            --thumb-shadow: rgba(0, 0, 0, 0.15);
+            --theme-btn-bg: rgba(0, 0, 0, 0.06);
+            --theme-btn-border: rgba(0, 0, 0, 0.12);
+            --gear-color: #666;
+            --overlay-bg: rgba(255, 255, 255, 0.92);
+            --overlay-border: rgba(0, 0, 0, 0.08);
+            --close-btn-bg: rgba(0, 0, 0, 0.05);
+            --close-btn-hover: rgba(0, 0, 0, 0.10);
+        }
+
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            transition: background 0.25s, color 0.25s;
+        }
+
+        /* ===== 屏幕 ===== */
+        #screen {
+            position: relative;
+            width: 100%;
+            height: calc(100% - 200px);
+            min-height: 100px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            overflow: hidden;
+            transition: background 0.25s, border-color 0.25s;
+        }
+
+        #cursor {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 16px;
+            height: 16px;
+            margin: -8px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            box-shadow: 0 0 10px var(--accent-cyan);
+            will-change: transform;
+            pointer-events: none;
+            z-index: 2;
+            transition: background 0.2s, box-shadow 0.2s;
+        }
+        #cursor.dragging {
+            background: var(--accent-orange);
+            box-shadow: 0 0 14px var(--accent-orange);
+        }
+
+        .ripple {
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            margin: -11px;
+            border-radius: 50%;
+            border: 2.5px solid var(--ripple-border);
+            pointer-events: none;
+            animation: rippleAnim .4s ease-out forwards;
+            z-index: 3;
+        }
+        .ripple.right {
+            border-color: var(--accent-orange);
+        }
+        @keyframes rippleAnim {
+            to {
+                transform: scale(3.8);
+                opacity: 0;
+            }
+        }
+
+        /* 按键反馈 */
+        .key-feedback {
+            position: absolute;
+            pointer-events: none;
+            z-index: 6;
+            background: var(--indicator-bg);
+            color: var(--text-primary);
+            padding: 3px 12px;
+            border-radius: 14px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid var(--border-light);
+            backdrop-filter: blur(4px);
+            transition: opacity 0.3s, transform 0.3s;
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(0.8);
+        }
+        .key-feedback.show {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+        }
+        .key-feedback.hide {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(1.2);
+        }
+
+        /* ===== HUD ===== */
+        #hud {
+            position: absolute;
+            top: 6px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 2px 14px;
+            font-size: 11px;
+            line-height: 1.5;
+            color: var(--hud-color);
+            z-index: 5;
+            pointer-events: none;
+        }
+        #hud .val {
+            color: var(--hud-val);
+            font-variant-numeric: tabular-nums;
+            transition: color 0.25s;
+        }
+        #hud .hud-spacer {
+            flex: 1;
+            min-width: 12px;
+        }
+
+        #theme-toggle {
+            pointer-events: auto;
+            background: var(--theme-btn-bg);
+            border: 1px solid var(--theme-btn-border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 15px;
+            padding: 0 8px;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: background 0.2s, border-color 0.2s, color 0.2s, transform 0.08s;
+            line-height: 1.6;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+            flex-shrink: 0;
+        }
+        #theme-toggle:active {
+            transform: scale(0.92);
+            background: var(--btn-active);
+        }
+
+        /* ===== 控制区 ===== */
+        #control {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 200px;
+            background: var(--bg-control);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 4px 6px 4px 6px;
+            transition: background 0.25s, border-color 0.25s;
+            overflow: hidden;
+        }
+
+        /* 主控制行 */
+        #main-row {
+            display: flex;
+            flex: 1;
+            gap: 4px;
+            min-height: 0;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        /* 左右按钮列 */
+        .btn-col {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            justify-content: center;
+            flex: 0 0 auto;
+            width: 48px;
+        }
+        .btn-col button {
+            flex: 1;
+            min-height: 30px;
+            border-radius: 6px;
+            border: 1px solid var(--border-light);
+            background: var(--btn-bg);
+            color: var(--btn-text);
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            touch-action: none;
+            transition: background 0.08s, border-color 0.08s, transform 0.06s, color 0.2s, background 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 3px;
+            letter-spacing: 0.2px;
+            white-space: nowrap;
+        }
+        .btn-col button:active {
+            background: var(--btn-active);
+            transform: scale(0.94);
+        }
+        .btn-col button#btn-left {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+        .btn-col button#btn-left:active {
+            background: var(--accent-cyan);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-right {
+            border-color: var(--accent-orange);
+            color: var(--accent-orange);
+        }
+        .btn-col button#btn-right:active {
+            background: var(--accent-orange);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-double {
+            border-color: var(--accent-purple);
+            color: var(--accent-purple);
+        }
+        .btn-col button#btn-double:active {
+            background: var(--accent-purple);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-drag.on {
+            background: var(--accent-orange);
+            color: var(--bg-primary);
+            border-color: var(--accent-orange);
+        }
+        .btn-col button.key-btn {
+            border-color: var(--border-light);
+            color: var(--text-secondary);
+            font-size: 10px;
+        }
+        .btn-col button.key-btn:active {
+            background: var(--btn-active);
+        }
+        .btn-col button.special-btn {
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            font-size: 10px;
+        }
+        .btn-col button.special-btn:active {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+        }
+        .btn-col button.undo-btn {
+            border-color: var(--accent-pink);
+            color: var(--accent-pink);
+            font-size: 10px;
+        }
+        .btn-col button.undo-btn:active {
+            background: var(--accent-pink);
+            color: var(--bg-primary);
+        }
+
+        /* 右侧额外列（Enter, Ctrl+Z, 齿轮） */
+        .btn-col-right {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            justify-content: center;
+            flex: 0 0 auto;
+            width: 48px;
+        }
+        .btn-col-right button {
+            flex: 1;
+            min-height: 30px;
+            border-radius: 6px;
+            border: 1px solid var(--border-light);
+            background: var(--btn-bg);
+            color: var(--btn-text);
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            touch-action: none;
+            transition: background 0.08s, border-color 0.08s, transform 0.06s, color 0.2s, background 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 2px;
+            letter-spacing: 0.2px;
+            white-space: nowrap;
+        }
+        .btn-col-right button:active {
+            background: var(--btn-active);
+            transform: scale(0.94);
+        }
+        .btn-col-right button.enter-btn {
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            font-size: 11px;
+            font-weight: 600;
+        }
+        .btn-col-right button.enter-btn:active {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+        }
+        .btn-col-right button.undo-btn {
+            border-color: var(--accent-pink);
+            color: var(--accent-pink);
+            font-size: 9px;
+        }
+        .btn-col-right button.undo-btn:active {
+            background: var(--accent-pink);
+            color: var(--bg-primary);
+        }
+        .btn-col-right button#btn-gear {
+            border-color: var(--border-light);
+            color: var(--gear-color);
+            font-size: 16px;
+            line-height: 1;
+            transition: background 0.2s, border-color 0.2s, transform 0.2s;
+        }
+        .btn-col-right button#btn-gear:active {
+            transform: scale(0.92) rotate(30deg);
+        }
+        .btn-col-right button#btn-gear.active {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+            background: rgba(79, 209, 197, 0.12);
+        }
+
+        /* 摇杆 */
+        #stick-col {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 2px;
+            position: relative;
+        }
+        #stick-base {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, .04);
+            border: 2px solid rgba(255, 255, 255, .10);
+            position: relative;
+            touch-action: none;
+            box-shadow: inset 0 0 30px var(--shadow-color);
+            flex-shrink: 0;
+            transition: border-color 0.25s, box-shadow 0.25s, width 0.2s, height 0.2s;
+        }
+        [data-theme="light"] #stick-base {
+            background: rgba(0, 0, 0, .04);
+            border-color: rgba(0, 0, 0, .12);
+        }
+        #stick-base .cross-h {
+            position: absolute;
+            left: 12%;
+            right: 12%;
+            top: 50%;
+            height: 1px;
+            background: rgba(255, 255, 255, .05);
+            transform: translateY(-50%);
+        }
+        #stick-base .cross-v {
+            position: absolute;
+            top: 12%;
+            bottom: 12%;
+            left: 50%;
+            width: 1px;
+            background: rgba(255, 255, 255, .05);
+            transform: translateX(-50%);
+        }
+        #stick-knob {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 46px;
+            height: 46px;
+            margin: -23px;
+            border-radius: 50%;
+            background: var(--knob-bg);
+            border: 2px solid var(--knob-border);
+            will-change: transform;
+            box-shadow: 0 0 20px rgba(79, 209, 197, 0.12);
+            transition: border-color 0.15s, box-shadow 0.15s, background 0.25s, border-color 0.25s, width 0.2s, height 0.2s, margin 0.2s;
+        }
+        #stick-knob.active {
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 30px rgba(79, 209, 197, 0.25);
+        }
+
+        /* ===== 设置悬浮层 ===== */
+        #settings-overlay {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%) scale(0.9);
+            background: var(--overlay-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 18px;
+            border: 1px solid var(--overlay-border);
+            padding: 16px 20px 20px 20px;
+            z-index: 20;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s cubic-bezier(.34, 1.56, .64, 1),
+                        transform 0.3s cubic-bezier(.34, 1.56, .64, 1),
+                        background 0.25s, border-color 0.25s;
+            box-shadow: 0 12px 60px var(--shadow-color);
+            min-width: 190px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        #settings-overlay.visible {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translate(-50%, -50%) scale(1);
+        }
+
+        /* 设置面板头部（标题 + 关闭按钮） */
+        .setting-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+            gap: 12px;
+        }
+        .setting-header .setting-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+        }
+        .setting-header #btn-settings-close {
+            flex: 0 0 auto;
+            width: 36px;
+            height: 36px;
+            border: none;
+            border-radius: 50%;
+            background: var(--close-btn-bg);
+            color: var(--text-primary);
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: background 0.15s, transform 0.08s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+        .setting-header #btn-settings-close:active {
+            transform: scale(0.88);
+            background: var(--close-btn-hover);
+        }
+        .setting-header #btn-settings-close:hover {
+            background: var(--close-btn-hover);
+        }
+
+        .settings-body {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .settings-body .setting-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .settings-body .setting-row label {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            min-width: 36px;
+        }
+        .settings-body .setting-row input[type="range"] {
+            flex: 1;
+            height: 3px;
+            background: var(--slider-track);
+            border-radius: 2px;
+            -webkit-appearance: none;
+            appearance: none;
+            outline: none;
+            transition: background 0.25s;
+            min-width: 80px;
+        }
+        .settings-body .setting-row input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--slider-thumb);
+            cursor: pointer;
+            border: none;
+            transition: background 0.25s;
+        }
+        .settings-body .setting-row input[type="range"]::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--slider-thumb);
+            cursor: pointer;
+            border: none;
+        }
+        .settings-body .setting-row .val {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--hud-val);
+            min-width: 32px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            transition: color 0.25s;
+        }
+
+        /* 底部提示 */
+        #hint {
+            position: absolute;
+            bottom: 2px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 8px;
+            color: var(--text-muted);
+            pointer-events: none;
+            letter-spacing: 0.2px;
+            transition: color 0.25s;
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 580px) {
+            #control {
+                height: 180px;
+                padding: 3px 4px 3px 4px;
+            }
+            #screen {
+                height: calc(100% - 180px);
+            }
+            #main-row {
+                gap: 3px;
+            }
+            .btn-col {
+                width: 40px;
+                gap: 3px;
+            }
+            .btn-col button {
+                font-size: 9px;
+                min-height: 26px;
+                border-radius: 4px;
+            }
+            .btn-col-right {
+                width: 40px;
+                gap: 3px;
+            }
+            .btn-col-right button {
+                font-size: 9px;
+                min-height: 26px;
+                border-radius: 4px;
+            }
+            .btn-col-right button#btn-gear {
+                font-size: 14px;
+            }
+            #stick-base {
+                width: 100px;
+                height: 100px;
+            }
+            #stick-knob {
+                width: 38px;
+                height: 38px;
+                margin: -19px;
+                border-width: 1.5px;
+            }
+            #hud {
+                font-size: 10px;
+                gap: 1px 10px;
+                top: 4px;
+                left: 6px;
+                right: 6px;
+            }
+            #hint {
+                font-size: 7px;
+            }
+            #theme-toggle {
+                font-size: 13px;
+                height: 22px;
+                padding: 0 6px;
+            }
+            #settings-overlay {
+                padding: 14px 16px 16px 16px;
+                min-width: 160px;
+                gap: 12px;
+                border-radius: 14px;
+            }
+            .setting-header .setting-title {
+                font-size: 12px;
+            }
+            .setting-header #btn-settings-close {
+                width: 32px;
+                height: 32px;
+                font-size: 16px;
+            }
+            .settings-body .setting-row label {
+                font-size: 11px;
+                min-width: 30px;
+            }
+            .settings-body .setting-row .val {
+                font-size: 11px;
+                min-width: 28px;
+            }
+        }
+
+        @media (max-width: 440px) {
+            #control {
+                height: 160px;
+                padding: 2px 3px 2px 3px;
+            }
+            #screen {
+                height: calc(100% - 160px);
+            }
+            #main-row {
+                gap: 2px;
+            }
+            .btn-col {
+                width: 34px;
+                gap: 2px;
+            }
+            .btn-col button {
+                font-size: 8px;
+                min-height: 22px;
+                border-radius: 3px;
+                padding: 0 1px;
+            }
+            .btn-col-right {
+                width: 34px;
+                gap: 2px;
+            }
+            .btn-col-right button {
+                font-size: 8px;
+                min-height: 22px;
+                border-radius: 3px;
+                padding: 0 1px;
+            }
+            .btn-col-right button#btn-gear {
+                font-size: 12px;
+            }
+            #stick-base {
+                width: 82px;
+                height: 82px;
+            }
+            #stick-knob {
+                width: 30px;
+                height: 30px;
+                margin: -15px;
+                border-width: 1.5px;
+            }
+            #hud {
+                font-size: 8px;
+                gap: 1px 6px;
+                top: 3px;
+                left: 4px;
+                right: 4px;
+            }
+            #hint {
+                font-size: 6px;
+                bottom: 1px;
+            }
+            #theme-toggle {
+                font-size: 11px;
+                height: 18px;
+                padding: 0 4px;
+            }
+            #stick-base .cross-h,
+            #stick-base .cross-v {
+                display: none;
+            }
+            #settings-overlay {
+                padding: 10px 12px 14px 12px;
+                min-width: 130px;
+                gap: 10px;
+                border-radius: 12px;
+            }
+            .setting-header .setting-title {
+                font-size: 11px;
+            }
+            .setting-header #btn-settings-close {
+                width: 28px;
+                height: 28px;
+                font-size: 14px;
+            }
+            .settings-body .setting-row {
+                gap: 8px;
+            }
+            .settings-body .setting-row label {
+                font-size: 10px;
+                min-width: 24px;
+            }
+            .settings-body .setting-row .val {
+                font-size: 10px;
+                min-width: 24px;
+            }
+            .settings-body .setting-row input[type="range"] {
+                min-width: 50px;
+            }
+        }
+
+        @media (max-height: 620px) and (min-width: 580px) {
+            #control {
+                height: 170px;
+            }
+            #screen {
+                height: calc(100% - 170px);
+            }
+            #stick-base {
+                width: 100px;
+                height: 100px;
+            }
+            #stick-knob {
+                width: 38px;
+                height: 38px;
+                margin: -19px;
+            }
+            .btn-col {
+                width: 40px;
+            }
+            .btn-col-right {
+                width: 40px;
+            }
+            .btn-col button {
+                min-height: 24px;
+                font-size: 9px;
+            }
+            .btn-col-right button {
+                min-height: 24px;
+                font-size: 9px;
+            }
+            #settings-overlay {
+                padding: 12px 16px 14px 16px;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ====== 屏幕 ====== -->
+    <div id="screen">
+        <div id="hud">
+            <div>幅度 <span class="val" id="mag">0.00</span></div>
+            <div>速度 <span class="val" id="spd">0</span> px/s</div>
+            <span class="hud-spacer"></span>
+            <button id="theme-toggle" title="切换暗色/亮色主题">🌓</button>
+        </div>
+        <div id="cursor"></div>
+        <div id="hint">摇杆移动 · 轻点底盘左键 · 齿轮⚙️调参数</div>
+    </div>
+
+    <!-- ====== 控制区 ====== -->
+    <div id="control">
+        <!-- 主控制行 -->
+        <div id="main-row">
+            <!-- 左列：左键、拖拽、双击 -->
+            <div class="btn-col">
+                <button id="btn-left">左键</button>
+                <button id="btn-drag">拖拽</button>
+                <button id="btn-double">双击</button>
+            </div>
+
+            <!-- 摇杆 -->
+            <div id="stick-col">
+                <div id="stick-base">
+                    <div class="cross-h"></div>
+                    <div class="cross-v"></div>
+                    <div id="stick-knob"></div>
+                </div>
+                <!-- 设置悬浮层 -->
+                <div id="settings-overlay">
+                    <div class="setting-header">
+                        <span class="setting-title">⚙️ 摇杆参数</span>
+                        <button id="btn-settings-close" aria-label="关闭设置">✕</button>
+                    </div>
+                    <div class="settings-body">
+                        <div class="setting-row">
+                            <label>速度</label>
+                            <input id="maxSpd" type="range" min="200" max="2500" value="1100">
+                            <span class="val" id="maxSpdV">1100</span>
+                        </div>
+                        <div class="setting-row">
+                            <label>死区</label>
+                            <input id="dead" type="range" min="0" max="30" value="12">
+                            <span class="val" id="deadV">0.12</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右列：右键、PgUp、PgDn -->
+            <div class="btn-col">
+                <button id="btn-right">右键</button>
+                <button id="btn-pgup" class="key-btn">PgUp</button>
+                <button id="btn-pgdown" class="key-btn">PgDn</button>
+            </div>
+
+            <!-- 右侧额外列：Enter、Ctrl+Z、齿轮 -->
+            <div class="btn-col-right">
+                <button id="btn-enter" class="enter-btn">↵ Enter</button>
+                <button id="btn-undo" class="undo-btn">↩ Ctrl+Z</button>
+                <button id="btn-gear" title="速度/死区设置">⚙️</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            // ===== DOM 引用 =====
+            const screen = document.getElementById('screen');
+            const cursor = document.getElementById('cursor');
+            const base = document.getElementById('stick-base');
+            const knob = document.getElementById('stick-knob');
+            const magEl = document.getElementById('mag');
+            const spdEl = document.getElementById('spd');
+            const btnDrag = document.getElementById('btn-drag');
+            const btnLeft = document.getElementById('btn-left');
+            const btnRight = document.getElementById('btn-right');
+            const btnDouble = document.getElementById('btn-double');
+            const btnPgUp = document.getElementById('btn-pgup');
+            const btnPgDown = document.getElementById('btn-pgdown');
+            const btnEnter = document.getElementById('btn-enter');
+            const btnUndo = document.getElementById('btn-undo');
+            const btnGear = document.getElementById('btn-gear');
+            const btnSettingsClose = document.getElementById('btn-settings-close');
+            const themeToggle = document.getElementById('theme-toggle');
+
+            // 设置滑块
+            const maxSpdEl = document.getElementById('maxSpd');
+            const maxSpdV = document.getElementById('maxSpdV');
+            const deadEl = document.getElementById('dead');
+            const deadV = document.getElementById('deadV');
+            const settingsOverlay = document.getElementById('settings-overlay');
+
+            // ===== 状态 =====
+            const R = (base.clientWidth - knob.clientWidth) / 2;
+            let maxSpeed = +maxSpdEl.value;
+            let dead = +deadEl.value / 100;
+            let cursorX = screen.clientWidth / 2;
+            let cursorY = screen.clientHeight / 2;
+            let dirX = 0,
+                dirY = 0,
+                mag = 0,
+                active = false;
+            let dragging = false;
+            let settingsVisible = false;
+
+            let downX = 0,
+                downY = 0,
+                downT = 0;
+
+            // ===== 主题 =====
+            function getTheme() {
+                return document.documentElement.getAttribute('data-theme') || 'dark';
+            }
+
+            function setTheme(theme) {
+                document.documentElement.setAttribute('data-theme', theme);
+                localStorage.setItem('joystick-theme', theme);
+                themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
+            }
+
+            const savedTheme = localStorage.getItem('joystick-theme') || 'dark';
+            setTheme(savedTheme);
+
+            themeToggle.addEventListener('click', function(e) {
+                e.preventDefault();
+                const current = getTheme();
+                setTheme(current === 'dark' ? 'light' : 'dark');
+            });
+
+            // ===== 设置面板切换 =====
+            function toggleSettings() {
+                settingsVisible = !settingsVisible;
+                settingsOverlay.classList.toggle('visible', settingsVisible);
+                btnGear.classList.toggle('active', settingsVisible);
+                if (settingsVisible) {
+                    // 打开时刷新滑块显示
+                    maxSpdV.textContent = maxSpeed;
+                    deadV.textContent = dead.toFixed(2);
+                }
+            }
+
+            function closeSettings() {
+                if (settingsVisible) {
+                    settingsVisible = false;
+                    settingsOverlay.classList.remove('visible');
+                    btnGear.classList.remove('active');
+                }
+            }
+
+            btnGear.addEventListener('click', function(e) {
+                e.preventDefault();
+                toggleSettings();
+                if (navigator.vibrate) navigator.vibrate(20);
+            });
+
+            // 关闭按钮
+            btnSettingsClose.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeSettings();
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            // 点击外部关闭设置（仍然保留作为辅助）
+            document.addEventListener('click', function(e) {
+                if (settingsVisible && !settingsOverlay.contains(e.target) && e.target !== btnGear) {
+                    closeSettings();
+                }
+            });
+
+            // 触摸外部关闭设置（移动端辅助）
+            document.addEventListener('touchstart', function(e) {
+                if (settingsVisible && !settingsOverlay.contains(e.target) && e.target !== btnGear) {
+                    closeSettings();
+                }
+            }, { passive: true });
+
+            // ===== 滑块 =====
+            maxSpdEl.oninput = function() {
+                maxSpeed = +this.value;
+                maxSpdV.textContent = maxSpeed;
+            };
+            deadEl.oninput = function() {
+                dead = +this.value / 100;
+                deadV.textContent = dead.toFixed(2);
+            };
+
+            // ===== 摇杆 =====
+            function setKnob(dx, dy) {
+                knob.style.transform = 'translate(' + dx + 'px, ' + dy + 'px)';
+                knob.classList.toggle('active', active);
+            }
+
+            function updateStick(e) {
+                const r = base.getBoundingClientRect();
+                const bx = r.left + r.width / 2;
+                const by = r.top + r.height / 2;
+                let dx = e.clientX - bx;
+                let dy = e.clientY - by;
+                const dist = Math.hypot(dx, dy);
+                const maxR = R || 1;
+                if (dist > maxR) {
+                    dx *= maxR / dist;
+                    dy *= maxR / dist;
+                }
+                setKnob(dx, dy);
+                dirX = dx / maxR;
+                dirY = dy / maxR;
+                mag = Math.min(1, dist / maxR);
+            }
+
+            base.addEventListener('pointerdown', function(e) {
+                // 如果设置面板打开，点击摇杆时关闭设置
+                if (settingsVisible) {
+                    closeSettings();
+                }
+                active = true;
+                base.setPointerCapture(e.pointerId);
+                downX = e.clientX;
+                downY = e.clientY;
+                downT = performance.now();
+                updateStick(e);
+                e.preventDefault();
+            });
+
+            base.addEventListener('pointermove', function(e) {
+                if (active) {
+                    updateStick(e);
+                    e.preventDefault();
+                }
+            });
+
+            function endStick(e) {
+                if (!active) return;
+                active = false;
+                setKnob(0, 0);
+                dirX = dirY = mag = 0;
+                const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+                if (moved < 14 && performance.now() - downT < 220) {
+                    spawnRipple(cursorX, cursorY, false);
+                }
+            }
+            base.addEventListener('pointerup', endStick);
+            base.addEventListener('pointercancel', endStick);
+
+            // ===== 涟漪 =====
+            function spawnRipple(x, y, right) {
+                const rip = document.createElement('div');
+                rip.className = 'ripple' + (right ? ' right' : '');
+                rip.style.left = x + 'px';
+                rip.style.top = y + 'px';
+                screen.appendChild(rip);
+                setTimeout(function() { rip.remove(); }, 450);
+            }
+
+            // ===== 按键反馈 =====
+            function showKeyFeedback(label, x, y, color) {
+                const el = document.createElement('div');
+                el.className = 'key-feedback';
+                el.textContent = label;
+                if (color) el.style.borderColor = color;
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+                screen.appendChild(el);
+                requestAnimationFrame(() => {
+                    el.classList.add('show');
+                });
+                setTimeout(() => {
+                    el.classList.remove('show');
+                    el.classList.add('hide');
+                    setTimeout(() => { el.remove(); }, 400);
+                }, 700);
+            }
+
+            // ===== 按钮事件 =====
+            btnLeft.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, false);
+            });
+            btnRight.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, true);
+            });
+
+            let doubleClickTimer = null;
+            btnDouble.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, false);
+                if (doubleClickTimer) {
+                    clearTimeout(doubleClickTimer);
+                    doubleClickTimer = null;
+                    spawnRipple(cursorX, cursorY, false);
+                    showKeyFeedback('双击', cursorX, cursorY - 30, 'var(--accent-purple)');
+                } else {
+                    doubleClickTimer = setTimeout(function() {
+                        doubleClickTimer = null;
+                    }, 300);
+                }
+            });
+
+            btnPgUp.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('PgUp', cursorX, cursorY - 30, 'var(--text-secondary)');
+            });
+            btnPgDown.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('PgDn', cursorX, cursorY + 30, 'var(--text-secondary)');
+            });
+
+            btnEnter.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('Enter', cursorX, cursorY - 30, 'var(--accent-green)');
+            });
+
+            btnUndo.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('Ctrl+Z', cursorX, cursorY + 30, 'var(--accent-pink)');
+            });
+
+            btnDrag.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                dragging = !dragging;
+                btnDrag.classList.toggle('on', dragging);
+                cursor.classList.toggle('dragging', dragging);
+                showKeyFeedback(dragging ? '拖拽 ON' : '拖拽 OFF', cursorX, cursorY - 40, 'var(--accent-orange)');
+            });
+
+            // ===== 主循环 =====
+            let last = performance.now();
+
+            function loop(now) {
+                const dt = Math.min(0.05, (now - last) / 1000);
+                last = now;
+                const m = Math.max(0, (mag - dead) / (1 - dead));
+                const speed = active ? maxSpeed * m : 0;
+                if (speed > 0) {
+                    cursorX = Math.max(8, Math.min(screen.clientWidth - 8, cursorX + dirX * speed * dt));
+                    cursorY = Math.max(8, Math.min(screen.clientHeight - 8, cursorY + dirY * speed * dt));
+                }
+                cursor.style.transform = 'translate(' + cursorX + 'px, ' + cursorY + 'px)';
+                magEl.textContent = mag.toFixed(2);
+                spdEl.textContent = Math.round(speed);
+                requestAnimationFrame(loop);
+            }
+            requestAnimationFrame(loop);
+
+            // ===== 窗口变化 =====
+            function onResize() {
+                cursorX = Math.max(8, Math.min(screen.clientWidth - 8, cursorX));
+                cursorY = Math.max(8, Math.min(screen.clientHeight - 8, cursorY));
+            }
+            window.addEventListener('resize', onResize);
+
+            // ===== 初始化 =====
+            cursorX = screen.clientWidth / 2;
+            cursorY = screen.clientHeight / 2;
+            cursor.style.transform = 'translate(' + cursorX + 'px, ' + cursorY + 'px)';
+
+            console.log('🎮 齿轮设置版（带返回键）· 摇杆鼠标已启动');
+        })();
+    </script>
+
+</body>
+</html>
