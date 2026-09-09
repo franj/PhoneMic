@@ -1399,11 +1399,18 @@
             // PC 端配置变更与浏览器无关，不追加微信提示
             this._notifyStatusChange(false, t('auth_reconfig_text'));
         }
-        send(type, text) {
+        /**
+         * 发送一个完整帧（字段平铺在帧顶层，不加 payload 包装）。
+         * 鼠标/键盘面板走这里：{type:"mouse", a:"click", btn:"left"}。
+         */
+        sendFrame(frame) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
             // encrypt 已产出线上字节（加密=密文 / 明文=msgpack），直接上帧
-            this.ws.send(this.secure.encrypt({ type, text }));
+            this.ws.send(this.secure.encrypt(frame));
             return true;
+        }
+        send(type, text) {
+            return this.sendFrame({ type, text });
         }
         getConnected() { return this.isConnected; }
     }
@@ -1740,7 +1747,7 @@
      * 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
      *
      * 对应 docs/mouse-joystick-design.md：
-     *   - §3.1 方案 A：CSS 由类自带（static STYLES），选择器挂 .mouse-joystick，零全局污染
+     *   - §3.1 方案 A：CSS 由类自带（static get STYLES），选择器挂 .mouse-joystick，零全局污染
      *   - §3.2 解耦原则：不碰 WebSocket，所有输出只走 onCommand(frame) 一个出口
      *   - §4 布局：调参行 / 读数行 / 摇杆 + 按钮网格 / 提示行
      *   - §5.1 帧格式严格对齐 wire-protocol.md §7 的 mouse / key，不发明协议外字段
@@ -1748,26 +1755,29 @@
     class MouseJoystick {
         // 一次性动作按钮（4×4 网格，数组顺序即 DOM 顺序）
         // frame 是完整帧对象（含 type）：鼠标类落 type:"mouse"，按键类落 type:"key"
-        static ACTIONS = [
-            { id: 'left',       i18n: 'panel_btn_left',       frame: { type: 'mouse', a: 'click', btn: 'left' } },
-            { id: 'right',      i18n: 'panel_btn_right',      frame: { type: 'mouse', a: 'click', btn: 'right' } },
-            { id: 'del',        text: 'Del',                  frame: { type: 'key', keys: 'delete' } },
-            { id: 'enter',      text: 'Enter', cls: 'pv-enter', frame: { type: 'key', keys: 'enter' } },
-            { id: 'double',     i18n: 'panel_btn_double',     frame: { type: 'mouse', a: 'double', btn: 'left' } },
-            { id: 'drag',       i18n: 'panel_btn_drag', toggle: true },
-            { id: 'esc',        text: 'Esc',                  frame: { type: 'key', keys: 'esc' } },
-            { id: 'shiftenter', text: '⇧↵', cls: 'pv-enter', title: 'Shift+Enter', frame: { type: 'key', keys: 'shift+enter' } },
-            { id: 'wheelup',    i18n: 'panel_btn_wheel_up',   cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: -120 } },
-            { id: 'redo',       text: 'Ctrl+Y', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+y' } },
-            { id: 'up',         text: '↑',                    frame: { type: 'key', keys: 'up' } },
-            { id: 'undo',       text: 'Ctrl+Z', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+z' } },
-            { id: 'wheeldown',  i18n: 'panel_btn_wheel_down', cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: 120 } },
-            { id: 'arrleft',    text: '←',                    frame: { type: 'key', keys: 'left' } },
-            { id: 'arrdown',    text: '↓',                    frame: { type: 'key', keys: 'down' } },
-            { id: 'arrright',   text: '→',                    frame: { type: 'key', keys: 'right' } }
-        ];
+        static get ACTIONS() {
+            return [
+                { id: 'left',       i18n: 'panel_btn_left',       frame: { type: 'mouse', a: 'click', btn: 'left' } },
+                { id: 'right',      i18n: 'panel_btn_right',      frame: { type: 'mouse', a: 'click', btn: 'right' } },
+                { id: 'del',        text: '⌫',                   frame: { type: 'key', keys: 'backspace' } },
+                { id: 'enter',      text: 'Enter', cls: 'pv-enter', frame: { type: 'key', keys: 'enter' } },
+                { id: 'double',     i18n: 'panel_btn_double',     frame: { type: 'mouse', a: 'double', btn: 'left' } },
+                { id: 'drag',       i18n: 'panel_btn_drag', toggle: true },
+                { id: 'esc',        text: 'Esc',                  frame: { type: 'key', keys: 'esc' } },
+                { id: 'shiftenter', text: '⇧Enter', cls: 'pv-enter', title: 'Shift+Enter', frame: { type: 'key', keys: 'shift+enter' } },
+                { id: 'wheelup',    i18n: 'panel_btn_wheel_up',   cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: -120 } },
+                { id: 'redo',       text: 'Ctrl+Y', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+y' } },
+                { id: 'up',         text: '↑',      repeat: true, frame: { type: 'key', keys: 'up' } },
+                { id: 'undo',       text: 'Ctrl+Z', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+z' } },
+                { id: 'wheeldown',  i18n: 'panel_btn_wheel_down', cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: 120 } },
+                { id: 'arrleft',    text: '←',      repeat: true, frame: { type: 'key', keys: 'left' } },
+                { id: 'arrdown',    text: '↓',      repeat: true, frame: { type: 'key', keys: 'down' } },
+                { id: 'arrright',   text: '→',      repeat: true, frame: { type: 'key', keys: 'right' } }
+            ];
+        }
 
-        static STYLES = `
+        static get STYLES() {
+            return `
         .mouse-joystick .pv-tuning {
             flex-shrink: 0;
             display: flex;
@@ -1939,12 +1949,13 @@
             border: 2px solid rgba(7, 193, 96, 0.6);
             box-shadow: 0 0 16px rgba(7, 193, 96, 0.35);
         }
-        `;
+            `;
+        }
 
         constructor(root, options = {}) {
             this.root = root;
             this.onCommand = options.onCommand || function () {};
-            this.maxSpeed = options.maxSpeed || 1100;   // px/s 满推速度
+            this.maxSpeed = options.maxSpeed || 1500;   // px/s 满推速度
             this.deadzone = options.deadzone || 0.12;   // 死区比例
 
             this.active = false;
@@ -1995,7 +2006,7 @@
                 '<div class="pv-tuning">',
                 '  <div class="pv-tune">',
                 '    <label for="mj-speed" data-i18n="panel_tune_speed"></label>',
-                '    <input id="mj-speed" class="pv-speed-range" type="range" min="200" max="2500" step="50">',
+                '    <input id="mj-speed" class="pv-speed-range" type="range" min="200" max="3000" step="50">',
                 '    <span class="val pv-speed-val"></span>',
                 '  </div>',
                 '  <div class="pv-tune">',
@@ -2067,16 +2078,21 @@
 
         // ---------- 输出（唯一出口） ----------
 
-        // dx / dy 是每帧小数位移；协议要求整数像素，故发整数部分、余量留到下一帧
+        // dx / dy 是每帧小数位移。沿方向取整（而非按轴独立截断）：pyautogui 只收
+        // 整数像素，按轴截断会让慢速 45° 方向某帧只走 x、某帧只走 y，方向漂成纯
+        // 水平/纯垂直。沿方向取整保证每帧输出向量方向与累加方向一致、模长精确。
         _emitMove(dx, dy) {
             this._accX += dx;
             this._accY += dy;
-            const ix = Math.trunc(this._accX);
-            const iy = Math.trunc(this._accY);
-            this._accX -= ix;
-            this._accY -= iy;
-            if (ix === 0 && iy === 0) return;
-            this.onCommand({ type: 'mouse', a: 'move', dx: ix, dy: iy });
+            const mag = Math.hypot(this._accX, this._accY);
+            if (mag < 1) return;                      // 不足 1px，留到下一帧
+            const n = Math.floor(mag);
+            const ox = Math.round(this._accX / mag * n);
+            const oy = Math.round(this._accY / mag * n);
+            this._accX -= ox;                          // 向量减法，方向与模长都守恒
+            this._accY -= oy;
+            if (ox === 0 && oy === 0) return;
+            this.onCommand({ type: 'mouse', a: 'move', dx: ox, dy: oy });
         }
 
         _emitAction(frame) {
@@ -2118,12 +2134,14 @@
             const dist = Math.hypot(dx, dy);
             const maxR = Math.max(8, (rect.width - this.knob.offsetWidth) / 2);
             if (dist > maxR) {
+                // 位置 clamp 到圆边，但方向向量直接用 clamp 后的 dx/dy 除以 maxR，
+                // 因此 dirX/dirY 始终是“单位方向”，与手指推出多远无关（sample 算法）。
                 dx = dx / dist * maxR;
                 dy = dy / dist * maxR;
             }
             this.mag = Math.min(1, dist / maxR);
-            this.dirX = dist > 0 ? dx / dist : 0;
-            this.dirY = dist > 0 ? dy / dist : 0;
+            this.dirX = dist > 0 ? dx / maxR : 0;
+            this.dirY = dist > 0 ? dy / maxR : 0;
             this.knob.style.transition = 'none';
             this.knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
         }
@@ -2181,8 +2199,10 @@
 
             let speed = 0;
             if (this.active && this.mag > this.deadzone) {
-                const eff = (this.mag - this.deadzone) / (1 - this.deadzone);
-                speed = this.maxSpeed * eff;
+                // 与 sample 一致：线性曲线。dirX/dirY 已是“单位方向 × 幅度”，
+                // eff 做死区归一化后线性映射到 maxSpeed，方向变化线性可感、满推行程恒定。
+                const eff = Math.min(1, (this.mag - this.deadzone) / (1 - this.deadzone));
+                speed = eff * this.maxSpeed;
                 this._emitMove(this.dirX * speed * dt, this.dirY * speed * dt);
             }
             this._updateReadout(speed);
@@ -2241,15 +2261,16 @@
         // 附件面板：子面板切换条（依赖语言包，必须在 loadI18n() 之后）
         initPanelTabs();
 
-        // 鼠标子面板：摇杆组件。onCommand 是唯一出口（docs/mouse-joystick-design.md §3.2），
-        // 阶段 5（wire-protocol.md §12）打通服务端 mouse/key 分派与 PC 端 mouse.py 后接线：
-        //   new MouseJoystick(el, { onCommand: ({ type, ...payload }) => wsClient.send(type, payload) })
-        window._mouseJoystick = new MouseJoystick(document.getElementById('view-mouse'));
-
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         // 跟随当前页面路径：加密模式页面在 /{secret}/ 下 → /{secret}/ws；明文模式在 / 下 → /ws
         const wsClient = new WSClient(`${wsProto}//${location.host}${location.pathname}ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
+
+        // 鼠标子面板：摇杆组件。onCommand 是唯一出口（docs/mouse-joystick-design.md §3.2），
+        // 帧字段平铺在顶层，原样交给 wsClient；未连接时 sendFrame 静默返回 false。
+        window._mouseJoystick = new MouseJoystick(document.getElementById('view-mouse'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);
 

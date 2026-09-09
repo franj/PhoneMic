@@ -271,7 +271,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 - 采用**速度模型**（摇杆远快近慢），`dx`/`dy` 是**每帧相对位移像素**，由 `requestAnimationFrame` 循环驱动，约 60 次/秒。
 - **加速曲线在手机端计算**：摇杆偏移 → 速度映射（具体曲线为客户端实现细节，如二次/指数映射）产出最终 `dx`/`dy`；PC 端只做 `moveRel(dx, dy)`，**不另做速度处理**。协议只规定 `dx`/`dy` 是已算好的相对位移，不规定曲线形状。
 - `dx`/`dy` 为**整数**（像素）。客户端按帧算出的是小数，需自行做余量累加（发整数部分、留小数部分到下一帧），否则每帧截断会累积出可感知的速度偏差。
-- PC 端新增 `phonemic/gui/mouse.py`，用 pyautogui 的 `moveRel` / `click` / `doubleClick` / `mouseDown` / `mouseUp`，照搬 `keyboard.py` 的模式。
+- PC 端已实现 `phonemic/gui/mouse.py`，用 pyautogui 的 `moveRel` / `click` / `doubleClick` / `mouseDown` / `mouseUp` / `scroll`，照搬 `keyboard.py` 的模式。
 - **`double` 是独立动作，不拆成两帧 `click`**：双击判定依赖两次按下的时间间隔，手机 → WS → PC 这条链路的时延不可控，连发两帧 `click` 大概率被 OS 判成两次单击。由 PC 端用 `doubleClick()` 一次完成。
 
 ### config
@@ -397,7 +397,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | 2 | 加密层重构（设计见 crypto-design.md）：新增 `KeyExchange` 类，`CryptoProvider` 收窄为纯 AEAD 封装（构造只收 `session_key`）；`create_provider` 改签名为 `(algo, session_key)`；`SecureChannel` 持有 `KeyExchange` 实例；`receive_auth` 改为两段式。删 `e2ee.py` 旧 base64 与 `make_auth_ack_data` | 单测：`handle_auth` 给定 sealed → 出正确 `session_key`；各 Provider `encrypt`/`decrypt` 往返 |
 | 3 | 握手层：`auth` / `auth_ack` / `hello` / `config` / `error`，WS 全 binary 分流（两段式握手顺序见 crypto-design.md §3.4） | 连上后看 config 回包 |
 | 4 | 迁移 `preview` / `send` | 真机 |
-| 5 | 新增 `key` / `mouse` / `status` | 真机 |
+| 5 | 新增 `key` / `mouse` / `status` | 真机（`key` / `mouse` 已落地，`status` 未做） |
 | 6 | 面板 UI（按钮集内置） | 真机 |
 | 7 | `file` / `photo` 分块 | 真机 |
 
@@ -412,6 +412,6 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | 1 | `msgpack` C 扩展在 Nuitka 打包下是否顺利 | 未验证，失败则切 `cbor2` |
 | 2 | 是否启用 AAD | **已定：AAD 优先**（XChaCha20 / AES-GCM 用 aad 带 `seq`），不支持 aad 的 XSalsa20 用 8 字节大端前缀兜底；细节已移交 `crypto-design.md` §5 |
 | 3 | file 落地目录、photo 是否直接写剪贴板 | **已定：photo 直接写剪贴板、不落盘；file 落盘、不进剪贴板（图片文件也走 file）。file 落地目录待配置（默认下载目录或用户指定）** |
-| 4 | 面板按钮将来是否由 PC 下发 | v1 内置；若要则加 `[{label, keys}]`，不复用 `VoiceCommand` |
+| 4 | 面板按钮将来是否由 PC 下发 | v1 内置；插件化方案见 `panel-plugin-design.md`（声明式 JSON 面板，用户可让 AI 生成后放入插件目录） |
 | 5 | 是否兼容未刷新的旧页面（旧 JSON 协议） | 建议否——页面由服务端下发；text 帧直接关闭并提示重新扫码 |
 | 6 | `photo` 是否并入 `file`（加 `dest` 字段：`file`/`clipboard`） | **已定：保持独立**。根因有二：① `file`→磁盘、`photo`→剪贴板是两条平台强相关的落地管线（剪贴板图片格式见 §9.1）；② `photo` 纯为剪贴板设计、不落盘，`file` 纯为磁盘、不进剪贴板，语义正交。代价多一条代码路径，可接受 |

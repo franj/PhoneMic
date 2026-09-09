@@ -91,6 +91,17 @@ class Dashboard(QMainWindow):
         """设置算法变更回调函数。"""
         self._algorithm_change_callback = callback
 
+    def set_mouse_debug_window(self, win):
+        """注入独立调试窗口（临时工具），由「程序」菜单打开。"""
+        self._mouse_debug_win = win
+
+    def _open_mouse_debug(self):
+        win = getattr(self, "_mouse_debug_win", None)
+        if win:
+            win.show()
+            win.raise_()
+            win.activateWindow()
+
     def _setup_ui(self, ip, port) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -144,6 +155,7 @@ class Dashboard(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.update_connection_status(False)
         layout.addWidget(self.status_label)
+
         layout.addStretch()
 
         self.qr_label = qr_label
@@ -278,6 +290,11 @@ class Dashboard(QMainWindow):
         commands_action = QAction(self.i18n.tr("dashboard.menu_command"), self)
         commands_action.triggered.connect(self._open_commands_dialog)
         program_menu.addAction(commands_action)
+
+        # 鼠标曲线调试（临时工具，验证帧率与位移是否抖动）
+        debug_action = QAction("鼠标曲线调试", self)
+        debug_action.triggered.connect(self._open_mouse_debug)
+        program_menu.addAction(debug_action)
 
         # 分隔线 + 退出
         program_menu.addSeparator()

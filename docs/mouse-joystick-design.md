@@ -22,18 +22,19 @@ PhoneMic 的附件面板原计划「鼠标」Tab 用**触摸板（相对位移�
 每帧（`requestAnimationFrame`）读取摇杆向量：
 
 ```
-方向 = 圆心 → 拇指 的单位向量
+方向 = 圆心 → 拇指 的单位向量（clamp 后 dx/dy 直接除以 maxR）
 幅度 m = clamp(距离 / 半径, 0, 1)
-有效幅度 = m < 死区 ? 0 : (m - 死区) / (1 - 死区)   // 死区防抖
-速度 = 方向 × maxSpeed × 曲线(有效幅度)
+eff   = clamp((m - deadzone) / (1 - deadzone), 0, 1)   // 死区归一化
+速度 = 方向 × (eff × maxSpeed)                          // 线性曲线，与 sample 一致，满推达 maxSpeed
 鼠标位移 = 速度 × dt
 ```
 
-- `maxSpeed`：约 800–1500 px/s，可调（原型默认 1100，滑块范围 200–2500）
-- `deadzone`：约 0.1–0.15，中心附近不漂移（原型默认 0.12，滑块范围 0–0.30）
-- 曲线：v1 线性（`有效幅度` 直接用）；后续若手感偏硬再换 ease-out
+- `maxSpeed`：满推速度，默认 1500 px/s，滑块范围 200–3000
+- `deadzone`：约 0.1–0.15，中心附近不漂移（默认 0.12，滑块范围 0–0.30）
+- **线性曲线 `eff`**：与 `docs/mouse-joystick-sample.html` 演示算法一致。二次曲线 `eff²` 在满推"转弯"时方向变化被压没了（实测"拉满后不能转弯"），改回线性后方向变化线性可感、满推行程恒定（**二次曲线已回退**）
+- **各方向速度一致**：`dirX`/`dirY` 是 clamp 后 dx/dy 除以 maxR（单位方向），速度是标量乘上去，模长只由 `mag` 决定、与方向无关
 - **曲线在手机端算完**：发出的 `dx`/`dy` 是已算好的**每帧相对位移**，PC 端只做 `moveRel(dx, dy)`，不另做速度处理（`wire-protocol.md` §7 mouse）
-- `dx`/`dy` 按整数发，小数余量留在客户端累加到下一帧（同上）
+- `dx`/`dy` 按整数发：**沿方向取整**（保留小数余量跨帧累加），而非按轴独立截断——按轴截断会让慢速 45° 方向某帧只走 x、某帧只走 y，方向漂成纯水平/纯垂直；沿方向取整保证任意方向模长精确、方向不偏
 
 点击 / 拖拽单独处理：
 - 左键 / 右键 / 双击 → `mouse` 帧（`a:"click"` / `a:"double"`，带 `btn`）
@@ -60,7 +61,7 @@ PhoneMic 的附件面板原计划「鼠标」Tab 用**触摸板（相对位移�
 class MouseJoystick {
     static STYLES = `/* 全部选择器挂在 .mouse-joystick 下 */`;
 
-    constructor(root, { onCommand, maxSpeed = 1100, deadzone = 0.12 } = {}) {
+    constructor(root, { onCommand, maxSpeed = 1500, deadzone = 0.12 } = {}) {
         this.root = root;            // 鼠标 Tab 内容区的空 <section>
         this.onCommand = onCommand;  // 唯一出口，不直接碰 WS
         this.maxSpeed = maxSpeed;
@@ -110,7 +111,7 @@ onCommand: ({ type, ...payload }) => wsClient.send(type, payload)
 
 | 区域 | 内容 |
 |---|---|
-| 调参行 | 速度滑块（200–2500）+ 死区滑块（0–0.30），实时生效 |
+| 调参行 | 速度滑块（200–3000）+ 死区滑块（0–0.30），实时生效 |
 | 读数行 | 幅度条（当前偏转可视化）+ 速度数值读数（px/s） |
 | 控制区 | 左侧摇杆底盘 + 拇指滑块；右侧 4×4 动作按钮网格 |
 | 提示行 | 一行小字提示（i18n） |
@@ -130,7 +131,7 @@ Enter / Esc / Del / Ctrl+Z / Ctrl+Y / 方向键 落 `key` 帧。
 
 - 一条 WS 消息 = 一个 **msgpack 编码的 map**，**只走 binary 帧**（§2）。收到 text 帧即判定为未刷新的旧页面，直接关闭。
 - 服务端解密后按 `type` 查**分派表**处理，方向错误 / 未知 type → `error(code:"malformed")`（§6 / §10）。
-- 现阶段 `api.py` 只分派 `preview` / `send`；`mouse` / `key` 属阶段 5（§12），Panel 侧已就绪，接线点集中在入口一处。
+- `api.py` 已分派 `preview` / `send` / `key` / `mouse`：`key` 转发 `keys` 给 `keyboard.send_keys()`，`mouse` 整帧转发给 `gui/mouse.py`；PC 端在 `PhoneMic.on_backend_event` 里消费。
 
 ### 5.1 新增 `mouse` 消息类型
 
@@ -181,16 +182,23 @@ else:
 > 注意别把 `mouse` 并入 `preview` / `send` 的 `text` 分支——`inner.get("text","")` 会把结构化帧
 > 静默降级成空串（`wire-protocol.md` §10 补充里记的正是这个洞）。
 
-### 5.3 PC 端新增（`phonemic/gui/mouse.py`）
+### 5.3 PC 端（`phonemic/gui/mouse.py`，已实现）
 
-`MouseController` 用 pyautogui（`moveRel` / `click` / `doubleClick` / `mouseDown` / `mouseUp`），
-在 `PhoneMic.py` 订阅 bridge 的 `mouse` 事件；`key` 事件沿用已有 `keyboard.py`。
-键盘那套 `phonemic/gui/keyboard.py` 已是同一模式，照搬即可。
+`validate_mouse_action()` 校验帧、`perform_mouse()` 执行，照 `keyboard.py` 的模式：
+先 validate（纯函数、可单测）再 perform（非法输入只记日志，异常不冒泡到事件循环）。
+`PhoneMic.on_backend_event` 订阅 bridge 的 `mouse` / `key` 事件，分别调 `perform_mouse` 与 `keyboard.send_keys()`。
+
+move 帧**逐条执行、不合并**——执行频率跟着手机端 rAF 走（60Hz 屏 60 帧/s、90Hz 屏 90、iPhone ProMotion 120）。曾试过主线程 16ms 定时器合并，实测手感与逐条执行无差异，遂撤销，保持链路最简单。
+
+两个实现要点：
+
+- **`moveRel` 传 `_pause=False`**：pyautogui 默认每次调用后 sleep `PAUSE=0.1`s，60/s 的 move 帧会被拖成幻灯片。
+- **`pyautogui.FAILSAFE = False`**：遥控鼠标时左上角 `(0,0)` 是合法目标，一旦光标移到那里，后续每次调用都会在 `failSafeCheck` 抛异常、鼠标彻底卡死。停止遥控走手机端断开连接。
 
 ### 5.4 节流
 
-`move` 从 rAF 循环每帧发一次（约 60/s），**不**每次 `pointermove` 都发。
-按 `wire-protocol.md` §2 的估算，字符串版 mouse 帧约 30 字节 → 60fps 下约 1.8 KB/s，可忽略。
+`move` 从 rAF 循环每帧发一次（跟着屏幕刷新率，90Hz 屏约 90/s），**不**每次 `pointermove` 都发。
+按 `wire-protocol.md` §2 的估算，字符串版 mouse 帧约 30 字节 → 90fps 下约 2.7 KB/s，可忽略。
 
 一次性动作（click / double / wheel / key）随事件发，不做节流；
 滚轮支持长按连发（首次立即发，延迟 350ms 后每 140ms 一格）。
@@ -199,8 +207,8 @@ else:
 
 1. **主题**：**已定**——跟随 `mobile.html` 浅色体系，不做独立深浅色切换。
 2. **CSS 方案**：**已定 A**——类注入 `<style>`，选择器挂在 `.mouse-joystick` 下。
-3. **默认参数**：**已定**——`maxSpeed=1100` / `deadzone=0.12`（沿用摇杆原型调过的值），滑块可调。
+3. **默认参数**：**已定**——`maxSpeed=1500` / `deadzone=0.12`，速度走线性曲线 `eff`（见 §2，二次曲线 `eff²` 满推转弯被压没已回退），滑块可调 maxSpeed（200–3000）/ deadzone（0–0.30）。
 4. **v1 范围**：**已定**——`move` / `click` / `double` / `down` / `up` / `wheel` + 按键网格；`double` 已随本次校准补进 `wire-protocol.md` §7。
 5. **mouse 载荷传递**：**已定**——字段平铺于帧顶层（见 §5.1），**不**加 `payload` 包装字段，也**不**复用 `text` 传 JSON 字符串。
 6. **按键按钮归属**：**已定**——走独立 `type:"key"` + `keys`，**不**在 `mouse` 里加 `a:"key"`。
-7. **WS 接线时机**：**暂不接**——服务端只分派 `preview` / `send`，现在接线会让 `mouse` 帧以 60/s 打 warning 日志。接线点保留在入口，阶段 5 一行接上。
+7. **WS 接线**：**已接通**——入口处 `new MouseJoystick(el, { onCommand: (frame) => wsClient.sendFrame(frame) })`。`WSClient` 新增 `sendFrame(frame)` 发送完整帧（字段平铺），原 `send(type, text)` 改为 `sendFrame({type, text})` 的薄封装，文本类调用不受影响。

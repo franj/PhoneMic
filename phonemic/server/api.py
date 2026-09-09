@@ -335,8 +335,22 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
     if msg_type in ("preview", "send"):
         _manager.bridge.emit(msg_type, text)
         logger.debug(f"Received {msg_type}: {text[:50]}...")
+    elif msg_type == "key":
+        # keys 直接喂给 phonemic/gui/keyboard.py:send_keys()
+        _manager.bridge.emit("key", inner.get("keys", ""))
+        logger.debug(f"Received key: {inner.get('keys', '')}")
+    elif msg_type == "mouse":
+        # 整帧交给 PC 端，a 决定动作（wire-protocol.md §7）
+        _manager.bridge.emit("mouse", inner)
+        logger.debug(f"Received mouse: a={inner.get('a')}")
     else:
+        # wire-protocol.md §10：type 不在分派表内 → 丢弃并回 error(malformed)
         logger.warning(f"Unknown inner message type: {msg_type}")
+        await _send_frame(websocket, {
+            "type": "error",
+            "code": "malformed",
+            "msg": f"unknown type: {msg_type}",
+        })
     return True
 
 
