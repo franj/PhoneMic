@@ -408,6 +408,7 @@ def _serve_lang_json() -> Response:
     """
     try:
         i18n = I18n.instance()
+        i18n.reload()   # 每次请求重读当前语言文件：改 locale 后手机端刷新即生效，无需重启
         mobile_data = i18n.get_section("mobile")
         return JSONResponse(
             content=mobile_data,

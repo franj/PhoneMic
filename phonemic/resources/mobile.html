@@ -315,42 +315,7 @@
             line-height: 16px;
         }
 
-        /* --- 鼠标子面板：摇杆 / 触控板 模式切换条 --- */
-        /* --- 键盘子面板（预留） --- */
-        #view-keys .pv-keys {
-            flex: 1;
-            min-height: 0;
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 8px;
-            align-content: center;
-            padding: 6px 16px 4px;
-            box-sizing: border-box;
-        }
-        #view-keys .pv-keys button {
-            height: 34px;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            background: #ffffff;
-            color: #444;
-            font-size: 13px;
-            cursor: pointer;
-            touch-action: manipulation;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-            transition: transform 0.06s, background-color 0.1s;
-        }
-        #view-keys .pv-keys button:active {
-            background: #eef2ee;
-            transform: scale(0.95);
-        }
-        #view-keys .pv-keys .wide {
-            grid-column: 1 / -1;
-        }
-        #view-keys .pv-keys .mod {
-            background: #f7f7f9;
-            color: #666;
-            font-size: 11px;
-        }
+        /* --- 键盘子面板：样式由 KeyboardPanel 自带（static STYLES），此处无占位 --- */
 
         /* --- 文件子面板（预留） --- */
         #view-file .pv-files {
@@ -505,29 +470,8 @@
             <section id="view-touchpad" class="panel-view active"></section>
             <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
             <section id="view-mouse" class="panel-view"></section>
-            <!-- 键盘子面板（预留） -->
-            <section id="view-keys" class="panel-view">
-                <div class="pv-keys">
-                    <button type="button" class="mod">Esc</button>
-                    <button type="button" class="mod">Tab</button>
-                    <button type="button" class="mod">Shift</button>
-                    <button type="button" class="mod">Ctrl</button>
-                    <button type="button" class="mod">Alt</button>
-                    <button type="button" class="mod">Meta</button>
-                    <button type="button">⌫</button>
-                    <button type="button">Del</button>
-                    <button type="button">Home</button>
-                    <button type="button">End</button>
-                    <button type="button">PgUp</button>
-                    <button type="button">PgDn</button>
-                    <button type="button" class="wide">␣</button>
-                    <button type="button">←</button>
-                    <button type="button">↑</button>
-                    <button type="button">↓</button>
-                    <button type="button">→</button>
-                </div>
-                <div class="pv-hint" id="hint-keys" data-i18n="panel_hint_keys"></div>
-            </section>
+            <!-- 键盘子面板：组合快捷键（编辑/导航/系统 三分类），由 KeyboardPanel 动态生成 -->
+            <section id="view-keys" class="panel-view"></section>
             <!-- 文件子面板（预留） -->
             <section id="view-file" class="panel-view">
                 <div class="pv-files">
@@ -2902,6 +2846,216 @@
         }
     }
 
+    // ========== 6.5 键盘面板 ==========
+    /**
+     * KeyboardPanel：组合快捷键键盘面板，按键按 编辑 / 导航 / 系统 三分类。
+     * 约定与 MouseJoystick / TouchpadPanel 一致：
+     *   - CSS 由类自带（static get STYLES），选择器挂 .keyboard-panel，注入一次（幂等）；
+     *   - 在 section 内生成独立根容器（不污染 section，避免 display 规则盖过 .panel-view 显隐）；
+     *   - DOM 由 _buildDOM() 生成；输出只经 onCommand(frame) 一个出口，不碰 WebSocket；
+     *   - 提供 destroy()。
+     * 设计决策（与用户讨论确定）：
+     *   - 只放组合快捷键，不放裸修饰键（Shift/Ctrl/Alt/Meta 需维护按住态，易卡死难恢复）；
+     *   - 不放 Tab/Space/剪贴板三件套——打字交给手机输入法，本面板只补手机键盘没有的键；
+     *   - "清空" = Ctrl+A → Delete。PC 端 keyboard.py 的 send_keys 原生支持逗号分隔序列，
+     *     一帧 "ctrl+a,delete" 即可，无需客户端连发。
+     */
+    class KeyboardPanel {
+        static get GROUPS() {
+            return [
+                { id: 'edit', i18n: 'panel_kb_edit' },
+                { id: 'nav',  i18n: 'panel_kb_nav' },
+                { id: 'sys',  i18n: 'panel_kb_sys' }
+            ];
+        }
+
+        static get ACTIONS() {
+            return [
+                // 编辑（绿）：上屏 / 删字 / 撤销 / 全选
+                { id: 'enter',      text: 'Enter',  group: 'edit', frame: { type: 'key', keys: 'enter' } },
+                { id: 'shiftenter', text: '⇧Enter', group: 'edit', frame: { type: 'key', keys: 'shift+enter' } },
+                { id: 'backspace',  text: '⌫',      group: 'edit', frame: { type: 'key', keys: 'backspace' } },
+                { id: 'delete',     text: 'Del',    group: 'edit', frame: { type: 'key', keys: 'delete' } },
+                { id: 'undo',       text: 'Ctrl+Z', group: 'edit', frame: { type: 'key', keys: 'ctrl+z' } },
+                { id: 'selectall',  text: 'Ctrl+A', group: 'edit', frame: { type: 'key', keys: 'ctrl+a' } },
+                { id: 'clearall',   i18n: 'panel_btn_clear_all', group: 'edit', frame: { type: 'key', keys: 'ctrl+a,delete' } },
+                // 导航（蓝）：光标 / 翻页；方向键与 PgUp/PgDn 按住连发
+                { id: 'left',  text: '←',    group: 'nav', repeat: true, frame: { type: 'key', keys: 'left' } },
+                { id: 'up',    text: '↑',    group: 'nav', repeat: true, frame: { type: 'key', keys: 'up' } },
+                { id: 'down',  text: '↓',    group: 'nav', repeat: true, frame: { type: 'key', keys: 'down' } },
+                { id: 'right', text: '→',    group: 'nav', repeat: true, frame: { type: 'key', keys: 'right' } },
+                { id: 'home',  text: 'Home', group: 'nav', frame: { type: 'key', keys: 'home' } },
+                { id: 'end',   text: 'End',  group: 'nav', frame: { type: 'key', keys: 'end' } },
+                { id: 'pgup',  text: 'PgUp', group: 'nav', repeat: true, frame: { type: 'key', keys: 'pageup' } },
+                { id: 'pgdn',  text: 'PgDn', group: 'nav', repeat: true, frame: { type: 'key', keys: 'pagedown' } },
+                // 系统（灰）：退出 / 切窗口
+                { id: 'esc',    text: 'Esc',     group: 'sys', frame: { type: 'key', keys: 'esc' } },
+                { id: 'alttab', text: 'Alt+Tab', group: 'sys', frame: { type: 'key', keys: 'alt+tab' } }
+            ];
+        }
+
+        static get STYLES() {
+            return `
+        .keyboard-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            overflow-y: auto;            /* 小屏放不下时可竖向滚动 */
+            box-sizing: border-box;
+            gap: 7px;
+            padding: 3px 10px 2px;
+        }
+        .keyboard-panel .kb-title {
+            flex-shrink: 0;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            color: #888;
+        }
+        .keyboard-panel .kb-group[data-group="edit"] .kb-title { color: #05944d; }
+        .keyboard-panel .kb-group[data-group="nav"]  .kb-title { color: #2563eb; }
+        .keyboard-panel .kb-group[data-group="sys"]  .kb-title { color: #475569; }
+        .keyboard-panel .kb-grid {
+            flex-shrink: 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+        .keyboard-panel .kb-grid button {
+            height: 38px;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #555;
+            font-size: 12px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            touch-action: none;          /* 长按连发期间不让页面滚动 */
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            transition: transform 0.06s, background-color 0.1s;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        .keyboard-panel .kb-grid button:active {
+            transform: scale(0.94);
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
+        }
+        /* 按钮配色：与触控板 / 摇杆同一套柔和彩色，按分类着色 */
+        .keyboard-panel .kb-group[data-group="edit"] button {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .keyboard-panel .kb-group[data-group="nav"] button {
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.45);
+            color: #2563eb;
+        }
+        .keyboard-panel .kb-group[data-group="sys"] button {
+            background: rgba(100, 116, 139, 0.12);
+            border-color: rgba(100, 116, 139, 0.40);
+            color: #475569;
+        }
+        /* 清空（Ctrl+A→Del）是破坏性动作，用红色提示 */
+        .keyboard-panel button[data-id="clearall"] {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #d23b3b;
+        }
+        `;
+        }
+
+        constructor(root, options = {}) {
+            this.onCommand = options.onCommand || function () {};
+            this._repDelay = null;
+            this._repTimer = null;
+
+            this._injectStyles();
+            // 在 section 内生成独立根容器：
+            // 否则 .keyboard-panel 的 display 规则会盖过 .panel-view 的显隐控制（见 TouchpadPanel 同注）。
+            root.innerHTML = '<div class="keyboard-panel"></div>';
+            this.root = root.querySelector('.keyboard-panel');
+            this._buildDOM();
+            this._bindActions();
+        }
+
+        // ---------- 构建 ----------
+
+        _injectStyles() {
+            if (document.getElementById('keyboard-panel-styles')) return;   // 幂等
+            const style = document.createElement('style');
+            style.id = 'keyboard-panel-styles';
+            style.textContent = KeyboardPanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            const byGroup = function (gid) {
+                return KeyboardPanel.ACTIONS.filter(function (a) { return a.group === gid; });
+            };
+            const html = KeyboardPanel.GROUPS.map(function (g) {
+                const btns = byGroup(g.id).map(function (act) {
+                    const label = act.i18n ? t(act.i18n) : act.text;
+                    return '<button type="button" data-id="' + act.id + '">' + label + '</button>';
+                }).join('');
+                return '<div class="kb-group" data-group="' + g.id + '">' +
+                       '<div class="kb-title" data-i18n="' + g.i18n + '"></div>' +
+                       '<div class="kb-grid">' + btns + '</div>' +
+                       '</div>';
+            }).join('');
+            this.root.innerHTML = html +
+                '<div class="pv-hint" data-i18n="panel_hint_keys"></div>';
+
+            // 语言包已由 loadI18n() 就绪，统一回填 data-i18n 文案（与 MouseJoystick 同套路）
+            this.root.querySelectorAll('[data-i18n]').forEach(function (el) {
+                el.textContent = t(el.dataset.i18n);
+            });
+        }
+
+        // ---------- 交互 ----------
+
+        _bindActions() {
+            const self = this;
+            this.root.querySelectorAll('.kb-grid button').forEach(function (el) {
+                const act = KeyboardPanel.ACTIONS.filter(function (a) { return a.id === el.dataset.id; })[0];
+                el.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    self.onCommand(act.frame);
+                    if (act.repeat) self._startRepeat(act.frame);
+                });
+                if (act.repeat) {
+                    el.addEventListener('pointerup', () => self._stopRepeat());
+                    el.addEventListener('pointercancel', () => self._stopRepeat());
+                    el.addEventListener('pointerleave', () => self._stopRepeat());
+                }
+            });
+        }
+
+        // 按住连发：pointerdown 已立即发一帧，延迟 350ms 后每 140ms 一发（与摇杆面板一致）
+        _startRepeat(frame) {
+            this._stopRepeat();
+            this._repDelay = setTimeout(() => {
+                this._repTimer = setInterval(() => this.onCommand(frame), 140);
+            }, 350);
+        }
+
+        _stopRepeat() {
+            if (this._repDelay) { clearTimeout(this._repDelay); this._repDelay = null; }
+            if (this._repTimer) { clearInterval(this._repTimer); this._repTimer = null; }
+        }
+
+        // ---------- 生命周期 ----------
+
+        destroy() {
+            this._stopRepeat();
+            // 监听器挂在 this.root 内的按钮上，随根节点移除自动失效
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
+        }
+    }
+
     // ========== 7. 主程序入口 ==========
     window.onload = async () => {
         await loadI18n();   // 必须先加载语言包，再初始化各组件
@@ -2931,6 +3085,10 @@
             onCommand: (frame) => wsClient.sendFrame(frame)
         });
         window._touchpad = new TouchpadPanel(document.getElementById('view-touchpad'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        // 键盘子面板：组合快捷键（编辑/导航/系统），同样只走 onCommand 单一出口
+        window._keyboard = new KeyboardPanel(document.getElementById('view-keys'), {
             onCommand: (frame) => wsClient.sendFrame(frame)
         });
 
