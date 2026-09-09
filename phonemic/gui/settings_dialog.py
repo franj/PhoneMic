@@ -51,6 +51,7 @@ class SettingsDialog(QDialog):
         content_layout.setContentsMargins(0, 0, 0, 0)
 
         content_layout.addWidget(self._create_hud_group())
+        content_layout.addWidget(self._create_input_group())
         content_layout.addWidget(self._create_chat_group())
         content_layout.addWidget(self._create_close_action_group())
         content_layout.addWidget(self._create_startup_group())   # 新增
@@ -89,6 +90,20 @@ class SettingsDialog(QDialog):
             self.font_combo.addItem(str(size), size)
         self.font_combo.setToolTip(self.i18n.tr("settings.font_size_tooltip"))
         layout.addRow(self.i18n.tr("settings.hud_font_size") + ":", self.font_combo)
+
+        return group
+
+    def _create_input_group(self):
+        group = QGroupBox(self.i18n.tr("settings.input_group"))
+        layout = QFormLayout(group)
+        layout.setSpacing(12)
+        layout.setContentsMargins(12, 16, 12, 12)
+
+        self.input_mode_combo = QComboBox()
+        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_paste"), "paste")
+        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_type"), "type")
+        self.input_mode_combo.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
+        layout.addRow(self.i18n.tr("settings.input_mode") + ":", self.input_mode_combo)
 
         return group
 
@@ -185,6 +200,8 @@ class SettingsDialog(QDialog):
         font_val = self.sm.get("hud_font_size", 14)
         self.set_combo_index(self.font_combo, font_val)
 
+        self.set_combo_index(self.input_mode_combo, self.sm.get("text_input_mode", "paste"))
+
         self.max_records_spin.setValue(self.sm.get("mobile_max_records", 10))
 
         # 关闭行为
@@ -221,6 +238,8 @@ class SettingsDialog(QDialog):
             self.sm.set("hud_font_size", "system")
         else:
             self.sm.set("hud_font_size", selected_data)
+
+        self.sm.set("text_input_mode", self.input_mode_combo.currentData())
 
         self.sm.set("mobile_max_records", self.max_records_spin.value())
 
