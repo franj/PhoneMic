@@ -212,3 +212,12 @@ move 帧**逐条执行、不合并**——执行频率跟着手机端 rAF 走（
 5. **mouse 载荷传递**：**已定**——字段平铺于帧顶层（见 §5.1），**不**加 `payload` 包装字段，也**不**复用 `text` 传 JSON 字符串。
 6. **按键按钮归属**：**已定**——走独立 `type:"key"` + `keys`，**不**在 `mouse` 里加 `a:"key"`。
 7. **WS 接线**：**已接通**——入口处 `new MouseJoystick(el, { onCommand: (frame) => wsClient.sendFrame(frame) })`。`WSClient` 新增 `sendFrame(frame)` 发送完整帧（字段平铺），原 `send(type, text)` 改为 `sendFrame({type, text})` 的薄封装，文本类调用不受影响。
+
+## 8. 触控板面板（矩形触摸板）
+
+与「鼠标 / 键盘 / 文件」**并列的独立面板**，由顶部 `#panel-tabs` 的 👆 按钮（aria-label 取 `panel_tab_touchpad`）切换，激活 `view-touchpad`；与摇杆**互不共享按钮**，各自独占一个 `.panel-view`。
+
+- **实现**：`mobile.html` 的 `TouchpadPanel` 类（CSS 走 `static STYLES` 注入、DOM 由 `_buildDOM()` 生成、`onCommand(frame)` 单一出口、`destroy()`，与 `MouseJoystick` 同约定）。
+- **触摸逻辑移植自 `docs/touchpad-sample.html`**：单指拖拽 → `move` 帧（dx/dy = 手指位移 × 速度倍率）；轻点（位移 < 10px 且 < 300ms）→ 左键单击；双指上下拖 → 滚轮帧（每累计 6px 一格，上 = -120 / 下 = +120，与 §7 wheel 对齐）。
+- **自带按钮**（不复用摇杆动作网格）：左 / 右 / 双击 / 拖拽（toggle down/up）+ Enter / Shift+Enter / Undo(Ctrl+Z) / Redo(Ctrl+Y)，帧格式同 §5.1。
+- **速度模型差异**：触控板用**倍率**（默认 1.0 ≈ 近 1:1，滑块 0.2–3.0），贴合真实触控板手感；摇杆用 px/s 满推速度模型（见 §2）。

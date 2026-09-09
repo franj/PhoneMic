@@ -315,6 +315,7 @@
             line-height: 16px;
         }
 
+        /* --- 鼠标子面板：摇杆 / 触控板 模式切换条 --- */
         /* --- 键盘子面板（预留） --- */
         #view-keys .pv-keys {
             flex: 1;
@@ -492,15 +493,18 @@
         <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
         <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
         <div id="panel-tabs" class="hidden">
-            <button type="button" class="tab active" data-panel="mouse" aria-label="鼠标"><span class="ico">🖱️</span></button>
+            <button type="button" class="tab active" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
+            <button type="button" class="tab" data-panel="mouse" aria-label="鼠标"><span class="ico">🕹️</span></button>
             <button type="button" class="tab" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
             <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
         </div>
     </div>
     <div id="accessory-panel">
         <div id="panel-views">
-            <!-- 鼠标子面板：内容由 MouseJoystick 生成（见 docs/mouse-joystick-design.md §3.2） -->
-            <section id="view-mouse" class="panel-view active"></section>
+            <!-- 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板（默认面板） -->
+            <section id="view-touchpad" class="panel-view active"></section>
+            <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
+            <section id="view-mouse" class="panel-view"></section>
             <!-- 键盘子面板（预留） -->
             <section id="view-keys" class="panel-view">
                 <div class="pv-keys">
@@ -1744,7 +1748,7 @@
     }
 
     /**
-     * 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
+     * 摇杆子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
      *
      * 对应 docs/mouse-joystick-design.md：
      *   - §3.1 方案 A：CSS 由类自带（static get STYLES），选择器挂 .mouse-joystick，零全局污染
@@ -1778,6 +1782,12 @@
 
         static get STYLES() {
             return `
+        .mouse-joystick {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+        }
         .mouse-joystick .pv-tuning {
             flex-shrink: 0;
             display: flex;
@@ -1975,7 +1985,10 @@
             this._boundResize = this._fitStick.bind(this);
 
             this._injectStyles();
-            this.root.classList.add('mouse-joystick');
+            // 与 TouchpadPanel 同一约定：面板类加在 section 内的独立根容器上，
+            // 不污染 section，避免 .mouse-joystick 之类规则干扰 .panel-view 的显隐。
+            this.root.innerHTML = '<div class="mouse-joystick"></div>';
+            this.root = this.root.querySelector('.mouse-joystick');
             this._buildDOM();
             this._bindPointer();
             this._rafId = requestAnimationFrame(this._boundLoop);
@@ -2240,8 +2253,579 @@
             this._stopRepeat();
             if (this._ro) { this._ro.disconnect(); this._ro = null; }
             window.removeEventListener('resize', this._boundResize);
-            this.root.innerHTML = '';
-            this.root.classList.remove('mouse-joystick');
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
+        }
+    }
+
+    /**
+     * 鼠标子面板：触控板模式（矩形触摸板）。
+     *
+     * 触摸逻辑移植自 docs/touchpad-sample.html：
+     *   - 单指拖拽 → move 帧（dx/dy = 手指位移 × 速度倍率）
+     *   - 轻点（位移 < 10px 且 < 300ms）→ 左键单击
+     *   - 双指上下拖 → 滚轮帧（每累计 6px 一个刻度，上 = -120 / 下 = +120）
+     * 自带按钮列（左/右/双击/拖拽 + Enter/Shift+Enter/Undo/Redo），不复用摇杆的动作网格。
+     * 输出只走 onCommand(frame) 一个出口，不碰 WebSocket（与 MouseJoystick 同约定）。
+     */
+    class TouchpadPanel {
+        static get STYLES() {
+            return `
+        .touchpad-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+        }
+        .touchpad-panel .tp-speed-bar {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 8px 6px;
+            border-bottom: 1px solid var(--border-color, #3a3a42);
+            margin-bottom: 4px;
+        }
+        .touchpad-panel .tp-speed-bar label {
+            font-size: 11px;
+            color: #9aa;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .touchpad-panel .tp-speed-bar input[type="range"] {
+            flex: 1;
+            min-width: 60px;
+            height: 3px;
+            accent-color: #07c160;
+            cursor: pointer;
+            touch-action: none;
+        }
+        .touchpad-panel .tp-speed-bar .tp-speed-val {
+            font-size: 12px;
+            font-weight: 600;
+            color: #07c160;
+            min-width: 34px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+        }
+        .touchpad-panel .tp-main-row {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            gap: 5px;
+            align-items: stretch;
+            justify-content: center;
+            padding: 2px 4px 4px;
+        }
+        .touchpad-panel .tp-btn-col,
+        .touchpad-panel .tp-btn-col-right {
+            flex: 0 0 44px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-height: 0;
+        }
+        .touchpad-panel .tp-btn-col button,
+        .touchpad-panel .tp-btn-col-right button {
+            flex: 1;
+            min-height: 0;
+            border-radius: 8px;
+            border: 1px solid #c8ccd2;
+            background: #ffffff;
+            color: #1c1c20;
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            touch-action: none;
+            transition: background 0.08s, border-color 0.08s, transform 0.06s, color 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 2px;
+            text-align: center;
+            line-height: 1.2;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        }
+        .touchpad-panel .tp-btn-col button:active,
+        .touchpad-panel .tp-btn-col-right button:active {
+            transform: scale(0.94);
+            background: #eceef1;
+        }
+        /* 拖拽为开关态：激活时反白（深底白字）以区分 */
+        .touchpad-panel .tp-btn-col button[data-act="drag"].on {
+            background: #1c1c20; color: #ffffff; border-color: #1c1c20;
+            box-shadow: 0 0 16px rgba(28, 28, 32, 0.25);
+        }
+        .touchpad-panel .tp-touchpad-wrap {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px;
+        }
+        .touchpad-panel .tp-touchpad {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            border-radius: 14px;
+            background: radial-gradient(circle at 30% 30%, rgba(79, 209, 197, 0.06), rgba(79, 209, 197, 0.01));
+            border: 2px solid rgba(255, 255, 255, 0.12);
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(79, 209, 197, 0.12);
+            touch-action: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            min-height: 60px;
+            min-width: 60px;
+            transition: border-color 0.25s, box-shadow 0.25s;
+        }
+        .touchpad-panel .tp-touchpad.active {
+            border-color: #4fd1c5;
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.4), 0 0 40px rgba(79, 209, 197, 0.2);
+        }
+        .touchpad-panel .tp-touchpad .tp-grid-h {
+            position: absolute; left: 10%; right: 10%; top: 50%; height: 1px;
+            background: rgba(255, 255, 255, 0.05); transform: translateY(-50%); pointer-events: none;
+        }
+        .touchpad-panel .tp-touchpad .tp-grid-v {
+            position: absolute; top: 10%; bottom: 10%; left: 50%; width: 1px;
+            background: rgba(255, 255, 255, 0.05); transform: translateX(-50%); pointer-events: none;
+        }
+        .touchpad-panel .tp-touchpad .tp-icon {
+            position: relative; z-index: 1; font-size: 22px; opacity: 0.15;
+            color: #9aa; pointer-events: none; transition: opacity 0.3s;
+        }
+        .touchpad-panel .tp-touchpad.active .tp-icon { opacity: 0.3; }
+        .touchpad-panel .tp-touchpad .tp-hint {
+            position: absolute; bottom: 12%; left: 0; right: 0; text-align: center;
+            font-size: 8px; color: #666; pointer-events: none; opacity: 0.5;
+            letter-spacing: 0.3px; transition: opacity 0.3s;
+        }
+        .touchpad-panel .tp-touchpad.active .tp-hint { opacity: 0; }
+        .touchpad-panel .tp-touchpad .tp-hud {
+            position: absolute; top: 6px; left: 10px; right: 10px;
+            display: flex; gap: 14px; font-size: 10px; color: #9aa;
+            pointer-events: none; z-index: 4;
+        }
+        .touchpad-panel .tp-touchpad .tp-hud .val { color: #4fd1c5; font-variant-numeric: tabular-nums; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind {
+            position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+            display: flex; flex-direction: column; align-items: center; gap: 2px;
+            opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 4;
+            background: rgba(0, 0, 0, 0.7); padding: 5px 7px; border-radius: 10px; border: 1px solid #3d3d48;
+        }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind.show { opacity: 1; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow { font-size: 13px; line-height: 1; color: #9aa; transition: color 0.15s, transform 0.15s; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow.up.active { color: #7bcfa6; transform: scale(1.2); }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow.down.active { color: #ff7eb3; transform: scale(1.2); }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .line { width: 2px; flex: 1; min-height: 10px; background: #3a3a42; border-radius: 1px; }
+        .touchpad-panel .tp-touchpad .tp-finger {
+            position: absolute; width: 22px; height: 22px; border-radius: 50%;
+            background: rgba(79, 209, 197, 0.5); border: 2px solid #4fd1c5;
+            transform: translate(-50%, -50%) scale(0); opacity: 0; pointer-events: none;
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s; z-index: 3;
+            box-shadow: 0 0 20px rgba(79, 209, 197, 0.2);
+        }
+        .touchpad-panel .tp-touchpad .tp-finger.show { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        .touchpad-panel .tp-touchpad .tp-finger.two { width: 30px; height: 30px; border-color: #f6ad55; background: rgba(246, 173, 85, 0.25); }
+        .touchpad-panel .tp-touchpad .tp-ripple {
+            position: absolute; width: 24px; height: 24px; margin: -12px; border-radius: 50%;
+            border: 2.5px solid rgba(255, 255, 255, 0.85); pointer-events: none; z-index: 5;
+            animation: tpRipple 0.45s ease-out forwards;
+        }
+        .touchpad-panel .tp-touchpad .tp-ripple.right { border-color: #f6ad55; }
+        .touchpad-panel .tp-touchpad .tp-ripple.double { border-color: #c9a0ff; }
+        .touchpad-panel .tp-touchpad .tp-ripple.scroll-up { border-color: #7bcfa6; }
+        .touchpad-panel .tp-touchpad .tp-ripple.scroll-down { border-color: #ff7eb3; }
+        @keyframes tpRipple { to { transform: scale(4); opacity: 0; } }
+        .touchpad-panel .tp-touchpad .tp-keyfb {
+            position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(0.8);
+            background: rgba(0, 0, 0, 0.7); color: #ddd; padding: 4px 14px; border-radius: 16px;
+            font-size: 12px; font-weight: 600; border: 1px solid #3d3d48; pointer-events: none; z-index: 6;
+            opacity: 0; white-space: nowrap; transition: opacity 0.3s, transform 0.3s;
+        }
+        .touchpad-panel .tp-touchpad .tp-keyfb.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        .touchpad-panel .tp-touchpad .tp-keyfb.hide { opacity: 0; transform: translate(-50%, -50%) scale(1.2); }
+        `;
+        }
+
+        constructor(root, options = {}) {
+            this.root = root;
+            this.onCommand = options.onCommand || function () {};
+            this.speed = options.speed || 7.5;        // 触控板灵敏度倍率（手指位移 × speed）
+            this.dragOn = false;
+            this._accX = 0;
+            this._accY = 0;
+            this._ts = {
+                active: false, fingerCount: 0, startTime: 0,
+                startX: 0, startY: 0, lastX: 0, lastY: 0,
+                maxDist: 0, twoFingerPrevY: 0, scrollAccum: 0,
+                speedSmooth: 0, lastMoveTime: 0
+            };
+            this._scrollHideTimer = null;
+            this._spdTimer = null;
+
+            this._injectStyles();
+            // 在 section 内生成独立根容器：
+            // 否则 .touchpad-panel{display:flex} 会盖过 .panel-view 的显隐控制，导致切面板时触控板无法隐藏。
+            this.root.innerHTML = '<div class="touchpad-panel"></div>';
+            this.root = this.root.querySelector('.touchpad-panel');
+            this._buildDOM();
+            this._bindTouch();
+            this._bindButtons();
+        }
+
+        // ---------- 构建 ----------
+
+        _injectStyles() {
+            if (document.getElementById('touchpad-panel-styles')) return;   // 幂等
+            const style = document.createElement('style');
+            style.id = 'touchpad-panel-styles';
+            style.textContent = TouchpadPanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            this.root.innerHTML = [
+                '<div class="tp-speed-bar">',
+                '  <label>🐢 速度</label>',
+                '  <input id="tp-speed" type="range" min="1" max="20" step="0.5" value="5">',
+                '  <span class="tp-speed-val">1.00</span>',
+                '</div>',
+                '<div class="tp-main-row">',
+                '  <div class="tp-btn-col">',
+                '    <button type="button" data-act="left">左键</button>',
+                '    <button type="button" data-act="right">右键</button>',
+                '    <button type="button" data-act="double">双击</button>',
+                '    <button type="button" data-act="drag">拖拽</button>',
+                '  </div>',
+                '  <div class="tp-touchpad-wrap">',
+                '    <div class="tp-touchpad">',
+                '      <div class="tp-grid-h"></div>',
+                '      <div class="tp-grid-v"></div>',
+                '      <div class="tp-icon">✚</div>',
+                '      <div class="tp-hud">',
+                '        <div class="tp-spd">速度 <span class="val tp-spd-val">0</span> px/s</div>',
+                '        <div class="tp-fingers">手指 <span class="val tp-fingers-val">0</span></div>',
+                '      </div>',
+                '      <div class="tp-scroll-ind">',
+                '        <div class="arrow up">▲</div>',
+                '        <div class="line"></div>',
+                '        <div class="arrow down">▼</div>',
+                '      </div>',
+                '      <div class="tp-finger"></div>',
+                '      <div class="tp-hint">滑动 · 轻点 · 双指滚动</div>',
+                '    </div>',
+                '  </div>',
+                '  <div class="tp-btn-col-right">',
+                '    <button type="button" data-act="enter" class="enter-btn">↵ Enter</button>',
+                '    <button type="button" data-act="shiftenter" class="shift-enter-btn">⇧ Enter</button>',
+                '    <button type="button" data-act="undo" class="undo-btn">↩ Undo</button>',
+                '    <button type="button" data-act="redo" class="redo-btn">↪ Redo</button>',
+                '  </div>',
+                '</div>'
+            ].join('');
+
+            this.touchpad = this.root.querySelector('.tp-touchpad');
+            this.finger = this.root.querySelector('.tp-finger');
+            this.speedRange = this.root.querySelector('#tp-speed');
+            this.speedVal = this.root.querySelector('.tp-speed-val');
+            this.spdVal = this.root.querySelector('.tp-spd-val');
+            this.fingersVal = this.root.querySelector('.tp-fingers-val');
+            this.scrollInd = this.root.querySelector('.tp-scroll-ind');
+            this.scrollUp = this.root.querySelector('.tp-scroll-ind .arrow.up');
+            this.scrollDown = this.root.querySelector('.tp-scroll-ind .arrow.down');
+
+            // 速度倍率滑块（触控板手感：默认 5.0，最高 20）
+            this.speedRange.value = this.speed;
+            this.speedVal.textContent = this.speed.toFixed(1);
+            this.speedRange.addEventListener('input', () => {
+                this.speed = parseFloat(this.speedRange.value);
+                this.speedVal.textContent = this.speed.toFixed(1);
+            });
+        }
+
+        // ---------- 输出（唯一出口） ----------
+
+        static get FRAMES() {
+            return {
+                left:       { type: 'mouse', a: 'click', btn: 'left' },
+                right:      { type: 'mouse', a: 'click', btn: 'right' },
+                double:     { type: 'mouse', a: 'double', btn: 'left' },
+                enter:      { type: 'key', keys: 'enter' },
+                shiftenter: { type: 'key', keys: 'shift+enter' },
+                undo:       { type: 'key', keys: 'ctrl+z' },
+                redo:       { type: 'key', keys: 'ctrl+y' }
+            };
+        }
+
+        // 位移小数余量跨帧累加，沿方向取整发整数像素（与 MouseJoystick 同策略）
+        _emitMove(dx, dy) {
+            this._accX += dx;
+            this._accY += dy;
+            const mag = Math.hypot(this._accX, this._accY);
+            if (mag < 1) return;
+            const n = Math.floor(mag);
+            const ox = Math.round(this._accX / mag * n);
+            const oy = Math.round(this._accY / mag * n);
+            this._accX -= ox;
+            this._accY -= oy;
+            if (ox === 0 && oy === 0) return;
+            this._emitAction({ type: 'mouse', a: 'move', dx: ox, dy: oy });
+        }
+
+        _emitAction(frame) {
+            this.onCommand(frame);
+        }
+
+        // ---------- 按钮 ----------
+
+        _bindButtons() {
+            const self = this;
+            this.root.querySelectorAll('.tp-btn-col button, .tp-btn-col-right button').forEach(function (el) {
+                const act = el.dataset.act;
+                el.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    if (act === 'drag') {
+                        self._toggleDrag(el);
+                        return;
+                    }
+                    const frame = TouchpadPanel.FRAMES[act];
+                    if (frame) self._emitAction(frame);
+                    self._spawnRipple('');
+                    self._showKeyFeedback(el.textContent.trim());
+                });
+            });
+        }
+
+        _toggleDrag(el) {
+            this.dragOn = !this.dragOn;
+            el.classList.toggle('on', this.dragOn);
+            this._emitAction({ type: 'mouse', a: this.dragOn ? 'down' : 'up', btn: 'left' });
+            this._showKeyFeedback(this.dragOn ? '拖拽 ON' : '拖拽 OFF');
+        }
+
+        // ---------- 触摸核心 ----------
+
+        _center(touches) {
+            let cx = 0, cy = 0;
+            for (let i = 0; i < touches.length; i++) {
+                cx += touches[i].clientX;
+                cy += touches[i].clientY;
+            }
+            return { x: cx / touches.length, y: cy / touches.length };
+        }
+
+        _bindTouch() {
+            const tp = this.touchpad;
+            const self = this;
+            const ts = self._ts;
+
+            tp.addEventListener('touchstart', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                ts.active = true;
+                ts.fingerCount = count;
+                ts.maxDist = 0;
+                ts.startTime = performance.now();
+                ts.lastMoveTime = ts.startTime;
+                const center = self._center(touches);
+                ts.startX = ts.lastX = center.x;
+                ts.startY = ts.lastY = center.y;
+                if (count === 1) {
+                    ts.twoFingerPrevY = 0;
+                    ts.scrollAccum = 0;
+                    self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    tp.classList.add('active');
+                } else if (count >= 2) {
+                    ts.twoFingerPrevY = center.y;
+                    ts.scrollAccum = 0;
+                    self._showFinger(center.x, center.y, 2);
+                    tp.classList.add('active');
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchmove', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                if (!ts.active || count === 0) return;
+                const center = self._center(touches);
+                if (count === 1) {
+                    const dx = center.x - ts.lastX;
+                    const dy = center.y - ts.lastY;
+                    ts.maxDist = Math.max(ts.maxDist, Math.hypot(center.x - ts.startX, center.y - ts.startY));
+                    self._emitMove(dx * self.speed, dy * self.speed);
+                    self._updateSpeed(dx * self.speed, dy * self.speed);
+                    self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    tp.classList.add('active');
+                    ts.lastX = center.x;
+                    ts.lastY = center.y;
+                } else if (count >= 2) {
+                    // 双指上下拖 → 滚轮（与 MouseJoystick 的 wheelup=-120 / wheeldown=+120 对齐）
+                    const deltaY = center.y - ts.twoFingerPrevY;
+                    const sens = 0.8;
+                    ts.scrollAccum += -deltaY * sens * 0.5;
+                    const threshold = 6;
+                    if (Math.abs(ts.scrollAccum) >= threshold) {
+                        const steps = Math.floor(ts.scrollAccum / threshold);
+                        const up = steps > 0;
+                        self._emitAction({ type: 'mouse', a: 'wheel', delta: up ? -120 : 120 });
+                        self._spawnRipple(up ? 'scroll-up' : 'scroll-down');
+                        self._showScroll(up);
+                        ts.scrollAccum -= steps * threshold;
+                    }
+                    ts.twoFingerPrevY = center.y;
+                    self._showFinger(center.x, center.y, 2);
+                    tp.classList.add('active');
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchend', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                if (count === 0) {
+                    const elapsed = performance.now() - ts.startTime;
+                    // 轻点判定：几乎没移动且时间短 → 左键单击（与 sample 一致）
+                    if (ts.maxDist < 10 && elapsed < 300) {
+                        self._emitAction({ type: 'mouse', a: 'click', btn: 'left' });
+                        self._spawnRipple('');
+                    }
+                    ts.active = false;
+                    ts.fingerCount = 0;
+                    ts.maxDist = 0;
+                    ts.scrollAccum = 0;
+                    tp.classList.remove('active');
+                    self._hideFinger();
+                    self._clearSpeedLater();
+                } else {
+                    ts.fingerCount = count;
+                    const center = self._center(touches);
+                    if (count === 1) {
+                        ts.lastX = center.x;
+                        ts.lastY = center.y;
+                        self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    } else if (count >= 2) {
+                        ts.twoFingerPrevY = center.y;
+                        self._showFinger(center.x, center.y, 2);
+                    }
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchcancel', function (e) {
+                e.preventDefault();
+                ts.active = false;
+                ts.fingerCount = 0;
+                ts.maxDist = 0;
+                ts.scrollAccum = 0;
+                tp.classList.remove('active');
+                self._hideFinger();
+                self._clearSpeed();
+            }, { passive: false });
+        }
+
+        // ---------- 视觉反馈 ----------
+
+        _showFinger(clientX, clientY, count) {
+            const rect = this.touchpad.getBoundingClientRect();
+            const w = rect.width, h = rect.height;
+            const cx = rect.left + w / 2, cy = rect.top + h / 2;
+            let dx = (clientX - cx) / (w / 2);
+            let dy = (clientY - cy) / (h / 2);
+            if (Math.abs(dx) > 1) dx = Math.sign(dx);
+            if (Math.abs(dy) > 1) dy = Math.sign(dy);
+            const px = cx + dx * (w / 2) * 0.85 - rect.left;
+            const py = cy + dy * (h / 2) * 0.85 - rect.top;
+            this.finger.style.left = px + 'px';
+            this.finger.style.top = py + 'px';
+            this.finger.classList.add('show');
+            if (count >= 2) this.finger.classList.add('two');
+            else this.finger.classList.remove('two');
+            this.fingersVal.textContent = count;
+        }
+
+        _hideFinger() {
+            this.finger.classList.remove('show', 'two');
+            this.fingersVal.textContent = '0';
+        }
+
+        _spawnRipple(cls) {
+            const rip = document.createElement('div');
+            rip.className = 'tp-ripple' + (cls ? ' ' + cls : '');
+            rip.style.left = '50%';
+            rip.style.top = '50%';
+            this.touchpad.appendChild(rip);
+            setTimeout(function () { rip.remove(); }, 500);
+        }
+
+        _showKeyFeedback(label) {
+            const el = document.createElement('div');
+            el.className = 'tp-keyfb';
+            el.textContent = label;
+            this.touchpad.appendChild(el);
+            requestAnimationFrame(function () { el.classList.add('show'); });
+            setTimeout(function () {
+                el.classList.remove('show');
+                el.classList.add('hide');
+                setTimeout(function () { el.remove(); }, 400);
+            }, 600);
+        }
+
+        _showScroll(up) {
+            this.scrollInd.classList.add('show');
+            if (up) {
+                this.scrollUp.classList.add('active');
+                this.scrollDown.classList.remove('active');
+            } else {
+                this.scrollDown.classList.add('active');
+                this.scrollUp.classList.remove('active');
+            }
+            clearTimeout(this._scrollHideTimer);
+            this._scrollHideTimer = setTimeout(() => {
+                this.scrollInd.classList.remove('show');
+                this.scrollUp.classList.remove('active');
+                this.scrollDown.classList.remove('active');
+            }, 600);
+        }
+
+        _updateSpeed(mx, my) {
+            const now = performance.now();
+            const dt = (now - this._ts.lastMoveTime) / 1000 || 0.016;
+            const dist = Math.hypot(mx, my);
+            if (dt > 0.01) {
+                const spd = dist / dt;
+                this._ts.speedSmooth = this._ts.speedSmooth * 0.7 + spd * 0.3;
+                this.spdVal.textContent = Math.round(this._ts.speedSmooth);
+                this._ts.lastMoveTime = now;
+            }
+        }
+
+        _clearSpeedLater() {
+            const self = this;
+            clearTimeout(this._spdTimer);
+            this._spdTimer = setTimeout(function () {
+                if (!self._ts.active) self.spdVal.textContent = '0';
+            }, 320);
+        }
+
+        _clearSpeed() {
+            clearTimeout(this._spdTimer);
+            this.spdVal.textContent = '0';
+        }
+
+        // ---------- 生命周期 ----------
+
+        destroy() {
+            clearTimeout(this._scrollHideTimer);
+            clearTimeout(this._spdTimer);
+            // 触摸 / 按钮监听器挂在 this.touchpad 与按钮上，随根节点移除自动失效
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
         }
     }
 
@@ -2266,9 +2850,14 @@
         const wsClient = new WSClient(`${wsProto}//${location.host}${location.pathname}ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
 
-        // 鼠标子面板：摇杆组件。onCommand 是唯一出口（docs/mouse-joystick-design.md §3.2），
+        // 鼠标子面板：虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
+        // 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板。
+        // 两者都只用 onCommand(frame) 作为唯一出口（docs/mouse-joystick-design.md §3.2），
         // 帧字段平铺在顶层，原样交给 wsClient；未连接时 sendFrame 静默返回 false。
         window._mouseJoystick = new MouseJoystick(document.getElementById('view-mouse'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        window._touchpad = new TouchpadPanel(document.getElementById('view-touchpad'), {
             onCommand: (frame) => wsClient.sendFrame(frame)
         });
 
