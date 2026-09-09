@@ -285,6 +285,9 @@ def main():
         elif event_type == "mouse":
             # 鼠标面板：payload 是完整 mouse 帧，a 决定动作（wire-protocol.md §7）
             perform_mouse(payload)
+        elif event_type == "file_saved":
+            # 手机端文件传输完成落盘（payload: {path, name, size}），弹托盘通知
+            tray.notify_file_saved(payload["path"], payload["name"])
         elif event_type == "connect":
             # payload 为本次握手协商出的算法名（明文模式为 "none"）
             algo = payload if isinstance(payload, str) else None

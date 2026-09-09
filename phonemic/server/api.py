@@ -22,6 +22,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import uvicorn
 
 from phonemic.bridge_interface import EventBridge
+from phonemic.gui.file import FileReceiver
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
@@ -114,6 +115,8 @@ class ConnectionManager:
         if self.active_websocket is websocket:
             self.active_websocket = None
             self.active_session = None
+            # 断连时丢弃未完成的文件接收会话（删 .part，wire-protocol.md §9.2）
+            _file_receiver.abort_all()
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -124,11 +127,18 @@ _manager: Optional[ConnectionManager] = None
 # 安全通道（所有模式共用，PC 密钥对在启动时生成一次）
 _secure_channel: Optional[SecureChannel] = None
 
+# 文件接收状态机（wire-protocol.md §9）。落盘回调走 bridge 发 file_saved 事件，
+# 主进程弹托盘通知；dest_dir 默认 ~/Downloads/PhoneMic（§9.2）。
+_file_receiver = FileReceiver()
+
 
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
     global _manager
     _manager = ConnectionManager(bridge)
+    _file_receiver.on_done = lambda path, name, size: _manager.bridge.emit(
+        "file_saved", {"path": path, "name": name, "size": size}
+    )
     logger.info("Message bridge set for backend service")
 
 
@@ -343,6 +353,18 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         # 整帧交给 PC 端，a 决定动作（wire-protocol.md §7）
         _manager.bridge.emit("mouse", inner)
         logger.debug(f"Received mouse: a={inner.get('a')}")
+    elif msg_type == "file":
+        # 文件分块接收（wire-protocol.md §9）：写盘放线程，不阻塞事件循环。
+        # WS 有序 + 每帧串行 await，保证 data 块按序落盘。
+        ack, err = await asyncio.to_thread(_file_receiver.handle, inner)
+        if err is not None:
+            await _send_frame(websocket, {
+                "type": "error",
+                "code": "malformed",
+                "msg": err,
+            })
+        elif ack is not None:
+            await _send_frame(websocket, ack)
     else:
         # wire-protocol.md §10：type 不在分派表内 → 丢弃并回 error(malformed)
         logger.warning(f"Unknown inner message type: {msg_type}")

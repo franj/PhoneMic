@@ -335,13 +335,16 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 {"type":"file", "a":"data",  "id":7, "n":0, "chunk":<bin 256KB>}
 {"type":"file", "a":"data",  "id":7, "n":1, "chunk":<bin 256KB>}
 {"type":"file", "a":"end",   "id":7}
+{"type":"file", "a":"cancel","id":7}
 ```
 
 - **分块大小固定 256KB**。uvicorn 16MB 上限下有 64 倍余量；分块是为了出进度条，以及让 mouse 帧能插进来不被大块堵住。
 - **顺序由 WebSocket 保证**（可靠有序），重组只需 `bytearray.extend`；`n` 仅用于进度显示与 ACK。
 - **`id` 由手机端生成**：每连接内从 1 单调递增的整数，作为一次传输会话的标识；服务端按 `id` 路由 buffer，无需跨端协商。
 - 接收端状态机：`start` 建 buffer → 每个 `data` 执行 `buf.extend(chunk)` → `end` 触发落盘（file）或写剪贴板（photo）。
-- **`ack` 仅作进度回报**（字段 `received` = 已收字节数），v1 **不做窗口流控**——服务端顺序接收全部 `data` 即可，`ack` 用于前端进度条与断点提示，不反压发送端。
+- **`a:"cancel"`**：发送端主动中止。手机端发送期间 UI 锁定为「仅取消可点」，点取消即发此帧；接收端关闭半成品文件、删除临时文件、丢弃会话状态，**不回任何帧**（手机端本地即呈现"已取消"）。
+- **`ack` 仅作进度回报**（字段 `received` = 已收字节数），v1 **不做窗口流控**——服务端顺序接收全部 `data` 即可，`ack` 用于前端进度条与断点提示，不反压发送端。每收到一个 `data` 回一帧：`{"type":"ack", "ref":"file", "id":7, "n":3, "received":786432}`。
+- **发送期间 WS 单会话单文件**：一次连接同时只进行一次 `file` 传输（`start` 后未 `end`/`cancel` 前收到新 `start` 视为协议错误，回 `error(malformed)`）。v1 不做队列。
 
 ### 9.1 两个 sink：file 落盘、photo 剪贴板
 
@@ -356,6 +359,14 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 > - **macOS**：`NSPasteboard` 的 `NSPasteboardTypePNG`（需 pyobjc 或 `osascript` 桥接）。
 >
 > 协议层只原样传二进制字节、不关心具体格式；实现层要按平台分支。当前 PhoneMic 仅 Windows 桌面，先实现 `CF_DIB` / `PNG`；Linux 支持（未来规划）时再补 `wl-copy` / `xclip` 分支。
+
+### 9.2 file 接收端落地规则（实现约定）
+
+- **落地目录**：`~/Downloads/PhoneMic/`，不存在则创建（含父目录）。v1 写死该默认值，不做配置项；将来加"用户指定目录"时只改接收端一处。
+- **文件名**：沿用手机端上传的原文件名（取 `Path` 末段，剥离任何路径分隔符）。
+- **重名自动改号**：目标已存在时按 `name(1).ext` → `name(2).ext` 递增；若已存在 `name(3).ext`，新文件取最大已用序号 +1（即 `name(4).ext`）。序号规则只看 `(n)` 后缀数字。
+- **流式写盘**：`data` 逐块写入 `<final>.part` 临时文件（放线程/线程池执行，不阻塞事件循环），`end` 收齐后改名去掉 `.part`。改名前再查一次重名（start 分配的号码可能被中途占用）。
+- **异常清理**：`cancel` 或连接断开 → 关闭句柄、删除 `.part`、丢弃会话。
 
 ---
 
@@ -411,7 +422,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 |---|---|---|
 | 1 | `msgpack` C 扩展在 Nuitka 打包下是否顺利 | 未验证，失败则切 `cbor2` |
 | 2 | 是否启用 AAD | **已定：AAD 优先**（XChaCha20 / AES-GCM 用 aad 带 `seq`），不支持 aad 的 XSalsa20 用 8 字节大端前缀兜底；细节已移交 `crypto-design.md` §5 |
-| 3 | file 落地目录、photo 是否直接写剪贴板 | **已定：photo 直接写剪贴板、不落盘；file 落盘、不进剪贴板（图片文件也走 file）。file 落地目录待配置（默认下载目录或用户指定）** |
+| 3 | file 落地目录、photo 是否直接写剪贴板 | **已定：photo 直接写剪贴板、不落盘；file 落盘、不进剪贴板（图片文件也走 file）。file 落地目录 v1 写死 `~/Downloads/PhoneMic/`（自动创建），配置项后续再加（落地/命名规则见 §9.2）** |
 | 4 | 面板按钮将来是否由 PC 下发 | v1 内置；插件化方案见 `panel-plugin-design.md`（声明式 JSON 面板，用户可让 AI 生成后放入插件目录） |
 | 5 | 是否兼容未刷新的旧页面（旧 JSON 协议） | 建议否——页面由服务端下发；text 帧直接关闭并提示重新扫码 |
 | 6 | `photo` 是否并入 `file`（加 `dest` 字段：`file`/`clipboard`） | **已定：保持独立**。根因有二：① `file`→磁盘、`photo`→剪贴板是两条平台强相关的落地管线（剪贴板图片格式见 §9.1）；② `photo` 纯为剪贴板设计、不落盘，`file` 纯为磁盘、不进剪贴板，语义正交。代价多一条代码路径，可接受 |
