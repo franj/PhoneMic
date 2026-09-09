@@ -59,6 +59,11 @@
     "minimized_title": "PhoneMic",
     "file_saved_title": "收到檔案",
     "file_saved_msg": "{name} 已儲存，點擊通知開啟目錄",
+    "photo_copied_title": "圖片已複製",
+    "photo_copied_msg": "{name} 已複製到剪貼板，可直接貼上",
+    "photo_failed_title": "圖片複製失敗",
+    "photo_failed_msg": "無法把 {name} 寫入剪貼板",
+
     "minimized_message": "程式已最小化到系統托盤，按一下托盤圖示可恢復"
   },
   "hud": {},
@@ -141,13 +146,21 @@
     "panel_kb_sys": "系統",
     "panel_btn_clear_all": "清空",
     "panel_file_image": "圖片",
+    "panel_file_image_hint": "複製到電腦剪貼板",
+
     "panel_file_doc": "檔案",
-    "panel_file_camera": "拍照",
+    "panel_file_doc_hint": "文件/圖片，儲存到電腦",
+
+
     "panel_file_cancel": "取消",
     "panel_file_disconnected": "未連接到電腦，無法傳送檔案",
     "bubble_file_done": "📄 已傳送 {name}",
     "bubble_file_canceled": "📄 已取消傳送 {name}（點擊重發）",
     "bubble_file_failed": "📄 {name} 傳送失敗（點擊重發）",
+    "bubble_photo_done": "🖼️ {name} 已複製到電腦剪貼板",
+    "bubble_photo_canceled": "🖼️ 已取消複製 {name}",
+    "bubble_photo_failed": "🖼️ {name} 複製失敗",
+
     "input_placeholder_auto": "語音辨識後自動傳送...",
     "input_placeholder_manual": "輸入後點擊傳送",
     "input_placeholder_disconnected": "連線已中斷...",

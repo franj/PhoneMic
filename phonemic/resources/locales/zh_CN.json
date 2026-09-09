@@ -59,6 +59,11 @@
     "minimized_title": "PhoneMic",
     "file_saved_title": "收到文件",
     "file_saved_msg": "{name} 已保存，点击通知打开目录",
+    "photo_copied_title": "图片已复制",
+    "photo_copied_msg": "{name} 已复制到剪贴板，可直接粘贴",
+    "photo_failed_title": "图片复制失败",
+    "photo_failed_msg": "无法把 {name} 写入剪贴板",
+
     "minimized_message": "程序已最小化到系统托盘，点击托盘图标可恢复"
   },
   "hud": {},
@@ -141,13 +146,21 @@
     "panel_kb_sys": "系统",
     "panel_btn_clear_all": "清空",
     "panel_file_image": "图片",
+    "panel_file_image_hint": "复制到电脑剪贴板",
+
     "panel_file_doc": "文件",
-    "panel_file_camera": "拍照",
+    "panel_file_doc_hint": "文档/图片，保存到电脑",
+
+
     "panel_file_cancel": "取消",
     "panel_file_disconnected": "未连接到电脑，无法发送文件",
     "bubble_file_done": "📄 已发送 {name}",
     "bubble_file_canceled": "📄 已取消发送 {name}（点击重发）",
     "bubble_file_failed": "📄 {name} 发送失败（点击重发）",
+    "bubble_photo_done": "🖼️ {name} 已复制到电脑剪贴板",
+    "bubble_photo_canceled": "🖼️ 已取消复制 {name}",
+    "bubble_photo_failed": "🖼️ {name} 复制失败",
+
     "input_placeholder_auto": "语音识别后自动发送...",
     "input_placeholder_manual": "输入后点击发送",
     "input_placeholder_disconnected": "连接已断开...",

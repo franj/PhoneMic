@@ -59,6 +59,11 @@
     "minimized_title": "PhoneMic",
     "file_saved_title": "File received",
     "file_saved_msg": "{name} saved. Tap the notification to open the folder",
+    "photo_copied_title": "Image copied",
+    "photo_copied_msg": "{name} copied to the clipboard, ready to paste",
+    "photo_failed_title": "Image copy failed",
+    "photo_failed_msg": "Could not put {name} on the clipboard",
+
     "minimized_message": "Program minimized to system tray. Click the tray icon to restore."
   },
   "settings": {
@@ -140,13 +145,21 @@
     "panel_kb_sys": "System",
     "panel_btn_clear_all": "Clear",
     "panel_file_image": "Image",
+    "panel_file_image_hint": "Copy to PC clipboard",
+
     "panel_file_doc": "File",
-    "panel_file_camera": "Camera",
+    "panel_file_doc_hint": "Docs & images, saved to PC",
+
+
     "panel_file_cancel": "Cancel",
     "panel_file_disconnected": "Not connected to PC, cannot send files",
     "bubble_file_done": "📄 Sent {name}",
     "bubble_file_canceled": "📄 Canceled {name} (tap to resend)",
     "bubble_file_failed": "📄 Failed to send {name} (tap to resend)",
+    "bubble_photo_done": "🖼️ {name} copied to PC clipboard",
+    "bubble_photo_canceled": "🖼️ Copying {name} canceled",
+    "bubble_photo_failed": "🖼️ Failed to copy {name}",
+
     "input_placeholder_auto": "Recognition auto-send",
     "input_placeholder_manual": "Type and tap send",
     "input_placeholder_disconnected": "Disconnected...",

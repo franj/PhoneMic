@@ -983,15 +983,16 @@
             return msgDiv;
         }
         /**
-         * 文件传输结果气泡（发送完成 / 已取消）。
-         * status: 'done' | 'cancel'；file: File 引用，取消的气泡点击可重发。
+         * 文件/图片传输结果气泡（发送完成 / 已取消 / 失败）。
+         * status: 'done' | 'cancel'；file: File 引用（取消/失败可重发时传）；
+         * kind: 'file'（可点重发）| 'photo'（纯结果展示，不可重发）。
          */
-        addFileMessage(text, status, file) {
+        addFileMessage(text, status, file, kind = 'file') {
             const msgDiv = document.createElement('div');
             msgDiv.className = 'message ' + (status === 'done' ? 'file-done' : 'file-cancel');
             msgDiv.textContent = text;
-            msgDiv.dataset.kind = 'file';
-            if (file) msgDiv._fileRef = file;
+            msgDiv.dataset.kind = kind;
+            if (kind === 'file' && file) msgDiv._fileRef = file;
             this.container.appendChild(msgDiv);
             this.trimToLimit();
             this.scrollToBottom();
@@ -1380,6 +1381,8 @@
                     }
                     return;
                 }
+                // 图片气泡（photo）：到电脑剪贴板的结果展示，不参与重发
+                if (msg.dataset.kind === 'photo') return;
                 if (!this.wsClient.getConnected()) return;
                 if (confirm(t('confirm_resend'))) {
                     this.ui.sendExternalMessage(msg.textContent);
@@ -1389,8 +1392,8 @@
         _onStart(e) {
             const msg = e.target.closest('.message');
             if (!msg) return;
-            // 文件气泡不参与长按取词/拼接输入
-            if (msg.dataset.kind === 'file') return;
+            // 文件/图片结果气泡不参与长按取词/拼接输入
+            if (msg.dataset.kind === 'file' || msg.dataset.kind === 'photo') return;
             this.currentMsg = msg;
             this.currentMsg.classList.add('active');
             this.longPressTriggered = false;
@@ -3077,12 +3080,13 @@
         .file-panel .fp-pick button {
             flex: 1;
             max-width: 104px;
-            height: 96px;
+            min-height: 96px;
+            padding: 10px 4px;
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 6px;
+            gap: 4px;
             border: 1px dashed #c8ccd2;
             border-radius: 12px;
             background: rgba(255, 255, 255, 0.7);
@@ -3103,6 +3107,12 @@
         .file-panel .fp-pick .ico {
             font-size: 30px;
             line-height: 1;
+        }
+        .file-panel .fp-pick .fp-sub {
+            font-size: 10px;
+            line-height: 1.25;
+            color: #9ca3af;
+            text-align: center;
         }
         /* 发送进度态：发送期间仅「取消」可点 */
         .file-panel .fp-progress {
@@ -3173,6 +3183,7 @@
 
             this._id = 0;            // 传输会话 id：每连接从 1 递增（协议 §9）
             this._state = 'idle';    // idle | sending
+            this._kind = 'file';     // 当前传输类型：'file' 落盘 | 'photo' 到剪贴板
             this._file = null;       // 发送中的 File（取消/出错时留作重发）
             this._cancelRequested = false;
 
@@ -3180,9 +3191,9 @@
             this._buildDOM();
             this._bind();
 
-            // 下行 ack：进度条推进（协议 ref:"file"）
+            // 下行 ack：进度条推进（file 的 ref:"file"、photo 的 ref:"photo"，协议 §9）
             this.ws.on('ack', (f) => {
-                if (this._state === 'sending' && f.ref === 'file' && f.id === this._id) {
+                if (this._state === 'sending' && f.ref === this._kind && f.id === this._id) {
                     this._updateProgress(f.received);
                 }
             });
@@ -3204,14 +3215,13 @@
             this.root.innerHTML = `
                 <div class="file-panel">
                     <div class="fp-pick">
-                        <button type="button" data-fp="image" disabled>
-                            <span class="ico">🖼️</span><span data-i18n="panel_file_image"></span>
-                        </button>
                         <button type="button" data-fp="doc">
                             <span class="ico">📄</span><span data-i18n="panel_file_doc"></span>
+                            <span class="fp-sub" data-i18n="panel_file_doc_hint"></span>
                         </button>
-                        <button type="button" data-fp="camera" disabled>
-                            <span class="ico">📷</span><span data-i18n="panel_file_camera"></span>
+                        <button type="button" data-fp="image">
+                            <span class="ico">🖼️</span><span data-i18n="panel_file_image"></span>
+                            <span class="fp-sub" data-i18n="panel_file_image_hint"></span>
                         </button>
                         <input type="file" class="fp-input" hidden>
                     </div>
@@ -3236,23 +3246,38 @@
         }
 
         _bind() {
-            this.pickRow.querySelector('[data-fp="doc"]').addEventListener('click', () => {
-                if (this._state === 'idle') this.fileInput.click();
-            });
+            // 按钮决定传输类型：图片 → 剪贴板(photo)，文件 → 磁盘(file)
+            const pickKind = (kind) => {
+                if (this._state !== 'idle') return;
+                this._pendingKind = kind;
+                this.fileInput.accept = kind === 'photo' ? 'image/*' : '';
+                this.fileInput.click();
+            };
+            this.pickRow.querySelector('[data-fp="image"]').addEventListener('click', () => pickKind('photo'));
+            this.pickRow.querySelector('[data-fp="doc"]').addEventListener('click', () => pickKind('file'));
             this.fileInput.addEventListener('change', () => {
                 const f = this.fileInput.files && this.fileInput.files[0];
                 this.fileInput.value = '';   // 允许下次选同一个文件仍触发 change
-                if (f) this._start(f);
+                if (f) {
+                    const kind = this._pendingKind || 'file';
+                    this._pendingKind = null;
+                    this._start(f, kind);
+                }
             });
             this.root.querySelector('.fp-cancel').addEventListener('click', () => this._cancel());
         }
 
-        /** 外部重发入口（消息气泡点击）：重新发送同一文件 */
+        /** 外部重发入口（消息气泡点击）：重新发送同一文件（仅 file 可重发） */
         resend(file) {
-            if (this._state === 'idle') this._start(file);
+            if (this._state === 'idle') this._start(file, 'file');
         }
 
-        async _start(file) {
+        /** 结果气泡文案键：photo 与 file 各自一套（bubble_photo_* / bubble_file_*） */
+        _bubbleKey(base) {
+            return this._kind === 'photo' ? 'bubble_photo_' + base : 'bubble_file_' + base;
+        }
+
+        async _start(file, kind = 'file') {
             if (this._state === 'sending') return;
             if (!this.ws.getConnected()) {
                 alert(t('panel_file_disconnected'));
@@ -3260,6 +3285,7 @@
             }
 
             this._id += 1;
+            this._kind = kind;               // 'file' → 磁盘；'photo' → 剪贴板
             this._file = file;
             this._cancelRequested = false;
             this._state = 'sending';
@@ -3274,7 +3300,8 @@
             this._updateProgress(0);
 
             const total = Math.ceil(file.size / FilePanel.CHUNK_SIZE);
-            this.onCommand({ type: 'file', a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
+            // 帧 type 随传输类型（wire-protocol.md §9：file/photo 线格式相同）
+            this.onCommand({ type: kind, a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
 
             for (let n = 0; n < total; n++) {
                 if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾
@@ -3282,41 +3309,47 @@
                 try {
                     const blob = file.slice(n * FilePanel.CHUNK_SIZE, (n + 1) * FilePanel.CHUNK_SIZE);
                     const buf = await blob.arrayBuffer();
-                    const ok = this.onCommand({ type: 'file', a: 'data', id: this._id, n, chunk: new Uint8Array(buf) });
+                    const ok = this.onCommand({ type: kind, a: 'data', id: this._id, n, chunk: new Uint8Array(buf) });
                     if (!ok) { this._finish(false); return; }   // 连接断开，sendFrame 静默 false
                 } catch (e) {
                     console.error('[FILE] read/send chunk failed:', e);
-                    this.onCommand({ type: 'file', a: 'cancel', id: this._id });
+                    this.onCommand({ type: kind, a: 'cancel', id: this._id });
                     this._finish(false);
                     return;
                 }
             }
 
             if (this._cancelRequested) return;
-            this.onCommand({ type: 'file', a: 'end', id: this._id });
+            this.onCommand({ type: kind, a: 'end', id: this._id });
             this._finish(true);
         }
 
         _cancel() {
             if (this._state !== 'sending') return;
             this._cancelRequested = true;
-            this.onCommand({ type: 'file', a: 'cancel', id: this._id });   // 通知 PC 删 .part（§9）
+            const kind = this._kind;
+            this.onCommand({ type: kind, a: 'cancel', id: this._id });   // file 删 .part、photo 丢 buffer（§9）
             const file = this._file;
             this._resetUI();
             this._state = 'idle';
-            // 灰色气泡入聊天记录；点击可重发同一文件
-            this.chat.addFileMessage(t('bubble_file_canceled', { name: file.name }), 'cancel', file);
+            // 灰色气泡入聊天记录：file 可点重发；photo 纯结果展示不可重发
+            const ref = kind === 'file' ? file : null;
+            this.chat.addFileMessage(t(this._bubbleKey('canceled'), { name: file.name }), 'cancel', ref, kind);
         }
 
         _finish(success) {
             const file = this._file;
+            const kind = this._kind;
             this._resetUI();
             this._state = 'idle';
             if (!file) return;
             if (success) {
-                this.chat.addFileMessage(t('bubble_file_done', { name: file.name }), 'done');
+                // 完成：file 深绿、photo 也用深绿，靠文案/图标（📄/🖼️）区分
+                this.chat.addFileMessage(t(this._bubbleKey('done'), { name: file.name }), 'done', null, kind);
             } else {
-                this.chat.addFileMessage(t('bubble_file_failed', { name: file.name }), 'cancel', file);
+                // 失败：file 可点重发；photo 纯结果展示
+                const ref = kind === 'file' ? file : null;
+                this.chat.addFileMessage(t(this._bubbleKey('failed'), { name: file.name }), 'cancel', ref, kind);
             }
         }
 

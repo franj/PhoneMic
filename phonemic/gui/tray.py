@@ -158,6 +158,28 @@ class SystemTray(QObject):
             open_dir = os.path.dirname(path) or None
         )
 
+    def notify_photo_copied(self, name: str) -> None:
+        """手机端图片已写入剪贴板：弹托盘通知（无目录可打开，点击不动作）。"""
+        if not self.tray_icon:
+            return
+        self.show_message(
+            self.i18n.tr("tray.photo_copied_title"),
+            self.i18n.tr("tray.photo_copied_msg", name=name or ""),
+            QSystemTrayIcon.Information,
+            timeout=5000,
+        )
+
+    def notify_photo_failed(self, name: str) -> None:
+        """图片字节无法写入剪贴板（解码失败/剪贴板不可用）。"""
+        if not self.tray_icon:
+            return
+        self.show_message(
+            self.i18n.tr("tray.photo_failed_title"),
+            self.i18n.tr("tray.photo_failed_msg", name=name or ""),
+            QSystemTrayIcon.Warning,
+            timeout=5000,
+        )
+
     def _on_message_clicked(self):
         """点击托盘通知：若是文件通知则打开文件所在目录。"""
         if self._last_file_dir and os.path.isdir(self._last_file_dir):

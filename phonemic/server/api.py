@@ -23,6 +23,7 @@ import uvicorn
 
 from phonemic.bridge_interface import EventBridge
 from phonemic.gui.file import FileReceiver
+from phonemic.gui.photo import PhotoReceiver
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
@@ -115,8 +116,9 @@ class ConnectionManager:
         if self.active_websocket is websocket:
             self.active_websocket = None
             self.active_session = None
-            # 断连时丢弃未完成的文件接收会话（删 .part，wire-protocol.md §9.2）
+            # 断连时丢弃未完成的文件/图片接收会话（wire-protocol.md §9）
             _file_receiver.abort_all()
+            _photo_receiver.abort_all()
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -131,6 +133,10 @@ _secure_channel: Optional[SecureChannel] = None
 # 主进程弹托盘通知；dest_dir 默认 ~/Downloads/PhoneMic（§9.2）。
 _file_receiver = FileReceiver()
 
+# 图片到剪贴板接收状态机（wire-protocol.md §9.1）：内存重组不落盘，
+# end 回调走 bridge 发 photo_received 事件，主进程写系统剪贴板 + 托盘通知。
+_photo_receiver = PhotoReceiver()
+
 
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
@@ -138,6 +144,10 @@ def set_bridge(bridge: EventBridge) -> None:
     _manager = ConnectionManager(bridge)
     _file_receiver.on_done = lambda path, name, size: _manager.bridge.emit(
         "file_saved", {"path": path, "name": name, "size": size}
+    )
+    # photo end 回调：把重组好的图片字节交给主进程（Qt 剪贴板写入必须在 GUI 线程）
+    _photo_receiver.on_done = lambda data, name, size: _manager.bridge.emit(
+        "photo_received", {"data": data, "name": name, "size": size}
     )
     logger.info("Message bridge set for backend service")
 
@@ -365,8 +375,19 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
             })
         elif ack is not None:
             await _send_frame(websocket, ack)
+    elif msg_type == "photo":
+        # 图片到剪贴板（wire-protocol.md §9.1）：与 file 线格式相同但内存重组、
+        # 不落盘；end 后由 on_done 回调把字节经 bridge 交给主进程写系统剪贴板。
+        ack, err = await asyncio.to_thread(_photo_receiver.handle, inner)
+        if err is not None:
+            await _send_frame(websocket, {
+                "type": "error",
+                "code": "malformed",
+                "msg": err,
+            })
+        elif ack is not None:
+            await _send_frame(websocket, ack)
     else:
-        # wire-protocol.md §10：type 不在分派表内 → 丢弃并回 error(malformed)
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {
             "type": "error",

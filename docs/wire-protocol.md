@@ -354,7 +354,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 - **`photo` → 剪贴板**：字节重组后**直接写入系统剪贴板**，不写任何磁盘文件。设计目的就是"手机拍一张 → 电脑剪贴板里能直接 Ctrl+V 粘贴"。因此 `photo` 的 `name` 字段对剪贴板无意义（剪贴板里没有文件名概念），可忽略或省略。
 
 > **跨平台剪贴板图片格式（实现注意，非协议层）**：剪贴板里放图不是"塞字节"那么简单，各平台有专属格式——这是 `photo` 必须独立于 `file` 的第二个硬理由（落地逻辑与平台强相关，和"写磁盘"是两套完全不同的代码路径）：
-> - **Windows**：`CF_DIB` / `CF_DIBV5`（位图），或注册的 `PNG` 格式（`CFSTR_PNG` = `"PNG"`）。常用 `pywin32`(`win32clipboard`) + `Pillow` 把 PNG 转 `CF_DIB` 或登记 `PNG` 格式。
+> - **Windows**：`CF_DIB` / `CF_DIBV5`（位图），或注册的 `PNG` 格式（`CFSTR_PNG` = `"PNG"`）。PhoneMic 技术栈是 PySide6/Qt，**实际实现走 Qt 剪贴板**（`phonemic/gui/clipboard.py:copy_image`）：`QImage.fromData(字节)` 解码后 `QApplication.clipboard().setImage()`，Qt 内部自动注册 `CF_DIB` / `CF_DIBV5` / `PNG` 多格式，粘贴进微信 / Word / 画图 / 浏览器均可用——不需要 pywin32 + Pillow。
 > - **Linux**：X11 用 MIME 类型 `image/png`（`xclip -selection clipboard -t image/png`）；Wayland 用 `wl-copy --type image/png`。
 > - **macOS**：`NSPasteboard` 的 `NSPasteboardTypePNG`（需 pyobjc 或 `osascript` 桥接）。
 >

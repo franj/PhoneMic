@@ -19,6 +19,7 @@ from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
 from phonemic.gui.keyboard import flash_insert, send_keys
+from phonemic.gui.clipboard import copy_image
 from phonemic.gui.mouse import perform_mouse, set_stats_hook
 from phonemic.gui.mouse_debug import MouseDebugWindow
 from phonemic.gui.tray import SystemTray
@@ -288,6 +289,14 @@ def main():
         elif event_type == "file_saved":
             # 手机端文件传输完成落盘（payload: {path, name, size}），弹托盘通知
             tray.notify_file_saved(payload["path"], payload["name"])
+        elif event_type == "photo_received":
+            # 手机端图片传完（payload: {data, name, size}）→ 写系统剪贴板。
+            # Qt 剪贴板必须在 GUI 线程操作，本回调跑在主线程，安全。
+            name = payload.get("name") or ""
+            if copy_image(payload["data"]):
+                tray.notify_photo_copied(name)
+            else:
+                tray.notify_photo_failed(name)
         elif event_type == "connect":
             # payload 为本次握手协商出的算法名（明文模式为 "none"）
             algo = payload if isinstance(payload, str) else None
