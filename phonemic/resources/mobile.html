@@ -1896,13 +1896,61 @@
             font-size: 10px;
         }
         .mouse-joystick .pv-grid button:active {
-            background: #eef2ee;
             transform: scale(0.94);
         }
         .mouse-joystick .pv-grid button.on {
-            background: #07c160;
-            border-color: #07c160;
+            background: #0d9488;
+            border-color: #0d9488;
             color: #ffffff;
+            box-shadow: 0 0 14px rgba(20, 184, 166, 0.35);
+        }
+        /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
+        .mouse-joystick .pv-grid button[data-id="left"],
+        .mouse-joystick .pv-grid button[data-id="double"],
+        .mouse-joystick .pv-grid button[data-id="enter"],
+        .mouse-joystick .pv-grid button[data-id="shiftenter"] {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .mouse-joystick .pv-grid button[data-id="right"] {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #d23b3b;
+        }
+        .mouse-joystick .pv-grid button[data-id="drag"] {
+            background: rgba(20, 184, 166, 0.12);
+            border-color: rgba(20, 184, 166, 0.45);
+            color: #0d9488;
+        }
+        .mouse-joystick .pv-grid button[data-id="del"],
+        .mouse-joystick .pv-grid button[data-id="esc"] {
+            background: rgba(100, 116, 139, 0.12);
+            border-color: rgba(100, 116, 139, 0.40);
+            color: #475569;
+        }
+        .mouse-joystick .pv-grid button[data-id="up"],
+        .mouse-joystick .pv-grid button[data-id="arrleft"],
+        .mouse-joystick .pv-grid button[data-id="arrdown"],
+        .mouse-joystick .pv-grid button[data-id="arrright"] {
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.45);
+            color: #2563eb;
+        }
+        .mouse-joystick .pv-grid button[data-id="wheelup"],
+        .mouse-joystick .pv-grid button[data-id="wheeldown"] {
+            background: rgba(245, 158, 11, 0.14);
+            border-color: rgba(245, 158, 11, 0.50);
+            color: #b45309;
+        }
+        .mouse-joystick .pv-grid button[data-id="undo"],
+        .mouse-joystick .pv-grid button[data-id="redo"] {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.45);
+            color: #7c3aed;
+        }
+        .mouse-joystick .pv-grid button:active {
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
         }
         .mouse-joystick .pv-grid button.pv-enter {
             border-color: #07c160;
@@ -2349,12 +2397,37 @@
         .touchpad-panel .tp-btn-col button:active,
         .touchpad-panel .tp-btn-col-right button:active {
             transform: scale(0.94);
-            background: #eceef1;
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
         }
         /* 拖拽为开关态：激活时反白（深底白字）以区分 */
         .touchpad-panel .tp-btn-col button[data-act="drag"].on {
-            background: #1c1c20; color: #ffffff; border-color: #1c1c20;
-            box-shadow: 0 0 16px rgba(28, 28, 32, 0.25);
+            background: #0d9488; color: #ffffff; border-color: #0d9488;
+            box-shadow: 0 0 16px rgba(20, 184, 166, 0.3);
+        }
+        /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
+        .touchpad-panel .tp-btn-col button[data-act="left"],
+        .touchpad-panel .tp-btn-col button[data-act="double"],
+        .touchpad-panel .tp-btn-col-right button[data-act="enter"],
+        .touchpad-panel .tp-btn-col-right button[data-act="shiftenter"] {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .touchpad-panel .tp-btn-col button[data-act="right"] {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #d23b3b;
+        }
+        .touchpad-panel .tp-btn-col button[data-act="drag"] {
+            background: rgba(20, 184, 166, 0.12);
+            border-color: rgba(20, 184, 166, 0.45);
+            color: #0d9488;
+        }
+        .touchpad-panel .tp-btn-col-right button[data-act="undo"],
+        .touchpad-panel .tp-btn-col-right button[data-act="redo"] {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.45);
+            color: #7c3aed;
         }
         .touchpad-panel .tp-touchpad-wrap {
             flex: 1;
