@@ -13,7 +13,7 @@ photo 与 file 线格式完全相同，唯一区别是落地方式：
 
 帧示例（手机端原样发出）：
     {"type":"photo", "a":"start",  "id":7, "name":"a.png", "size":1048576, "chunks":16}
-    {"type":"photo", "a":"data",   "id":7, "n":0, "chunk":<bin 256KB>}
+    {"type":"photo", "a":"data",   "id":7, "n":0, "chunk":<bin 1MB>}
     {"type":"photo", "a":"end",    "id":7}
     {"type":"photo", "a":"cancel", "id":7}
 """
@@ -81,9 +81,9 @@ class PhotoReceiver:
         """处理一条 photo 帧。
 
         Returns:
-            (ack帧, None)      —— data 帧正常，ack 由 api.py 下发给手机端
-            (None, None)       —— start/end/cancel 正常处理，无需回帧
-            (None, 错误信息)    —— 非法/协议错误，调用方回 error(malformed)
+            (ack帧, None)      —— end 重组成功，ack(a:"end") 由 api.py 下发给手机端
+            (None, None)       —— start/data/cancel 正常处理，无需回帧
+            (None, 错误信息)    —— 非法/协议错误/没收齐，调用方回 error(malformed)
         """
         ok, err = validate_photo_action(frame)
         if not ok:
@@ -153,20 +153,19 @@ class PhotoReceiver:
             return None, (f"data 帧累计字节超过声明的 size: "
                           f"id={fid} received={sess['received']} size={sess['size']}")
         sess['buf'].extend(chunk)
-        ack = {
-            'type': 'ack',
-            'ref': 'photo',
-            'id': fid,
-            'n': frame['n'],
-            'received': sess['received'],
-        }
-        return ack, None
+        # 不再逐块回 ack（协议 §9），只在 end 重组成功后回一次确认
+        return None, None
 
     def _on_end(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
         sess = self._sessions.pop(fid, None)
         if sess is None:
             return None, f"end 帧无匹配会话: id={fid}"
+
+        # 收齐校验：字节数对不上说明中途丢块，写进剪贴板会是损坏图片
+        if sess['received'] != sess['size']:
+            return None, (f"接收不完整: id={fid} received={sess['received']} "
+                          f"size={sess['size']}")
 
         data = bytes(sess['buf'])
         logger.info(f"图片接收完成: {sess['name'] or '(unnamed)'}（{sess['received']} 字节）")
@@ -175,7 +174,13 @@ class PhotoReceiver:
                 self.on_done(data, sess['name'], sess['received'])
             except Exception:
                 logger.exception("on_done 回调失败")
-        return None, None
+        return {
+            'type': 'ack',
+            'ref': 'photo',
+            'id': fid,
+            'a': 'end',
+            'received': sess['received'],
+        }, None
 
     def _on_cancel(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']

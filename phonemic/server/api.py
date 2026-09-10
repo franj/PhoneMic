@@ -24,6 +24,7 @@ import uvicorn
 from phonemic.bridge_interface import EventBridge
 from phonemic.gui.file import FileReceiver
 from phonemic.gui.photo import PhotoReceiver
+from phonemic.server.transfer import TransferQueue
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
@@ -97,8 +98,12 @@ class ConnectionManager:
             await _send_frame(websocket, {
                 "type": "config",
                 "mobile_max_records": self.max_records,
+                "max_frame_size": WS_MAX_FRAME_SIZE,
             })
-            logger.debug(f"Sent config to client: max_records={self.max_records}")
+            logger.debug(
+                f"Sent config to client: max_records={self.max_records}, "
+                f"max_frame_size={WS_MAX_FRAME_SIZE}"
+            )
         except Exception as e:
             logger.warning(f"Failed to send initial config: {e}")
 
@@ -117,8 +122,7 @@ class ConnectionManager:
             self.active_websocket = None
             self.active_session = None
             # 断连时丢弃未完成的文件/图片接收会话（wire-protocol.md §9）
-            _file_receiver.abort_all()
-            _photo_receiver.abort_all()
+            _get_transfer_queue().abort_all()
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -136,6 +140,26 @@ _file_receiver = FileReceiver()
 # 图片到剪贴板接收状态机（wire-protocol.md §9.1）：内存重组不落盘，
 # end 回调走 bridge 发 photo_received 事件，主进程写系统剪贴板 + 托盘通知。
 _photo_receiver = PhotoReceiver()
+
+
+# ---------- 分块传输：写盘队列（wire-protocol.md §9） ----------
+# 接收侧只入队，落盘与 ack 交给后台消费者串行执行，收帧循环立刻回去处理
+# mouse / key / preview（"传文件时鼠标卡"的根因）。
+# 队列按字节限流，满则入队方 await —— 天然背压，不丢帧不爆内存。
+# WS_MAX_FRAME_SIZE 是 WebSocket 单帧上限，同时通过 config 帧下发给手机端。
+WS_MAX_FRAME_SIZE = 16 * 1024 * 1024
+
+# 惰性实例：首次用到才创建（生命周期跟随服务，换事件循环时内部自动重建 worker）
+_transfer_queue: Optional[TransferQueue] = None
+
+
+def _get_transfer_queue() -> TransferQueue:
+    """返回传输队列单例（首次调用时实例化）。"""
+    global _transfer_queue
+    if _transfer_queue is None:
+        _transfer_queue = TransferQueue(
+            _file_receiver, _photo_receiver, _send_frame)
+    return _transfer_queue
 
 
 def set_bridge(bridge: EventBridge) -> None:
@@ -363,30 +387,11 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         # 整帧交给 PC 端，a 决定动作（wire-protocol.md §7）
         _manager.bridge.emit("mouse", inner)
         logger.debug(f"Received mouse: a={inner.get('a')}")
-    elif msg_type == "file":
-        # 文件分块接收（wire-protocol.md §9）：写盘放线程，不阻塞事件循环。
-        # WS 有序 + 每帧串行 await，保证 data 块按序落盘。
-        ack, err = await asyncio.to_thread(_file_receiver.handle, inner)
-        if err is not None:
-            await _send_frame(websocket, {
-                "type": "error",
-                "code": "malformed",
-                "msg": err,
-            })
-        elif ack is not None:
-            await _send_frame(websocket, ack)
-    elif msg_type == "photo":
-        # 图片到剪贴板（wire-protocol.md §9.1）：与 file 线格式相同但内存重组、
-        # 不落盘；end 后由 on_done 回调把字节经 bridge 交给主进程写系统剪贴板。
-        ack, err = await asyncio.to_thread(_photo_receiver.handle, inner)
-        if err is not None:
-            await _send_frame(websocket, {
-                "type": "error",
-                "code": "malformed",
-                "msg": err,
-            })
-        elif ack is not None:
-            await _send_frame(websocket, ack)
+    elif msg_type in ("file", "photo"):
+        # 分块传输（wire-protocol.md §9 / §9.1）：只入队，落盘与 ack 都交给
+        # 后台任务串行执行——收帧循环立刻回去处理 mouse/key/preview，
+        # 不再被写盘堵住。队列满时这里 await，形成背压。
+        await _get_transfer_queue().enqueue(msg_type, inner, websocket)
     else:
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {
@@ -711,6 +716,7 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
             # WebSocket 心跳：15 秒 ping，30 秒无响应判定断开
             ws_ping_interval=15.0,
             ws_ping_timeout=30.0,
+            ws_max_size=WS_MAX_FRAME_SIZE,
         )
         _server = uvicorn.Server(config)
         try:
@@ -728,11 +734,14 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
 
 def stop_server() -> None:
     """停止后台服务。"""
-    global _event_loop, _server, _server_thread
+    global _event_loop, _server, _server_thread, _transfer_queue
     if _server is not None:
         _server.should_exit = True
+    if _transfer_queue is not None:
+        _transfer_queue.close()          # 取消后台写盘消费者
     if _server_thread is not None:
         _server_thread.join(timeout=5.0)
+    _transfer_queue = None
     _event_loop = None
     _server = None
     _server_thread = None

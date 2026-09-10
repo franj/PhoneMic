@@ -12,7 +12,7 @@ FileReceiver（状态机）。非法帧只记日志并返回错误信息，不�
 
 帧示例（手机端原样发出）：
     {"type":"file", "a":"start",  "id":7, "name":"a.pdf", "size":1048576, "chunks":16}
-    {"type":"file", "a":"data",   "id":7, "n":0, "chunk":<bin 256KB>}
+    {"type":"file", "a":"data",   "id":7, "n":0, "chunk":<bin 1MB>}
     {"type":"file", "a":"end",    "id":7}
     {"type":"file", "a":"cancel", "id":7}
 """
@@ -117,9 +117,9 @@ class FileReceiver:
         """处理一条 file 帧。
 
         Returns:
-            (ack帧, None)      —— data 帧正常，ack 由 api.py 下发给手机端
-            (None, None)       —— start/end/cancel 正常处理，无需回帧
-            (None, 错误信息)    —— 非法/协议错误，调用方回 error(malformed)
+            (ack帧, None)      —— end 落盘成功，ack(a:"end") 由 api.py 下发给手机端
+            (None, None)       —— start/data/cancel 正常处理，无需回帧
+            (None, 错误信息)    —— 非法/协议错误/没收齐，调用方回 error(malformed)
         """
         ok, err = validate_file_action(frame)
         if not ok:
@@ -189,20 +189,28 @@ class FileReceiver:
         chunk = frame['chunk']
         sess['fh'].write(chunk)
         sess['received'] += len(chunk)
-        ack = {
-            'type': 'ack',
-            'ref': 'file',
-            'id': fid,
-            'n': frame['n'],
-            'received': sess['received'],
-        }
-        return ack, None
+        # 不再逐块回 ack（协议 §9）：进度由发送端按已发字节本地推进，
+        # 只在 end 落盘成功后回一次 ack，省掉每块的回程帧与手机端 DOM 抖动。
+        return None, None
 
     def _on_end(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
         sess = self._sessions.pop(fid, None)
         if sess is None:
             return None, f"end 帧无匹配会话: id={fid}"
+
+        # 收齐校验：字节数对不上说明中途丢块，落盘会得到截断文件，必须判失败
+        if sess['received'] != sess['size']:
+            try:
+                sess['fh'].close()
+            except Exception:
+                pass
+            try:
+                sess['part_path'].unlink(missing_ok=True)
+            except Exception:
+                logger.exception(f"删除临时文件失败: {sess['part_path']}")
+            return None, (f"接收不完整: id={fid} received={sess['received']} "
+                          f"size={sess['size']}")
 
         fh = sess['fh']
         fh.flush()
@@ -221,7 +229,13 @@ class FileReceiver:
                 self.on_done(str(final_path), sess['name'], sess['received'])
             except Exception:
                 logger.exception("on_done 回调失败")
-        return None, None
+        return {
+            'type': 'ack',
+            'ref': 'file',
+            'id': fid,
+            'a': 'end',
+            'received': sess['received'],
+        }, None
 
     def _on_cancel(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']

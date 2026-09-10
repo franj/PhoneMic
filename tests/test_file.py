@@ -92,27 +92,37 @@ class TestReceiverFlow:
         done = []
         rx = FileReceiver(dest_dir=tmp_path, on_done=lambda p, n, s: done.append((p, n, s)))
 
-        ack, err = rx.handle(_start())
+        ack, err = rx.handle(_start(size=11))
         assert ack is None and err is None
 
-        ack, err = rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "})
-        assert err is None
-        assert ack == {"type": "ack", "ref": "file", "id": 7, "n": 0, "received": 6}
-
-        ack, err = rx.handle({"a": "data", "id": 7, "n": 1, "chunk": b"world"})
-        assert ack["received"] == 11
+        # data 块不再逐块回 ack（协议 §9）：进度由发送端按已发字节本地推进
+        assert rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "}) == (None, None)
+        assert rx.handle({"a": "data", "id": 7, "n": 1, "chunk": b"world"}) == (None, None)
 
         ack, err = rx.handle({"a": "end", "id": 7})
-        assert ack is None and err is None
+        assert err is None
+        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "end", "received": 11}
 
         assert (tmp_path / "a.pdf").read_bytes() == b"hello world"
         assert not (tmp_path / "a.pdf.part").exists()
         assert done == [(str(tmp_path / "a.pdf"), "a.pdf", 11)]
 
+    def test_end_rejects_incomplete(self, tmp_path):
+        """收不齐就 end → 判失败且不落盘，避免产生截断文件。"""
+        done = []
+        rx = FileReceiver(dest_dir=tmp_path, on_done=lambda p, n, s: done.append(p))
+        rx.handle(_start(size=11))
+        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "})
+        ack, err = rx.handle({"a": "end", "id": 7})
+        assert ack is None and err is not None and "不完整" in err
+        assert not (tmp_path / "a.pdf").exists()
+        assert not (tmp_path / "a.pdf.part").exists()
+        assert done == []
+
     def test_duplicate_rename(self, tmp_path):
         (tmp_path / "a.pdf").write_bytes(b"old")
         rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start())
+        rx.handle(_start(size=3))
         rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"new"})
         rx.handle({"a": "end", "id": 7})
         assert (tmp_path / "a(1).pdf").read_bytes() == b"new"
@@ -121,7 +131,7 @@ class TestReceiverFlow:
     def test_rename_recheck_after_start(self, tmp_path):
         # start 之后、end 之前目标名被占用 → end 时再查重名
         rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start())
+        rx.handle(_start(size=3))
         (tmp_path / "a.pdf").write_bytes(b"stolen")
         rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"new"})
         rx.handle({"a": "end", "id": 7})
@@ -168,7 +178,7 @@ class TestReceiverFlow:
 
     def test_name_strips_path_separators(self, tmp_path):
         rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start(name="..\\..\\evil.txt"))
+        rx.handle(_start(name="..\\..\\evil.txt", size=0))
         rx.handle({"a": "end", "id": 7})
         assert (tmp_path / "evil.txt").exists()
         assert not (tmp_path.parent / "evil.txt").exists()

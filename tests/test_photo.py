@@ -53,13 +53,13 @@ class TestReceiver:
         # 两块 15 字节 + 尾块 15 字节（模拟任意切块，不需要 256KB）
         chunks = [payload[0:15], payload[15:30]]
         assert r.handle({"a": "start", "id": 7, "name": "shot.png", "size": len(payload), "chunks": 2}) == (None, None)
-        ack0, err = r.handle({"a": "data", "id": 7, "n": 0, "chunk": chunks[0]})
-        assert err is None and ack0 == {
-            "type": "ack", "ref": "photo", "id": 7, "n": 0, "received": 15,
+        # data 块不再逐块回 ack（协议 §9）
+        assert r.handle({"a": "data", "id": 7, "n": 0, "chunk": chunks[0]}) == (None, None)
+        assert r.handle({"a": "data", "id": 7, "n": 1, "chunk": chunks[1]}) == (None, None)
+        ack_end, err = r.handle({"a": "end", "id": 7})
+        assert err is None and ack_end == {
+            "type": "ack", "ref": "photo", "id": 7, "a": "end", "received": 30,
         }
-        ack1, err = r.handle({"a": "data", "id": 7, "n": 1, "chunk": chunks[1]})
-        assert err is None and ack1["received"] == 30
-        assert r.handle({"a": "end", "id": 7}) == (None, None)
         assert len(received) == 1
         data, name, size = received[0]
         assert data == payload and name == "shot.png" and size == 30
@@ -72,8 +72,18 @@ class TestReceiver:
         r = PhotoReceiver(on_done=lambda data, name, size: received.append((data, name, size)))
         assert r.handle({"a": "start", "id": 1, "size": 3, "chunks": 1}) == (None, None)
         assert r.handle({"a": "data", "id": 1, "n": 0, "chunk": b"abc"})[1] is None
-        assert r.handle({"a": "end", "id": 1}) == (None, None)
+        assert r.handle({"a": "end", "id": 1})[1] is None
         assert received[0][1] is None
+
+    def test_end_rejects_incomplete(self):
+        """收不齐就 end → 判失败，残缺字节不能进剪贴板。"""
+        received = []
+        r = PhotoReceiver(on_done=lambda data, name, size: received.append(data))
+        assert r.handle({"a": "start", "id": 1, "size": 30, "chunks": 2})[1] is None
+        assert r.handle({"a": "data", "id": 1, "n": 0, "chunk": b"0123456789"})[1] is None
+        ack, err = r.handle({"a": "end", "id": 1})
+        assert ack is None and "不完整" in err
+        assert received == []
 
     def test_duplicate_start_rejected(self):
         r = PhotoReceiver()
@@ -124,4 +134,4 @@ class TestReceiver:
         r = PhotoReceiver(on_done=boom)
         assert r.handle({"a": "start", "id": 1, "name": "x.png", "size": 3, "chunks": 1})[1] is None
         assert r.handle({"a": "data", "id": 1, "n": 0, "chunk": b"abc"})[1] is None
-        assert r.handle({"a": "end", "id": 1}) == (None, None)   # 异常被吞，只记日志
+        assert r.handle({"a": "end", "id": 1})[1] is None   # 异常被吞，只记日志

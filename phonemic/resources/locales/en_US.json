@@ -142,6 +142,7 @@
     "panel_btn_wheel_down": "Wheel↓",
     "panel_file_image": "Image",
     "panel_file_image_hint": "Copy to PC clipboard",
+    "panel_file_finalizing": "Finalizing…",
 
     "panel_file_doc": "File",
     "panel_file_doc_hint": "Docs & images, saved to PC",

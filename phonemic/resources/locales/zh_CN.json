@@ -143,6 +143,7 @@
     "panel_btn_wheel_down": "滚↓",
     "panel_file_image": "图片",
     "panel_file_image_hint": "复制到电脑剪贴板",
+    "panel_file_finalizing": "处理中…",
 
     "panel_file_doc": "文件",
     "panel_file_doc_hint": "文档/图片，保存到电脑",

@@ -203,7 +203,7 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 | `reconnect` | 要求重新扫码 | `reason` | 迁移 `request_client_rescan` |
 | `rekey` | 密钥轮换 | — | 预留 |
 | `error` | 错误通知 | `code`、`msg` | 新增 |
-| `ack` | 分块确认 | `ref`、`id`、`n`、`received` | 新增 |
+| `ack` | 传输确认（仅 `end`） | `ref`、`id`、`a`、`received` | 新增 |
 | `status` | 状态同步 | `muted`、`mode` | 新增 |
 
 心跳**不进 type 表**，用 WebSocket 原生 ping/pong。
@@ -282,6 +282,16 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 **单键单值**结构，迁移自 `api.py:188 push_config`。现有代码发的是扁平形式 `{"type":"config","mobile_max_records":50}`，新协议统一规范为 `key` / `value` 两字段，便于通用分派。
 
+连接握手成功后服务端**主动下发一次**，**各加密模式一致**——不挂在 `auth_ack` 上，因此 `none+LAN`（无 auth 握手）同样收得到：
+
+```
+{"type":"config", "mobile_max_records":10, "max_frame_size":16777216}
+```
+
+- **`max_frame_size`**：服务端 WebSocket 单帧上限（字节），即 `uvicorn` 的 `ws_max_size`（`api.py:WS_MAX_FRAME_SIZE`，当前 16MB）。手机端据此决定文件分块上限，见 §9。
+  为什么必须下发：超帧会被服务端以 **close 1009 断开整条连接**（不是丢弃单帧），无法靠 `收到错误就换小块重试` 来兜底，只能两端对齐后主动限流。
+- **手机端必须容错**：字段缺失或非法（非数字 / 非有限值 / 小于 512KB）一律视为 `未下发`，回落到 4MB 保守上限，绝不允许产出 `NaN` 分块。
+
 > v1 **不下发面板按钮列表**，按钮集内置在 `mobile.html`。将来若要 PC 可配置，再加独立的 `[{label, keys}]` 结构，不复用 `VoiceCommand`。
 
 ### reconnect
@@ -332,18 +342,31 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 ```
 {"type":"file", "a":"start", "id":7, "name":"a.pdf", "size":1048576, "chunks":16}
-{"type":"file", "a":"data",  "id":7, "n":0, "chunk":<bin 256KB>}
-{"type":"file", "a":"data",  "id":7, "n":1, "chunk":<bin 256KB>}
+{"type":"file", "a":"data",  "id":7, "n":0, "chunk":<bin 1MB>}
+{"type":"file", "a":"data",  "id":7, "n":1, "chunk":<bin 1MB>}
 {"type":"file", "a":"end",   "id":7}
 {"type":"file", "a":"cancel","id":7}
 ```
 
-- **分块大小固定 256KB**。uvicorn 16MB 上限下有 64 倍余量；分块是为了出进度条，以及让 mouse 帧能插进来不被大块堵住。
+- **分块大小按文件体积动态选择**，块数收敛到约 12 块：
+  `chunk = clamp(ceil(size / 12) 向上取整到 256KB 倍数, 256KB, cap)`，
+  其中 `cap = min(config.max_frame_size − 64KB, 15MB)`；服务端未下发 `max_frame_size` 时 `cap = 4MB`。
+  - **上限由服务端下发**（见 §5 `config`）：下发值就是服务端 `uvicorn ws_max_size`（当前 16MB）。
+  - **减 64KB 安全边距**：覆盖 msgpack bin 头（5B）+ nonce（24B）+ MAC（16B）+ seq（8B）。
+  - **15MB 是手机端自身上限**：不因服务端下发更大值就吃爆内存。
+  - **未下发时保守取 4MB**：远低于任何已知限制（uvicorn 16MB / CF Workers 32MiB），中小文件（≤48MB）实际取值与下发时完全相同。
+  - **下限 256KB**：再小则每块固定开销（编解码、线程切换、进度条重排）占比过高。
+  - 典型取值：100KB→256KB（1 块）、3MB→256KB（12 块）、30MB→2.5MB（12 块）、100MB→8.5MB（12 块）、500MB→15MB（34 块，撞自身上限）。
 - **顺序由 WebSocket 保证**（可靠有序），重组只需 `bytearray.extend`；`n` 仅用于进度显示与 ACK。
 - **`id` 由手机端生成**：每连接内从 1 单调递增的整数，作为一次传输会话的标识；服务端按 `id` 路由 buffer，无需跨端协商。
 - 接收端状态机：`start` 建 buffer → 每个 `data` 执行 `buf.extend(chunk)` → `end` 触发落盘（file）或写剪贴板（photo）。
 - **`a:"cancel"`**：发送端主动中止。手机端发送期间 UI 锁定为「仅取消可点」，点取消即发此帧；接收端关闭半成品文件、删除临时文件、丢弃会话状态，**不回任何帧**（手机端本地即呈现"已取消"）。
-- **`ack` 仅作进度回报**（字段 `received` = 已收字节数），v1 **不做窗口流控**——服务端顺序接收全部 `data` 即可，`ack` 用于前端进度条与断点提示，不反压发送端。每收到一个 `data` 回一帧：`{"type":"ack", "ref":"file", "id":7, "n":3, "received":786432}`。
+- **`ack` 只在 `end` 成功后回一帧**：`{"type":"ack", "ref":"file", "id":7, "a":"end", "received":1048576}`。`data` 块**不逐块回 ack**——逐块 ack 只带来上百次回程帧与同等次数的进度条重排，却拿不到任何额外信息。
+- **进度按 `真实已上网字节` 推进**：`已发送 = 累计 send 字节 − WebSocket.bufferedAmount`。
+  **不要**在 `send()` 返回后立即累加整块——`send()` 只是把数据排进浏览器缓冲就返回，15MB 大块会让进度条瞬间满格、随后长时间不动，观感等同卡死（Cloudflare 场景下尤为明显）。
+  发送端应在背压轮询（每 20ms 采样 `bufferedAmount`）中持续刷新进度；`end` 发出后到 ack 返回是接收端落盘阶段，进度收尾到 100% 并切换为处理中态，避免误判为卡死。
+- **`end` 前收齐校验**：`end` 时若 `received != size` 视为丢块，接收端删除半成品并回 `error(malformed)`，**不落截断文件、不写损坏图片**。发送端必须等到这一帧确认才报"成功"；超时（15s）按成功处理（数据已发完，失败场景接收端会主动回 `error`）。
+- **发送端背压**：手机端连续 `send` 不等待 ack，但需监控 `WebSocket.bufferedAmount`——超过 4MB 暂停发送，降到 1MB 再继续，避免整文件一次性堆进浏览器缓冲。
 - **发送期间 WS 单会话单文件**：一次连接同时只进行一次 `file` 传输（`start` 后未 `end`/`cancel` 前收到新 `start` 视为协议错误，回 `error(malformed)`）。v1 不做队列。
 
 ### 9.1 两个 sink：file 落盘、photo 剪贴板

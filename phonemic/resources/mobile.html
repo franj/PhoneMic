@@ -3087,7 +3087,37 @@
     // 套路与 KeyboardPanel 等一致：static STYLES 注入、section 内独立根容器、
     // 出口统一 onCommand(frame)；下行 ack/error 通过 ws.on(type, handler) 订阅。
     class FilePanel {
-        static get CHUNK_SIZE() { return 256 * 1024; }   // 协议固定 256KB
+        // 分块策略（wire-protocol.md §9）：按文件体积动态选块，块数收敛到 ~12 块。
+        // 上限由服务端 config.max_frame_size 下发；未下发时走保守默认。
+        static get CHUNK_MIN() { return 256 * 1024; }          // 下限：再小 per-chunk 开销就吃不消
+        static get CHUNK_CAP() { return 15 * 1024 * 1024; }    // 手机端自身上限：不因服务端下发大值就吃爆内存
+        static get CHUNK_FALLBACK() { return 4 * 1024 * 1024; }// 服务端未下发 max_frame_size 时的保守上限
+        static get CHUNK_TARGET() { return 12; }               // 目标块数：兼顾进度粒度与 per-chunk 开销
+        static get FRAME_RESERVE() { return 64 * 1024; }       // 安全边距：msgpack 头 + nonce + MAC + seq
+        static get HIGH_WATER() { return 4 * 1024 * 1024; }    // 发送缓冲高水位：超过则暂停等排空
+        static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
+        static get END_ACK_TIMEOUT() { return 15000; }         // 等 PC 端落盘确认的超时（ms）
+
+        /** 服务端下发的单帧上限（config.max_frame_size），0 = 未下发 */
+        static get serverMaxFrame() { return FilePanel._serverMaxFrame || 0; }
+        static setServerMaxFrame(v) {
+            const n = Number(v);
+            // 非数字 / 非有限值 / 小到不可用，一律视为未下发，走保守默认
+            FilePanel._serverMaxFrame = (Number.isFinite(n) && n >= 512 * 1024)
+                ? Math.floor(n) : 0;
+        }
+        /** 按文件体积挑块：ceil(size/CHUNK_TARGET) 向上取整到 256KB 倍数，再夹到 [min, max] */
+        static pickChunkSize(size) {
+            const cap = FilePanel.serverMaxFrame
+                ? Math.min(FilePanel.serverMaxFrame - FilePanel.FRAME_RESERVE, FilePanel.CHUNK_CAP)
+                : Math.min(FilePanel.CHUNK_FALLBACK, FilePanel.CHUNK_CAP);
+            const max = Math.max(FilePanel.CHUNK_MIN, cap);
+            const ideal = Math.ceil(size / FilePanel.CHUNK_TARGET);
+            const aligned = Math.ceil(ideal / FilePanel.CHUNK_MIN) * FilePanel.CHUNK_MIN;
+            return Math.min(max, Math.max(FilePanel.CHUNK_MIN, aligned));
+        }
+        static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
+        static get END_ACK_TIMEOUT() { return 15000; }         // 等 PC 端落盘确认的超时（ms）
 
         static get STYLES() {
             return `
@@ -3202,6 +3232,13 @@
             color: #9ca3af;
             text-align: center;
         }
+        /* 传输期间：锁死面板切换与其它操作，避免误触导致传输异常 */
+        body.file-transferring #panel-tabs .tab { opacity: .3; pointer-events: none; }
+        body.file-transferring #btn-plus,
+        body.file-transferring #btn-send,
+        body.file-transferring #btn-clear { opacity: .4; pointer-events: none; }
+        body.file-transferring #input-box { opacity: .4; }
+        body.file-transferring #accessory-panel .panel-view:not(#view-file) { opacity: .3; pointer-events: none; }
         `;
         }
 
@@ -3211,6 +3248,10 @@
             this.chat = opts.chat;               // ChatListManager：写结果气泡
             this.ws = opts.ws;                   // 订阅下行 ack/error
             this.revealPanel = opts.revealPanel || null;  // 发送开始时切到本面板（入口注入）
+            this.setTransferLock = opts.setTransferLock || null;  // 发送期间锁死其它交互
+            this._sentBytes = 0;          // 已发出字节：进度条本地推进，不再等 ack
+            this._endAckResolver = null;  // end 确认等待器（PC 端 ack/error 唤醒）
+            this._endTimer = null;
 
             this._id = 0;            // 传输会话 id：每连接从 1 递增（协议 §9）
             this._state = 'idle';    // idle | sending
@@ -3222,14 +3263,15 @@
             this._buildDOM();
             this._bind();
 
-            // 下行 ack：进度条推进（file 的 ref:"file"、photo 的 ref:"photo"，协议 §9）
+            // 下行 ack：data 块不再逐块回 ack（协议 §9），这里只处理 end 确认
             this.ws.on('ack', (f) => {
-                if (this._state === 'sending' && f.ref === this._kind && f.id === this._id) {
-                    this._updateProgress(f.received);
-                }
+                if (f.ref !== this._kind || f.id !== this._id) return;
+                if (f.a === 'end') { this._resolveEnd(true); return; }
+                if (f.received != null && this._state === 'sending') this._updateProgress(f.received);
             });
-            // 下行 error：PC 端拒收（字段非法/已有传输占线等）→ 视为失败收尾
+            // 下行 error：PC 端拒收（字段非法/已有传输占线/校验失败）→ 视为失败收尾
             this.ws.on('error', () => {
+                if (this._endAckResolver) { this._resolveEnd(false); return; }
                 if (this._state === 'sending') this._finish(false);
             });
         }
@@ -3319,7 +3361,9 @@
             this._kind = kind;               // 'file' → 磁盘；'photo' → 剪贴板
             this._file = file;
             this._cancelRequested = false;
+            this._sentBytes = 0;
             this._state = 'sending';
+            this._setLock(true);          // 传输期间锁死面板切换与其它操作
 
             // 发送期间需要看到进度与取消：若附件面板收起/在别的 tab，先切回本面板
             if (this.revealPanel) this.revealPanel();
@@ -3330,7 +3374,8 @@
             this.nameEl.textContent = file.name;
             this._updateProgress(0);
 
-            const total = Math.ceil(file.size / FilePanel.CHUNK_SIZE);
+            const chunkSize = FilePanel.pickChunkSize(file.size);
+            const total = Math.ceil(file.size / chunkSize);
             // 帧 type 随传输类型（wire-protocol.md §9：file/photo 线格式相同）
             this.onCommand({ type: kind, a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
 
@@ -3338,10 +3383,14 @@
                 if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾
                 if (!this.ws.getConnected()) { this._finish(false); return; }
                 try {
-                    const blob = file.slice(n * FilePanel.CHUNK_SIZE, (n + 1) * FilePanel.CHUNK_SIZE);
+                    const blob = file.slice(n * chunkSize, (n + 1) * chunkSize);
                     const buf = await blob.arrayBuffer();
-                    const ok = this.onCommand({ type: kind, a: 'data', id: this._id, n, chunk: new Uint8Array(buf) });
+                    const bytes = new Uint8Array(buf);
+                    const ok = this.onCommand({ type: kind, a: 'data', id: this._id, n, chunk: bytes });
                     if (!ok) { this._finish(false); return; }   // 连接断开，sendFrame 静默 false
+                    this._sentBytes += bytes.length;
+                    this._progressTick();                       // 按真实上网字节推进，大块不假满格
+                    await this._waitDrain();                    // 积压过高时背压等待（期间持续刷新进度）
                 } catch (e) {
                     console.error('[FILE] read/send chunk failed:', e);
                     this.onCommand({ type: kind, a: 'cancel', id: this._id });
@@ -3351,8 +3400,60 @@
             }
 
             if (this._cancelRequested) return;
+            this._updateProgress(this._sentBytes);   // 数据已全部交出，进度收尾
+            this.pctEl.textContent = t('panel_file_finalizing');
             this.onCommand({ type: kind, a: 'end', id: this._id });
-            this._finish(true);
+            // 等 PC 端确认落盘再报成功，避免「发出去就算成功」的假成功
+            const okEnd = await this._waitEndAck();
+            this._finish(okEnd);
+        }
+
+        /** 真实已上网字节 = 累计 send − 仍在浏览器缓冲里排队的部分（bufferedAmount） */
+        _progressTick() {
+            const sock = this.ws && this.ws.ws;
+            const buffered = (sock && typeof sock.bufferedAmount === 'number')
+                ? sock.bufferedAmount : 0;
+            this._updateProgress(Math.max(0, this._sentBytes - buffered));
+        }
+
+        /** 发送缓冲背压：积压超 HIGH_WATER 就等它降到 LOW_WATER，避免整文件堆进浏览器缓冲 */
+        _waitDrain() {
+            const sock = this.ws && this.ws.ws;
+            if (!sock) return Promise.resolve();
+            const buffered = () => (typeof sock.bufferedAmount === 'number' ? sock.bufferedAmount : 0);
+            if (buffered() <= FilePanel.HIGH_WATER) return Promise.resolve();
+            return new Promise((resolve) => {
+                const tick = () => {
+                    // bufferedAmount 缺失（非标准实现/mock）时按 0 处理，避免永远等下去
+                    this._progressTick();   // 大块发送期间持续刷新，进度随网络平滑爬升
+                    if (this._cancelRequested || sock.readyState !== WebSocket.OPEN ||
+                        buffered() <= FilePanel.LOW_WATER) {
+                        resolve();
+                        return;
+                    }
+                    setTimeout(tick, 20);
+                };
+                setTimeout(tick, 20);
+            });
+        }
+
+        /** 等 PC 端对 end 的确认（ack=成功 / error=失败），超时按成功处理 */
+        _waitEndAck() {
+            return new Promise((resolve) => {
+                this._endAckResolver = resolve;
+                this._endTimer = setTimeout(() => this._resolveEnd(true), FilePanel.END_ACK_TIMEOUT);
+            });
+        }
+
+        _resolveEnd(ok) {
+            const r = this._endAckResolver;
+            this._endAckResolver = null;
+            if (this._endTimer) { clearTimeout(this._endTimer); this._endTimer = null; }
+            if (r) r(ok);
+        }
+
+        _setLock(locked) {
+            if (this.setTransferLock) this.setTransferLock(locked);
         }
 
         _cancel() {
@@ -3361,8 +3462,10 @@
             const kind = this._kind;
             this.onCommand({ type: kind, a: 'cancel', id: this._id });   // file 删 .part、photo 丢 buffer（§9）
             const file = this._file;
+            this._resolveEnd(false);
             this._resetUI();
             this._state = 'idle';
+            this._setLock(false);
             // 灰色气泡入聊天记录：file 可点重发；photo 纯结果展示不可重发
             const ref = kind === 'file' ? file : null;
             this.chat.addFileMessage(t(this._bubbleKey('canceled'), { name: file.name }), 'cancel', ref, kind);
@@ -3373,6 +3476,7 @@
             const kind = this._kind;
             this._resetUI();
             this._state = 'idle';
+            this._setLock(false);
             if (!file) return;
             if (success) {
                 // 完成：file 深绿、photo 也用深绿，靠文案/图标（📄/🖼️）区分
@@ -3445,6 +3549,15 @@
                 if (ap && !ap.isVisible) uiController.showAccessoryPanel();  // 展开并露出切换条
                 if (window._activatePanel) window._activatePanel('file');    // 切到文件 tab
                 if (window._adjustViewport) window._adjustViewport();
+            },
+            // 传输期间锁死：切面板/收发文本/展开收起一律禁用并灰显
+            setTransferLock: (locked) => {
+                document.body.classList.toggle('file-transferring', !!locked);
+                ['btn-plus', 'btn-send', 'btn-clear', 'input-box'].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el) el.disabled = !!locked;
+                });
+                document.querySelectorAll('#panel-tabs .tab').forEach((b) => { b.disabled = !!locked; });
             }
         });
 
@@ -3477,6 +3590,8 @@
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.log(t('log_config_updated') + data.mobile_max_records);
             }
+            // 服务端单帧上限 → 决定文件分块大小（未下发则走 CHUNK_FALLBACK 保守值）
+            if (data.max_frame_size !== undefined) FilePanel.setServerMaxFrame(data.max_frame_size);
         });
         wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
         // PC 端配置变更（如切换加密开关）：URL 已变化，停止自动重连并提示重新扫码

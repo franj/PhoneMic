@@ -143,6 +143,7 @@
     "panel_btn_wheel_down": "滾↓",
     "panel_file_image": "圖片",
     "panel_file_image_hint": "複製到電腦剪貼板",
+    "panel_file_finalizing": "處理中…",
 
     "panel_file_doc": "檔案",
     "panel_file_doc_hint": "文件/圖片，儲存到電腦",

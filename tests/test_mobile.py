@@ -294,3 +294,103 @@ class TestChatList:
         msgs = [m for m in sent_messages(mobile_page) if m["type"] == "send"]
         assert len(msgs) == 2
         assert msgs[1]["text"] == "resend me"
+
+
+def test_transfer_lock_freezes_other_panels(mobile_page):
+    """传输期间锁死面板切换与其它操作（发送中误触不得导致状态错乱）。"""
+    page = mobile_page
+    page.click('#btn-plus')
+    page.click('#panel-tabs button[data-panel="file"]')
+
+    locked = "() => document.body.classList.contains('file-transferring')"
+    assert page.evaluate(locked) is False
+
+    page.evaluate("window._filePanel._setLock(true)")
+    assert page.evaluate(locked) is True
+    assert page.evaluate("document.getElementById('btn-plus').disabled") is True
+    assert page.evaluate("document.getElementById('btn-send').disabled") is True
+    assert page.evaluate("document.getElementById('btn-clear').disabled") is True
+    assert page.evaluate("document.getElementById('input-box').disabled") is True
+    assert page.evaluate("document.querySelectorAll('#panel-tabs .tab:disabled').length") == 4
+    assert page.evaluate(
+        "getComputedStyle(document.getElementById('view-keys')).pointerEvents"
+    ) == "none"
+    assert page.evaluate(
+        "getComputedStyle(document.getElementById('view-file')).pointerEvents"
+    ) != "none"
+
+    page.evaluate("window._filePanel._setLock(false)")
+    assert page.evaluate(locked) is False
+    assert page.evaluate("document.getElementById('btn-send').disabled") is False
+    assert page.evaluate("document.querySelectorAll('#panel-tabs .tab:disabled').length") == 0
+
+
+def test_transfer_chunk_size_is_dynamic(mobile_page):
+    """分块按体积自适应（协议 §9）：3MB 文件 → 12 块 × 256KB，块数收敛到 ~12。"""
+    page = mobile_page
+    seq = page.evaluate(
+        "async () => {"
+        "  const panel = window._filePanel;"
+        "  const saved = [];"
+        "  const orig = panel.onCommand;"
+        "  panel.onCommand = (f) => { saved.push(f.a + ':' + (f.chunk ? f.chunk.length : 0));"
+        "                             return true; };"
+        "  panel._waitEndAck = () => Promise.resolve(true);"
+        "  const fake = { name: 'big.bin', size: 3 * 1024 * 1024,"
+        "                 slice: (a, b) => new Blob([new Uint8Array(b - a)]) };"
+        "  await panel._start(fake, 'file');"
+        "  panel.onCommand = orig;"
+        "  return saved.join(',');"
+        "}"
+    )
+    assert seq.startswith("start:0"), seq
+    # 3MB / 12 = 256KB，对齐到 256KB 粒度 → 12 块
+    assert seq.count("data:262144") == 12, seq
+    assert seq.endswith("end:0"), seq
+
+
+def test_pick_chunk_size_matrix(mobile_page):
+    """pickChunkSize：块数收敛 ~12，受服务端下发上限与手机端 15MB 自身上限双重夹逼。"""
+    page = mobile_page
+    r = page.evaluate(
+        "() => {"
+        "  const F = window._filePanel.constructor;"
+        "  const out = {};"
+        "  F.setServerMaxFrame(16 * 1024 * 1024);"
+        "  out.s30 = F.pickChunkSize(30 * 1024 * 1024);"
+        "  out.s100 = F.pickChunkSize(100 * 1024 * 1024);"
+        "  out.s500 = F.pickChunkSize(500 * 1024 * 1024);"
+        "  out.tiny = F.pickChunkSize(100 * 1024);"
+        "  F.setServerMaxFrame(1 * 1024 * 1024);"
+        "  out.capped1m = F.pickChunkSize(500 * 1024 * 1024);"
+        "  F.setServerMaxFrame(0);"
+        "  out.fallback = F.pickChunkSize(500 * 1024 * 1024);"
+        "  return out;"
+        "}"
+    )
+    MB = 1024 * 1024
+    assert r["s30"] == 2621440, r                    # 30MB/12 → 2.5MB，12 块
+    assert r["s100"] == 8912896, r                   # 8.5MB（向上取整到 256KB 倍数）
+    assert r["s500"] == 15 * MB, r                   # 撞手机端自身上限
+    assert r["tiny"] == 256 * 1024, r                # 小文件也不低于下限
+    assert r["capped1m"] == 1 * MB - 64 * 1024, r    # 服务端只给 1MB → 扣 64KB 边距
+    assert r["fallback"] == 4 * MB, r                # 未下发 → 保守默认 4MB
+
+
+def test_config_message_sets_max_frame_size(mobile_page):
+    """下行 config.max_frame_size 驱动分块上限；非法值视为未下发。"""
+    page = mobile_page
+    assert page.evaluate("() => window._filePanel.constructor.serverMaxFrame") == 0
+
+    page.evaluate(
+        "() => window.__mockWS.triggerMessage("
+        "{type:'config', mobile_max_records: 10, max_frame_size: 16*1024*1024})"
+    )
+    page.wait_for_timeout(100)
+    assert page.evaluate(
+        "() => window._filePanel.constructor.serverMaxFrame") == 16 * 1024 * 1024
+
+    # 非数字：视为未下发，回落到保守默认，不能让分块变成 NaN
+    page.evaluate("() => window.__mockWS.triggerMessage({type:'config', max_frame_size: 'abc'})")
+    page.wait_for_timeout(100)
+    assert page.evaluate("() => window._filePanel.constructor.serverMaxFrame") == 0
