@@ -51,12 +51,30 @@ def test_find_candidate_by_mac():
 # ========== 测试 find_free_port ==========
 def test_find_free_port_finds_a_port():
     """测试函数能找到一个可用的端口"""
-    port = find_free_port(start_port=9000)
+    host = "127.0.0.1"
+    port = find_free_port(start_port=9000, host=host)
     assert isinstance(port, int)
     assert port >= 9000
-    # 验证端口确实可用
+    # 验证端口在该地址上确实可用
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        assert s.bind(("", port)) is None # bind 成功时返回 None
+        assert s.bind((host, port)) is None  # bind 成功时返回 None
+
+def test_find_free_port_skips_port_in_use_on_specific_ip():
+    """回归：端口被「具体 IP」占用时必须跳过。
+
+    旧实现用 ("", port) 探测，Windows 下 (0.0.0.0, P) 与 (具体IP, P)
+    可以共存，于是被占用的端口仍被判为空闲，真正 bind 时才报 10048。
+    """
+    host = "127.0.0.1"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind((host, 0))
+        used_port = holder.getsockname()[1]
+        holder.listen(1)
+        found = find_free_port(start_port=used_port, max_tries=20, host=host)
+
+    assert found is not None
+    assert found != used_port
+    assert found > used_port
 
 def test_find_free_port_skips_used_port(mocker):
     """当起始端口被占用时，应返回下一个可用端口"""

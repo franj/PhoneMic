@@ -154,7 +154,7 @@ def main():
         sm.set("last_network_mac", selected_mac)
 
     # 3. 查找端口
-    actual_port = find_free_port(start_port=12000)
+    actual_port = find_free_port(start_port=12000, host=selected_ip)
     if actual_port is None:
         QMessageBox.critical(None, i18n.tr("error.title"), i18n.tr("error.no_free_port"))
         sys.exit(1)

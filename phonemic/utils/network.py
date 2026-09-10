@@ -1,3 +1,4 @@
+import os
 import re
 import netifaces
 import psutil
@@ -182,16 +183,22 @@ def get_best_ip(candidates: Optional[List[IpCandidate]] = None) -> Optional[str]
 def get_local_ip() -> Optional[str]:
     return get_best_ip()
 
-def find_free_port(start_port: int = 12000, max_tries: int = 100) -> Optional[int]:
+def find_free_port(start_port: int = 12000, max_tries: int = 100, host: str = "") -> Optional[int]:
     """
-    Finds an available TCP port starting from `start_port`.
+    从 start_port 开始向后查找第一个可绑定的 TCP 端口。
+
+    host 必须传服务端实际要绑定的地址。Windows 允许 (0.0.0.0, P) 与
+    (192.168.x.x, P) 同时存在，若用空串（0.0.0.0）探测，在「具体 IP 上
+    该端口已被占用」时会被误判为空闲，导致后续真正 bind 时报 10048。
+    SO_REUSEADDR 只在非 Windows 设置，与 asyncio.create_server 的默认行为一致。
     """
+    reuse_address = os.name != "nt"
     for port in range(start_port, start_port + max_tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                # Set socket option to allow reuse of the address
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("", port))
+                if reuse_address:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
                 return port
             except OSError:
                 continue
