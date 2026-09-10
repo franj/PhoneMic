@@ -20,7 +20,7 @@
 - ✅ **自动发送** – 语音识别结束后自动上屏，流畅高效
 - ✅ **语音命令** – 自定义文字触发模拟按键、输入文本或运行外部程序
 - ✅ **终端也能上屏** – 除剪贴板粘贴外，还可切换为模拟键盘逐字符输入，在 cmd / PowerShell / Windows Terminal / SSH 客户端 / vim 等不支持 Ctrl+V 的程序里照样可用
-- ✅ **手机遥控电脑** – 手机端可展开控制面板，当触控板、鼠标摇杆用，还能一键触发常用快捷键（Ctrl+Z / Ctrl+C 等）
+- ✅ **手机遥控电脑** – 手机端可展开控制面板，当触控板、鼠标摇杆用，还能一键触发常用快捷键（Ctrl+Z / Alt+Tab等）
 - ✅ **文件/图片传输** – 手机上的文件直接传到电脑下载目录，图片则一键写入剪贴板，粘贴即用
 - ✅ **隐私安全** – 局域网模式下数据只在局域网内传输，不经过任何云端服务器；Cloudflare 隧道模式在 HTTPS 隧道之上**强制启用端到端加密**，中间节点无法读取内容。局域网模式可自行决定是否加密：在主界面菜单 **网络 → 加密** 开启即可，具体算法由手机与电脑自动协商，密钥通过二维码传递、不经过网络。
 
@@ -138,7 +138,7 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 | 带参数运行脚本（前缀匹配） | `请记录待办 ` | `cmd /c echo {content} >> D:\todo.txt` |
 
 **更多说明：**
-- **按键段**：支持组合键，如 `ctrl+a, delete`（先全选后删除），`ctrl+c, ctrl+v`（复制后粘贴）。
+- **按键段**：支持组合键，如 `ctrl+a, delete`（先全选后删除）。
 - **文本段**：用双引号或单引号包裹要输入的文本。引号内的逗号不算分隔符。要输入字面的引号用反斜杠转义（`\"` 或 `\'`）。
 - **占位符**（按键段和运行程序都支持）：`{time}`（当前时间 HH:MM:SS）、`{date}`（今天日期 YYYY-MM-DD）、`{content}`、`{prefix}`、`{all_text}` 会被自动替换。
 - **运行程序**：`calc`（打开计算器），`python D:\script.py {content}`（使用动态内容）。
@@ -166,7 +166,9 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 - qrcode (BSD 3-Clause)
 - pyparsing (MIT)
 - PyNaCl (BSD 3-Clause) – [主页](https://github.com/pyca/pynacl)
+- msgpack (Apache 2.0) – [主页](https://github.com/msgpack/msgpack-python)
 - libsodium.js (ISC) – [主页](https://github.com/jedisct1/libsodium.js/)
+- @msgpack/msgpack.js (MIT) – [主页](https://github.com/msgpack/msgpack-javascript)
 - cloudflared (Apache 2.0, 可选) – [主页](https://github.com/cloudflare/cloudflared)
 
 详细的版权和许可声明请参阅 [NOTICE.txt](NOTICE.txt) 文件。

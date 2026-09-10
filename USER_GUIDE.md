@@ -248,7 +248,6 @@ PhoneMic 运行时，电脑任务栏右下角会显示一个小图标。
 - 单个键：`enter`、`tab`、`space`、`backspace`、`delete`、`up`、`down`
 - 组合键：`ctrl+c`、`shift+alt+a`、`ctrl+shift+esc`
 - 序列（先全选再删）：`ctrl+a, delete`
-- 序列（复制再粘贴）：`ctrl+c, ctrl+v`
 
 **文本段示例：**
 - 输入文字并回车：`"你好", enter`

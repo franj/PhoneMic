@@ -65,11 +65,21 @@
     说明：手机端加密库（libsodium 的 WASM 绑定），用于密钥生成、
           密封盒加密、消息加解密，与 PC 端 PyNaCl 互通
 
-13. Nuitka (仅打包使用，不包含在最终分发中)
+13. msgpack (Python)
+    许可证：Apache 2.0
+    主页：https://github.com/msgpack/msgpack-python
+    说明：MessagePack 二进制序列化库，用于手机端与电脑端之间的通信协议编码
+
+14. @msgpack/msgpack.js
+    许可证：MIT
+    主页：https://github.com/msgpack/msgpack-javascript
+    说明：手机端 MessagePack 编解码库，与 PC 端 msgpack 互通
+
+15. Nuitka (仅打包使用，不包含在最终分发中)
     许可证：Apache 2.0
     主页：https://nuitka.net
 
-14. cloudflared (可选依赖，用户可自行安装)
+16. cloudflared (可选依赖，用户可自行安装)
     许可证：Apache 2.0
     主页：https://github.com/cloudflare/cloudflared
     下载：https://github.com/cloudflare/cloudflared/releases
