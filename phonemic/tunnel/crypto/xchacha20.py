@@ -1,82 +1,45 @@
-"""XChaCha20-Poly1305 加密提供者。
+"""XChaCha20-Poly1305 对称加密提供者。
 
-使用 X25519 密钥对进行 ECDH 密钥交换，
-共享密钥经 BLAKE2b（标准 KDF）派生后，
-通过 XChaCha20-Poly1305 (AEAD) 进行认证加密。
+构造时只接收会话密钥（由 KeyExchange 协商得到），不碰密钥交换。
+防重放 seq 通过 AEAD 的 aad 承载：解密时 AEAD 先整体校验 aad，明文暴露前
+即拒绝重放（seq 不对表现为 MAC 失败，归 DecryptError）。
 """
 
-import base64
-import json
-import time
-from hashlib import blake2b
-from typing import Optional
-
-from nacl.bindings import crypto_scalarmult
-from nacl.public import PrivateKey, PublicKey, SealedBox
 from nacl.secret import Aead
-from nacl.utils import random as random_bytes
 
 from phonemic.tunnel.crypto.base import CryptoProvider
+from phonemic.tunnel.crypto.errors import DecryptError
 
-
-def _to_b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode().rstrip("=")
-
-
-def _from_b64(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "==")
+_SEQ_LEN = 8
 
 
 class XChaCha20Provider(CryptoProvider):
-    """XChaCha20-Poly1305 AEAD 提供者。
+    """XChaCha20-Poly1305 AEAD 提供者（纯对称，会话密钥由外部注入）。"""
 
-    密钥交换流程：
-    1. PC 生成 X25519 密钥对，公钥通过 QR 码带外传输
-    2. 手机生成 X25519 密钥对，用 sealed box 密封公钥发送给 PC
-    3. 双方通过 crypto_scalarmult 计算 ECDH 共享密钥
-    4. 共享密钥经 BLAKE2b (32 字节) 派生为 AEAD 会话密钥
-    5. 使用会话密钥通过 XChaCha20-Poly1305 加密通信
-    """
-
-    def __init__(self, pc_private: Optional[PrivateKey] = None):
-        self._pc_private = pc_private or PrivateKey.generate()
-        self._pc_public = self._pc_private.public_key
-        self._aead: Optional[Aead] = None
+    def __init__(self, session_key: bytes):
+        self._aead = Aead(session_key)
+        self._tx_seq = 0
+        self._rx_seq = 0
 
     @staticmethod
     def algorithm_name() -> str:
         return "xchacha20"
 
-    def get_public_key_b64(self) -> Optional[str]:
-        return _to_b64(bytes(self._pc_public))
-
-    def receive_auth(self, auth_data: Optional[str]) -> bool:
-        if not auth_data:
-            return False
-        try:
-            sealed = _from_b64(auth_data)
-            sb = SealedBox(self._pc_private)
-            phone_pub_bytes = sb.decrypt(sealed)
-            phone_public = PublicKey(phone_pub_bytes)
-            shared = crypto_scalarmult(bytes(self._pc_private), bytes(phone_public))
-            # 标准 KDF：BLAKE2b 派生会话密钥，避免原始 ECDH 输出直接作对称密钥
-            session_key = blake2b(shared, digest_size=32).digest()
-            self._aead = Aead(session_key)
-            return True
-        except Exception:
-            return False
-
-    def make_auth_ack_data(self) -> Optional[str]:
-        payload = json.dumps(
-            {"status": "OK", "ts": int(time.time() * 1000)},
-            ensure_ascii=False,
-        ).encode("utf-8")
-        em = self._aead.encrypt(payload)
-        return _to_b64(bytes(em))
-
     def encrypt(self, plaintext: bytes) -> bytes:
-        em = self._aead.encrypt(plaintext)
-        return bytes(em)
+        aad = self._tx_seq.to_bytes(_SEQ_LEN, "big")
+        ct = self._aead.encrypt(plaintext, aad)
+        self._tx_seq += 1
+        return bytes(ct)
 
     def decrypt(self, ciphertext: bytes) -> bytes:
-        return self._aead.decrypt(ciphertext)
+        aad = self._rx_seq.to_bytes(_SEQ_LEN, "big")
+        try:
+            pt = self._aead.decrypt(ciphertext, aad)
+        except Exception as e:
+            raise DecryptError(f"decrypt failed: {e}") from e
+        self._rx_seq += 1
+        return bytes(pt)
+
+    def reset(self) -> None:
+        self._tx_seq = 0
+        self._rx_seq = 0

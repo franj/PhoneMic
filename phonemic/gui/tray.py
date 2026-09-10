@@ -1,4 +1,6 @@
 import logging
+import os
+
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PySide6.QtCore import QObject, Slot, Qt
@@ -17,6 +19,8 @@ class SystemTray(QObject):
         self.connected = False
         self.tray_icon = None
         self.i18n = I18n.instance()
+        # 最近一次收到的文件所在目录（点击"收到文件"通知时打开）
+        self._last_file_dir = None
         self._create_tray()
 
     def _create_tray(self):
@@ -40,6 +44,8 @@ class SystemTray(QObject):
         self.update_connection_status(False)
         # 连接激活信号（左键单击、右键单击等）
         self.tray_icon.activated.connect(self._on_tray_activated)
+        # 点击"收到文件"通知 → 打开所在目录
+        self.tray_icon.messageClicked.connect(self._on_message_clicked)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason):
         """处理托盘图标的点击事件"""
@@ -134,6 +140,50 @@ class SystemTray(QObject):
         menu.addAction(self.i18n.tr("tray.menu_quit")).triggered.connect(self.dashboard._quit_app)
         return menu
 
-    def show_message(self, title: str, message: str, icon=QSystemTrayIcon.Information, timeout: int = 1000):
+    def show_message(self, title: str, message: str, icon=QSystemTrayIcon.Information, timeout: int = 1000,
+                     open_dir = None):
+        self._last_file_dir = open_dir
         if self.tray_icon and self.tray_icon.supportsMessages():
             self.tray_icon.showMessage(title, message, icon, timeout)
+
+    def notify_file_saved(self, path: str, name: str) -> None:
+        """手机端传来文件已落盘：弹托盘通知，点击通知打开所在目录。"""
+        if not self.tray_icon:
+            return
+        self.show_message(
+            self.i18n.tr("tray.file_saved_title"),
+            self.i18n.tr("tray.file_saved_msg", name=name),
+            QSystemTrayIcon.Information,
+            timeout=5000,
+            open_dir = os.path.dirname(path) or None
+        )
+
+    def notify_photo_copied(self, name: str) -> None:
+        """手机端图片已写入剪贴板：弹托盘通知（无目录可打开，点击不动作）。"""
+        if not self.tray_icon:
+            return
+        self.show_message(
+            self.i18n.tr("tray.photo_copied_title"),
+            self.i18n.tr("tray.photo_copied_msg", name=name or ""),
+            QSystemTrayIcon.Information,
+            timeout=5000,
+        )
+
+    def notify_photo_failed(self, name: str) -> None:
+        """图片字节无法写入剪贴板（解码失败/剪贴板不可用）。"""
+        if not self.tray_icon:
+            return
+        self.show_message(
+            self.i18n.tr("tray.photo_failed_title"),
+            self.i18n.tr("tray.photo_failed_msg", name=name or ""),
+            QSystemTrayIcon.Warning,
+            timeout=5000,
+        )
+
+    def _on_message_clicked(self):
+        """点击托盘通知：若是文件通知则打开文件所在目录。"""
+        if self._last_file_dir and os.path.isdir(self._last_file_dir):
+            try:
+                os.startfile(self._last_file_dir)  # Windows 资源管理器打开
+            except Exception as e:
+                logger.exception(f"打开文件目录失败: {e}")

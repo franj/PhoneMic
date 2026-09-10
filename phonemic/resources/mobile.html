@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+<html lang="zh-CN" data-page-node-id="OdDZ0JrbLdGfTGAOHmoYSu">
+<head data-page-node-id="q1cVDYXEhzxDo1WXSci2gi">
+    <meta charset="UTF-8" data-page-node-id="Fln4GtuE48PfyKHh6NZGki">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" data-page-node-id="K4prVEkhpn7pbiFcp4F54P">
     <title>📱🎙️PhoneMic💬💻</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="icon" type="image/x-icon" href="favicon.ico" data-page-node-id="qBgFHmT0lBATGS2YtEW321">
     <script src="sodium.js" defer></script>
+    <script src="msgpack.min.js" defer></script>
     <script src="crypto_providers.js" defer></script>
     <style>
         /* ========== 基础样式 ========== */
@@ -91,6 +92,15 @@
         }
         .message.active {
             filter: brightness(0.85);
+        }
+        /* 文件传输结果气泡（区别于默认 #95ec69 的另一种绿色系） */
+        .message.file-done {
+            background-color: #07c160;
+            color: #ffffff;
+        }
+        .message.file-cancel {
+            background-color: #98a2ad;
+            color: #ffffff;
         }
         .offline .message {
             opacity: 0.6;
@@ -182,8 +192,142 @@
             cursor: pointer;
             transition: all 0.2s;
             min-width: 70px;
+            display: none;
+            align-items: center;
+            justify-content: center;
         }
-        .auto-mode #btn-send {
+        #btn-plus {
+            background-color: var(--send-btn-bg);
+            color: var(--send-btn-color);
+            border: none;
+            border-radius: 8px;
+            width: 40px;
+            height: 40px;
+            margin-bottom: 5px;
+            flex-shrink: 0;
+            cursor: pointer;
+            transition: all 0.2s;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #btn-plus .hamburger {
+            width: 18px;
+            height: 2px;
+            background: currentColor;
+            position: relative;
+            border-radius: 1px;
+        }
+        #btn-plus .hamburger::before,
+        #btn-plus .hamburger::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: currentColor;
+            border-radius: 1px;
+        }
+        #btn-plus .hamburger::before { top: -6px; }
+        #btn-plus .hamburger::after { top: 6px; }
+        #btn-plus:active {
+            transform: scale(0.92);
+        }
+        #accessory-panel {
+            height: 0;
+            overflow: hidden;
+            flex-shrink: 0;
+            background-color: var(--bar-bg);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-top: 1px solid #e5e5e5;
+            transition: none;
+        }
+        /* ========== 附件面板：子面板切换（鼠标 / 键盘 / 文件） ========== */
+        #accessory-panel {
+            position: relative;
+            box-sizing: border-box;
+        }
+        #panel-tabs {
+            /* 悬浮在输入条（bottom-bar）上方，不占用面板空间 */
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 6px);
+            transform: translateX(-50%);
+            z-index: 20;
+            height: 34px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 8px;
+            border: 1px solid rgba(0, 0, 0, 0.06);
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.96);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+        #panel-tabs.hidden {
+            display: none;
+        }
+        #panel-tabs .tab {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 40px;
+            height: 28px;
+            padding: 0 11px;
+            border: none;
+            border-radius: 14px;
+            background: transparent;
+            color: #555;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: transform 0.08s, background-color 0.15s, color 0.15s;
+        }
+        #panel-tabs .tab:active {
+            transform: scale(0.93);
+        }
+        #panel-tabs .tab.active {
+            background-color: #07c160;
+            color: #ffffff;
+        }
+        #panel-tabs .tab .ico {
+            font-size: 17px;
+            line-height: 1;
+        }
+        #panel-views {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            overflow: hidden;
+        }
+        .panel-view {
+            display: none;
+            height: 100%;
+            box-sizing: border-box;
+        }
+        .panel-view.active {
+            display: flex;
+            flex-direction: column;
+        }
+        .panel-view .pv-hint {
+            height: 16px;
+            flex-shrink: 0;
+            text-align: center;
+            font-size: 10px;
+            color: #aaa;
+            line-height: 16px;
+        }
+
+        /* --- 键盘子面板：样式由 KeyboardPanel 自带（static STYLES），此处无占位 --- */
+
+        /* --- 文件子面板：样式由 FilePanel 自带（static STYLES），此处无占位 --- */
+        .auto-mode #btn-send, .auto-mode #btn-plus {
             background-color: #ff9800;
             box-shadow: 0 2px 8px rgba(255,152,0,0.3);
         }
@@ -192,7 +336,7 @@
             color: #999;
             box-shadow: inset 0 0 0 1px #ccc;
         }
-        #btn-send:disabled, #mode-toggle:disabled {
+        #btn-send:disabled, #mode-toggle:disabled, #btn-plus:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
@@ -271,20 +415,40 @@
         }
     </style>
 </head>
-<body>
-<div id="app">
-    <div id="status-bar"></div>
-    <div id="chat-list">
+<body data-page-node-id="ozgAGjuilWqVKDdnG8ntQq">
+<div id="app" data-page-node-id="mmmqOPqHEqtHhp8ZYUGa1u">
+    <div id="status-bar" data-page-node-id="oWFzYhoNPDhNSNebGhhZlI"></div>
+    <div id="chat-list" data-page-node-id="8Nymt2h4GWDacOgDyXHTSo">
         <!-- Spacer 占位符置于顶部 -->
-        <div id="chat-spacer" class="chat-spacer"></div>
+        <div id="chat-spacer" class="chat-spacer" data-page-node-id="9yOVA5lEKLYVOeKXwhkoQ8"></div>
     </div>
-    <div id="bottom-bar">
-        <button id="btn-clear" aria-label="清空输入框">🗑️</button>
-        <div class="input-wrapper">
+    <div id="bottom-bar" data-page-node-id="gHAkPVZHq2dGAEdhjMJvDG">
+        <button id="btn-clear" aria-label="清空输入框" data-page-node-id="Mp1u43hgDFQ8bQ1CC0uodU">🗑️</button>
+        <div class="input-wrapper" data-page-node-id="xE28wa2nk0Xl7jmR42Qmwc">
             <textarea id="input-box" rows="1"></textarea>
-            <button id="mode-toggle">⚡</button>
+            <button id="mode-toggle" data-page-node-id="NQ0W5iXZWejDTUyEOEimOR">⚡</button>
         </div>
-        <button id="btn-send"></button>
+        <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="hamburger" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
+        <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
+        <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
+        <div id="panel-tabs" class="hidden">
+            <button type="button" class="tab active" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
+            <button type="button" class="tab" data-panel="mouse" aria-label="鼠标"><span class="ico">🕹️</span></button>
+            <button type="button" class="tab" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
+            <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
+        </div>
+    </div>
+    <div id="accessory-panel">
+        <div id="panel-views">
+            <!-- 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板（默认面板） -->
+            <section id="view-touchpad" class="panel-view active"></section>
+            <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
+            <section id="view-mouse" class="panel-view"></section>
+            <!-- 键盘子面板：组合快捷键（编辑/导航/系统 三分类），由 KeyboardPanel 动态生成 -->
+            <section id="view-keys" class="panel-view"></section>
+            <!-- 文件子面板：发送文件到 PC，由 FilePanel 动态生成 -->
+            <section id="view-file" class="panel-view"></section>
+        </div>
     </div>
 </div>
 
@@ -325,17 +489,150 @@
 </script>
 
 <script>
-    // ========== 0. 视口大小全局监听器 ==========
+
+    // ========== 0.5 键盘附件面板状态机 ==========
+    /**
+     * 键盘附件面板控制器：用状态机管理面板的显示/隐藏，
+     * 内置超时兜底和竞态保护，避免因 resize 事件不可靠导致状态卡死。
+     *
+     * 状态：
+     *   hidden  — 面板完全隐藏（高度为 0）
+     *   visible — 面板可见（高度 = 缓存键盘高度 - 当前键盘高度）
+     *   hiding  — 面板正在隐藏中（等待键盘弹出把面板"挤没"，带超时兜底）
+     *
+     * 外部通过 update(kh) 传入当前键盘高度，状态机自行计算面板高度和状态转换。
+     */
+    class KeyboardAccessoryPanel {
+        constructor(element, options = {}) {
+            this.el = element;
+            this.state = 'hidden';       // hidden | visible | hiding
+            this._kh = 0;                // 当前键盘高度
+            this._cached = options.defaultHeight || 300;
+            this._maxVH = 0;             // 历史最大视口高度，用于推算键盘高度
+            this._hideTimeoutMs = options.hideTimeout || 500;
+            this._hideTimer = null;
+        }
+
+        setCachedHeight(h) {
+            this._cached = h;
+        }
+
+        get isVisible() {
+            return this.state === 'visible';
+        }
+
+        get isHiding() {
+            return this.state === 'hiding';
+        }
+
+        /**
+         * 显示面板：立即进入 visible 状态，根据当前键盘高度设置面板高度。
+         * 竞态保护：清掉上一次 hiding 的定时器。
+         */
+        show() {
+            if (this.state === 'visible') return;
+            this._clearTimers();
+            this.state = 'visible';
+            this._applyHeight();
+        }
+
+        /**
+         * 隐藏面板：进入 hiding 状态，等待键盘弹出把面板高度挤到 0。
+         * 如果 resize 事件不可靠导致迟迟收不到尾帧，超时后强制收尾。
+         */
+        hide() {
+            if (this.state === 'hidden') return;
+            this._clearTimers();
+            this.state = 'hiding';
+            // 超时兜底：防止 resize 事件不完整导致状态卡死
+            this._hideTimer = setTimeout(() => {
+                if (this.state === 'hiding') {
+                    this.state = 'hidden';
+                    this.el.style.height = '0';
+                }
+            }, this._hideTimeoutMs);
+        }
+
+        /**
+         * 切换：显示 ↔ 隐藏。
+         * 注意：切换判断基于面板自身状态，不依赖输入框焦点。
+         * 如果外部想以输入框焦点为判断依据，自己在外面判断再调用 show/hide。
+         */
+        toggle() {
+            if (this.state === 'hidden') {
+                this.show();
+            } else {
+                this.hide();
+            }
+        }
+
+        /**
+         * 每帧更新：传入当前键盘高度，状态机自行计算面板高度和状态转换。
+         * 由外部的 resize 事件驱动调用。
+         */
+        update(keyboardHeight) {
+            this._kh = keyboardHeight;
+            if (this.state === 'visible') {
+                this._applyHeight();
+            } else if (this.state === 'hiding') {
+                this._applyHeight();
+                // 自然收尾：面板被键盘挤没了，进入终态
+                const ph = Math.max(0, this._cached - keyboardHeight);
+                if (ph < 5) {
+                    this._clearTimers();
+                    this.state = 'hidden';
+                    this.el.style.height = '0';
+                }
+            }
+        }
+
+        /**
+         * 视口变化时由外部调用：传入当前 visualViewport 高度，
+         * 自行推算键盘高度、维护缓存（面板不可见时刷新）、驱动状态机。
+         * 把"键盘高度推算 + 缓存维护 + 面板高度更新"收敛到面板内部，
+         * 调用方只需负责容器高度与滚动，不再感知键盘高度细节。
+         */
+        syncViewport(height) {
+            if (height > this._maxVH) this._maxVH = height;
+            const keyboardHeight = this._maxVH - height;
+            if (keyboardHeight > 10 && this.state !== 'visible') {
+                this._cached = keyboardHeight;
+            }
+            this.update(keyboardHeight);
+        }
+
+        _applyHeight() {
+            const ph = Math.max(0, this._cached - this._kh);
+            this.el.style.height = ph + 'px';
+        }
+
+        _clearTimers() {
+            if (this._hideTimer) {
+                clearTimeout(this._hideTimer);
+                this._hideTimer = null;
+            }
+        }
+    }
+
     (function() {
         const app = document.getElementById('app');
+        const panelEl = document.getElementById('accessory-panel');
+        window._accessoryPanel = new KeyboardAccessoryPanel(panelEl, {
+            defaultHeight: 300,
+            hideTimeout: 500,
+        });
+
         function adjustViewport() {
             if (window.visualViewport) {
                 const height = window.visualViewport.height;
                 app.style.height = `${height}px`;
+                // 键盘高度推算、缓存维护与面板高度更新收敛到面板内部
+                window._accessoryPanel.syncViewport(height);
                 window.scrollTo(0, 0);
                 if (window.chatManagerInstance) window.chatManagerInstance.scrollToBottom();
             }
         }
+        window._adjustViewport = adjustViewport;
         if (window.visualViewport) {
             window.visualViewport.addEventListener('resize', adjustViewport);
             window.visualViewport.addEventListener('scroll', adjustViewport);
@@ -685,6 +982,22 @@
             this.scrollToBottom();
             return msgDiv;
         }
+        /**
+         * 文件/图片传输结果气泡（发送完成 / 已取消 / 失败）。
+         * status: 'done' | 'cancel'；file: File 引用（取消/失败可重发时传）；
+         * kind: 'file'（可点重发）| 'photo'（纯结果展示，不可重发）。
+         */
+        addFileMessage(text, status, file, kind = 'file') {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + (status === 'done' ? 'file-done' : 'file-cancel');
+            msgDiv.textContent = text;
+            msgDiv.dataset.kind = kind;
+            if (kind === 'file' && file) msgDiv._fileRef = file;
+            this.container.appendChild(msgDiv);
+            this.trimToLimit();
+            this.scrollToBottom();
+            return msgDiv;
+        }
         trimToLimit() {
             const messages = Array.from(this.container.querySelectorAll('.message'));
             const excess = messages.length - this.maxHistory;
@@ -721,9 +1034,7 @@
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
-            // 防重放：每方向独立递增的序列号
-            this._sendSeq = 0;
-            this._recvSeq = -1;
+            // 防重放 seq 由 CryptoProvider 内部承载（AAD/前缀），此处不感知
         }
         get needsAuth() { return this._pcPublicKeyB64 !== null; }
         get isEncrypted() { return this._selectedAlgo !== 'none'; }
@@ -779,57 +1090,74 @@
         _fromB64(str) { return sodium.from_base64(str, this._b64Variant); }
 
         makeAuth() {
-            const auth = { type: 'auth', algo: this._selectedAlgo };
+            const auth = { type: 'auth' };
+            // 每个连接是独立会话：握手开始时归零 Provider 内部 seq 计数器
+            //（服务端每连接新建 Provider，从 0 计数，两端必须对齐）
+            if (this._provider && this._provider.reset) this._provider.reset();
             const authData = this._provider.makeAuthData();
             if (authData instanceof Uint8Array) {
-                auth.data = this._toB64(authData);
+                // 加密模式：密封 blob 内含 {"algo","pk"}，线上不泄露算法
+                // msgpack 原生 bin 类型，密文直接入帧，不再 base64 包裹
+                auth.data = authData;
             } else if (authData) {
+                // none+CF：token 明文携带，无密封层，需标明 algo=none
+                auth.algo = 'none';
                 auth.data = authData;
             }
             return auth;
         }
 
-        handleAuthAck(ackMsg) {
-            if (ackMsg.rejected) {
-                console.error('[SEC] Auth rejected:', ackMsg.reason);
-                return false;
-            }
-            if (ackMsg.data) {
-                const raw = this._fromB64(ackMsg.data);
-                if (this._provider.handleAuthAck(raw)) {
+        handleAuthAck(rawBytes) {
+            // 成功 ack = 整帧加密（服务端会话密钥已建立）；失败 ack = 明文 msgpack
+            //（服务端无会话密钥可加密，只能明文 rejected + 关闭）。
+            if (this.isEncrypted) {
+                // 加密模式：先走统一解密路径（seq=0 校验并推进 _rxSeq）
+                if (this._provider.handleAuthAck(rawBytes)) {
                     this._authenticated = true;
-                    this._sendSeq = 0;
-                    this._recvSeq = -1;
                     console.log('[SEC] Authenticated by server');
                     return true;
                 }
-            } else {
-                this._authenticated = true;
-                console.log('[SEC] Authenticated by server');
-                return true;
+                // 解密失败 → 明文 rejected 帧；无法识别同样按失败处理
+                try {
+                    const msg = MessagePack.decode(rawBytes);
+                    if (msg && msg.rejected) {
+                        console.error('[SEC] Auth rejected:', msg.reason);
+                        return false;
+                    }
+                } catch (e) { /* 非 msgpack，按无法识别处理 */ }
+                return false;
             }
+            // 明文模式（none+CF）：ack 一律明文 msgpack
+            try {
+                const msg = MessagePack.decode(rawBytes);
+                if (msg && msg.type === 'auth_ack') {
+                    if (msg.rejected) {
+                        console.error('[SEC] Auth rejected:', msg.reason);
+                        return false;
+                    }
+                    this._authenticated = true;
+                    console.log('[SEC] Authenticated by server');
+                    return true;
+                }
+            } catch (e) { /* 非 msgpack，按无法识别处理 */ }
             return false;
         }
 
         encrypt(msg) {
-            if (!this.isEncrypted) return msg;
-            const payload = Object.assign({}, msg, { seq: this._sendSeq++ });
-            const pt = sodium.from_string(JSON.stringify(payload));
-            const encrypted = this._provider.encrypt(pt);
-            return { type: 'data', data: this._toB64(encrypted) };
+            // 产出线上字节：加密模式整帧加密，明文模式直接 msgpack 编码。
+            // 无外层信封——是否加密由会话状态机决定，不靠帧内容判别。
+            const pt = MessagePack.encode(msg);
+            if (!this.isEncrypted) return pt;
+            // seq 由 Provider 在加密层自动打上，不进应用层报文
+            return this._provider.encrypt(pt);
         }
 
-        decrypt(envelope) {
-            if (!this.isEncrypted) return envelope;
-            const raw = this._fromB64(envelope.data);
-            const pt = this._provider.decrypt(raw);
-            const inner = JSON.parse(sodium.to_string(pt));
-            // 防重放：seq 必须严格递增，重放/乱序直接抛错由调用方处理
-            if (typeof inner.seq !== 'number' || inner.seq <= this._recvSeq) {
-                throw new Error('[SEC] replay detected');
-            }
-            this._recvSeq = inner.seq;
-            return inner;
+        decrypt(rawBytes) {
+            // 还原应用层报文：加密帧先解密，明文帧直接解码。
+            // 重放/乱序/篡改由 Provider 校验并抛错，此处不重复检查。
+            if (!this.isEncrypted) return MessagePack.decode(rawBytes);
+            const pt = this._provider.decrypt(rawBytes);
+            return MessagePack.decode(pt);
         }
     }
 
@@ -885,6 +1213,8 @@
             this._clearConnectTimer();
             try {
                 this.ws = new WebSocket(this.url);
+                // 协议走 binary 帧（msgpack），文本帧一律不予处理
+                this.ws.binaryType = 'arraybuffer';
                 this._setDebugStatus(t('dbg_handshake_wait'));
 
                 // 连接超时：3 秒内没握手成功就主动放弃，快速失败以便下一轮重试
@@ -905,8 +1235,9 @@
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
-                        this.ws.send(JSON.stringify(authMsg));
-                        console.log('[SEC] Auth sent, algo:', authMsg.algo);
+                        this.ws.send(MessagePack.encode(authMsg));
+                        // algo 在密封 blob 内，线上不可见；此处仅记录本地协商结果
+                        console.log('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
                     } else {
                         this.isConnected = true;
                         const t2 = Date.now();
@@ -916,11 +1247,12 @@
                 };
                 this.ws.onmessage = (event) => {
                     try {
-                        const data = JSON.parse(event.data);
+                        const rawBytes = new Uint8Array(event.data);
 
-                        if (data.type === 'auth_ack') {
+                        // 已发 auth、尚未确认：等待的是 auth_ack（成功=密文 / 拒绝=明文 msgpack）
+                        if (!this.isConnected && this.secure.needsAuth) {
                             const t2 = Date.now();
-                            if (this.secure.handleAuthAck(data)) {
+                            if (this.secure.handleAuthAck(rawBytes)) {
                                 this.isConnected = true;
                                 this._setDebugStatus(t('dbg_auth_ok', {ms: t2 - t0}));
                                 this._notifyStatusChange(true);
@@ -933,36 +1265,22 @@
                             return;
                         }
 
-                        if (this.secure.isEncrypted) {
-                            if (data.type === 'data') {
-                                let inner;
-                                try {
-                                    inner = this.secure.decrypt(data);
-                                } catch (e) {
-                                    console.error('[SEC] Decrypt failed:', e);
-                                    return;
-                                }
-                                if (!this.isConnected) {
-                                    this.isConnected = true;
-                                    this._notifyStatusChange(true);
-                                }
-                                const handler = this.messageHandlers.get(inner.type);
-                                if (handler) handler(inner);
-                                else console.warn(t('log_ws_unknown_type'), inner.type);
-                                return;
-                            }
-                        } else {
-                            if (!this.isConnected) {
-                                this.isConnected = true;
-                                this._notifyStatusChange(true);
-                            }
-                            const handler = this.messageHandlers.get(data.type);
-                            if (handler) handler(data);
-                            else console.warn(t('log_ws_unknown_type'), data.type);
+                        // 已认证：下行数据帧（加密=裸密文，明文=msgpack），解密失败即丢弃
+                        let inner;
+                        try {
+                            inner = this.secure.decrypt(rawBytes);
+                        } catch (e) {
+                            console.error('[SEC] Decrypt failed:', e);
                             return;
                         }
 
-                        console.warn('[WS] Unexpected message type:', data.type);
+                        if (!this.isConnected) {
+                            this.isConnected = true;
+                            this._notifyStatusChange(true);
+                        }
+                        const handler = this.messageHandlers.get(inner.type);
+                        if (handler) handler(inner);
+                        else console.warn(t('log_ws_unknown_type'), inner.type);
                     } catch (err) { console.error(t('log_ws_parse_error'), err); }
                 };
                 this.ws.onclose = () => {
@@ -1012,11 +1330,18 @@
             // PC 端配置变更与浏览器无关，不追加微信提示
             this._notifyStatusChange(false, t('auth_reconfig_text'));
         }
-        send(type, text) {
+        /**
+         * 发送一个完整帧（字段平铺在帧顶层，不加 payload 包装）。
+         * 鼠标/键盘面板走这里：{type:"mouse", a:"click", btn:"left"}。
+         */
+        sendFrame(frame) {
             if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-            const encrypted = this.secure.encrypt({ type, text });
-            this.ws.send(JSON.stringify(encrypted));
+            // encrypt 已产出线上字节（加密=密文 / 明文=msgpack），直接上帧
+            this.ws.send(this.secure.encrypt(frame));
             return true;
+        }
+        send(type, text) {
+            return this.sendFrame({ type, text });
         }
         getConnected() { return this.isConnected; }
     }
@@ -1047,6 +1372,17 @@
                     this.longPressTriggered = false;
                     return;
                 }
+                // 文件气泡：取消/失败的点击 → 确认后重发同一文件（完成态不响应）
+                if (msg.dataset.kind === 'file') {
+                    if (msg.classList.contains('file-cancel') && msg._fileRef && window._filePanel) {
+                        if (confirm(t('confirm_resend_file'))) {
+                            window._filePanel.resend(msg._fileRef);
+                        }
+                    }
+                    return;
+                }
+                // 图片气泡（photo）：到电脑剪贴板的结果展示，不参与重发
+                if (msg.dataset.kind === 'photo') return;
                 if (!this.wsClient.getConnected()) return;
                 if (confirm(t('confirm_resend'))) {
                     this.ui.sendExternalMessage(msg.textContent);
@@ -1056,6 +1392,8 @@
         _onStart(e) {
             const msg = e.target.closest('.message');
             if (!msg) return;
+            // 文件/图片结果气泡不参与长按取词/拼接输入
+            if (msg.dataset.kind === 'file' || msg.dataset.kind === 'photo') return;
             this.currentMsg = msg;
             this.currentMsg.classList.add('active');
             this.longPressTriggered = false;
@@ -1107,6 +1445,9 @@
             this.config = configManager;
             this.autoMode = true;
             this.unifiedVoiceObserver = null;
+            this.btnPlus = document.getElementById('btn-plus');
+            this.panel = window._accessoryPanel;
+            this.panelTabs = document.getElementById('panel-tabs');
 
             this.btnClear.setAttribute('aria-label', t('btn_clear_aria'));
             this.initEventListeners();
@@ -1120,6 +1461,7 @@
                 this.adjustHeight();
                 this.wsClient.send('preview', this.inputBox.value);
                 this.updateModeToggleVisibility();
+                this.updatePlusSendVisibility();
             });
 
             // 跨平台统一语音特征检测
@@ -1136,6 +1478,12 @@
                 this.inputBox.focus();
             });
 
+            this.btnPlus.addEventListener('click', (e) => {
+                if (!this.wsClient.getConnected()) return;
+                e.preventDefault();
+                this.showAccessoryPanel();
+            });
+
             this.inputBox.addEventListener('keydown', (e) => {
                 if (!this.wsClient.getConnected()) return;
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -1150,6 +1498,7 @@
                 this.adjustHeight();
                 this.wsClient.send('preview', '');
                 this.updateModeToggleVisibility();
+                this.updatePlusSendVisibility();
                 this.inputBox.focus();
             });
             this.btnClear.addEventListener('touchstart', (e) => { e.preventDefault(); this.btnClear.click(); });
@@ -1165,6 +1514,7 @@
             });
             
             this.inputBox.addEventListener('focus', () => {
+                this.hideAccessoryPanel();
                 this.chatManager.scrollToBottom();
                 setTimeout(() => this.chatManager.scrollToBottom(), 50);
                 setTimeout(() => this.chatManager.scrollToBottom(), 150);
@@ -1194,6 +1544,7 @@
             this.adjustHeight();
             this.wsClient.send('preview', '');
             this.updateModeToggleVisibility();
+            this.updatePlusSendVisibility();
         }
         adjustHeight() {
             this.inputBox.style.height = 'auto';
@@ -1210,6 +1561,7 @@
                 document.body.classList.remove('auto-mode');
                 this.inputBox.placeholder = t('input_placeholder_manual');
             }
+            this.updatePlusSendVisibility();
         }
         updateModeToggleVisibility() {
             if (!this.wsClient.getConnected()) {
@@ -1217,6 +1569,34 @@
                 return;
             }
             this.modeToggle.style.display = (this.inputBox.value.trim() === '') ? 'block' : 'none';
+        }
+        updatePlusSendVisibility() {
+            if (!this.wsClient.getConnected()) {
+                this.btnPlus.style.display = 'none';
+                this.btnSend.style.display = 'none';
+                return;
+            }
+            const hasText = this.inputBox.value.trim() !== '';
+            this.btnPlus.style.display = hasText ? 'none' : 'flex';
+            this.btnSend.style.display = hasText ? 'flex' : 'none';
+        }
+        showAccessoryPanel() {
+            if (this.panel.isVisible) {
+                // 面板可见 → 收起面板（回到键盘输入）
+                this.hideAccessoryPanel();
+                this.inputBox.focus();
+                return;
+            }
+            // 面板不可见 → 显示面板（收起键盘），并露出子面板切换条
+            this.panel.show();
+            this.panelTabs.classList.remove('hidden');
+            this.inputBox.blur();
+            if (window._adjustViewport) window._adjustViewport();
+        }
+        hideAccessoryPanel() {
+            // 输入框获得焦点 → 面板与切换条一起隐藏
+            this.panelTabs.classList.add('hidden');
+            this.panel.hide();
         }
         onConnectionChange(connected, message, type) {
             const statusBar = document.getElementById('status-bar');
@@ -1228,6 +1608,7 @@
                 chatListDiv.classList.remove('offline');
                 this.inputBox.disabled = false;
                 this.btnSend.disabled = false;
+                this.btnPlus.disabled = false;
                 this.btnClear.disabled = false;
                 this.modeToggle.disabled = false;
                 this.updateSendButtonUI();
@@ -1240,6 +1621,8 @@
                 chatListDiv.classList.add('offline');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
+                this.btnPlus.disabled = true;
+                this.btnPlus.style.display = 'none';
                 this.btnClear.disabled = true;
                 this.modeToggle.disabled = true;
                 this.modeToggle.style.display = 'none';
@@ -1266,6 +1649,1746 @@
         }
     }
 
+    // ========== 6. 附件面板：子面板切换 + 鼠标摇杆 ==========
+
+    /**
+     * 子面板切换条（鼠标 / 键盘 / 文件）。
+     *
+     * 必须在 loadI18n() 之后调用：切换条的 aria-label 与各占位文案取自语言包，
+     * 语言包未就绪时 t() 只会回退成键名。
+     */
+    function initPanelTabs() {
+        const tabsEl = document.getElementById('panel-tabs');
+        const tabButtons = tabsEl ? Array.prototype.slice.call(tabsEl.querySelectorAll('.tab')) : [];
+        const views = Array.prototype.slice.call(document.querySelectorAll('#accessory-panel .panel-view'));
+
+        function activatePanel(name) {
+            tabButtons.forEach(function (b) {
+                b.classList.toggle('active', b.dataset.panel === name);
+            });
+            views.forEach(function (v) {
+                v.classList.toggle('active', v.id === 'view-' + name);
+            });
+        }
+        window._activatePanel = activatePanel; // 供调试与后续对接使用
+
+        tabButtons.forEach(function (b) {
+            b.setAttribute('aria-label', t('panel_tab_' + b.dataset.panel));
+            b.addEventListener('click', function (e) {
+                e.preventDefault();
+                activatePanel(this.dataset.panel);
+                if (navigator.vibrate) navigator.vibrate(15);
+            });
+        });
+
+        // 所有带 data-i18n 的占位文案统一回填（鼠标面板的提示由 MouseJoystick 自管）
+        document.querySelectorAll('#accessory-panel [data-i18n]').forEach(function (el) {
+            el.textContent = t(el.dataset.i18n);
+        });
+    }
+
+    /**
+     * 摇杆子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
+     *
+     * 对应 docs/mouse-joystick-design.md：
+     *   - §3.1 方案 A：CSS 由类自带（static get STYLES），选择器挂 .mouse-joystick，零全局污染
+     *   - §3.2 解耦原则：不碰 WebSocket，所有输出只走 onCommand(frame) 一个出口
+     *   - §4 布局：调参行 / 读数行 / 摇杆 + 按钮网格 / 提示行
+     *   - §5.1 帧格式严格对齐 wire-protocol.md §7 的 mouse / key，不发明协议外字段
+     */
+    class MouseJoystick {
+        // 一次性动作按钮（4×4 网格，数组顺序即 DOM 顺序）
+        // frame 是完整帧对象（含 type）：鼠标类落 type:"mouse"，按键类落 type:"key"
+        static get ACTIONS() {
+            return [
+                { id: 'left',       i18n: 'panel_btn_left',       frame: { type: 'mouse', a: 'click', btn: 'left' } },
+                { id: 'right',      i18n: 'panel_btn_right',      frame: { type: 'mouse', a: 'click', btn: 'right' } },
+                { id: 'del',        text: '⌫',                   frame: { type: 'key', keys: 'backspace' } },
+                { id: 'enter',      text: 'Enter', cls: 'pv-enter', frame: { type: 'key', keys: 'enter' } },
+                { id: 'double',     i18n: 'panel_btn_double',     frame: { type: 'mouse', a: 'double', btn: 'left' } },
+                { id: 'drag',       i18n: 'panel_btn_drag', toggle: true },
+                { id: 'esc',        text: 'Esc',                  frame: { type: 'key', keys: 'esc' } },
+                { id: 'shiftenter', text: '⇧Enter', cls: 'pv-enter', title: 'Shift+Enter', frame: { type: 'key', keys: 'shift+enter' } },
+                { id: 'wheelup',    i18n: 'panel_btn_wheel_up',   cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: -120 } },
+                { id: 'redo',       text: 'Ctrl+Y', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+y' } },
+                { id: 'up',         text: '↑',      repeat: true, frame: { type: 'key', keys: 'up' } },
+                { id: 'undo',       text: 'Ctrl+Z', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+z' } },
+                { id: 'wheeldown',  i18n: 'panel_btn_wheel_down', cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: 120 } },
+                { id: 'arrleft',    text: '←',      repeat: true, frame: { type: 'key', keys: 'left' } },
+                { id: 'arrdown',    text: '↓',      repeat: true, frame: { type: 'key', keys: 'down' } },
+                { id: 'arrright',   text: '→',      repeat: true, frame: { type: 'key', keys: 'right' } }
+            ];
+        }
+
+        static get STYLES() {
+            return `
+        .mouse-joystick {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+        }
+        .mouse-joystick .pv-tuning {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 12px 2px;
+        }
+        .mouse-joystick .pv-tune {
+            flex: 1 1 0;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .mouse-joystick .pv-tune label {
+            font-size: 11px;
+            color: #888;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .mouse-joystick .pv-tune input[type="range"] {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 3px;
+            accent-color: #07c160;
+            cursor: pointer;
+            touch-action: none;
+        }
+        .mouse-joystick .pv-tune .val {
+            font-size: 11px;
+            font-weight: 600;
+            color: #07c160;
+            min-width: 30px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+        }
+        .mouse-joystick .pv-readout {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 2px 12px 4px;
+            font-size: 11px;
+            color: #888;
+        }
+        .mouse-joystick .pv-readout .pv-readout-label {
+            flex-shrink: 0;
+        }
+        .mouse-joystick .pv-readout .pv-mag {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 4px;
+            border-radius: 2px;
+            background: #ececec;
+            overflow: hidden;
+        }
+        .mouse-joystick .pv-readout .pv-mag-fill {
+            width: 0;
+            height: 100%;
+            background: #07c160;
+            transition: width 0.06s linear;
+        }
+        .mouse-joystick .pv-readout .pv-speed {
+            flex-shrink: 0;
+            min-width: 64px;
+            text-align: right;
+            font-weight: 600;
+            color: #07c160;
+            font-variant-numeric: tabular-nums;
+        }
+        .mouse-joystick .pv-control {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: stretch;
+            justify-content: center;
+            gap: 8px;
+            padding: 4px 8px;
+        }
+        .mouse-joystick .pv-grid {
+            flex: 3 1 0;
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 6px;
+        }
+        .mouse-joystick .pv-grid button {
+            min-width: 0;
+            min-height: 0;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #555;
+            font-size: 12px;
+            line-height: 1.1;
+            cursor: pointer;
+            touch-action: none;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            transition: transform 0.06s, background-color 0.1s;
+            overflow: hidden;
+            white-space: nowrap;
+        }
+        .mouse-joystick .pv-grid button.pv-narrow {
+            font-size: 10px;
+        }
+        .mouse-joystick .pv-grid button:active {
+            transform: scale(0.94);
+        }
+        .mouse-joystick .pv-grid button.on {
+            background: #0d9488;
+            border-color: #0d9488;
+            color: #ffffff;
+            box-shadow: 0 0 14px rgba(20, 184, 166, 0.35);
+        }
+        /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
+        .mouse-joystick .pv-grid button[data-id="left"],
+        .mouse-joystick .pv-grid button[data-id="double"],
+        .mouse-joystick .pv-grid button[data-id="enter"],
+        .mouse-joystick .pv-grid button[data-id="shiftenter"] {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .mouse-joystick .pv-grid button[data-id="right"] {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #d23b3b;
+        }
+        .mouse-joystick .pv-grid button[data-id="drag"] {
+            background: rgba(20, 184, 166, 0.12);
+            border-color: rgba(20, 184, 166, 0.45);
+            color: #0d9488;
+        }
+        .mouse-joystick .pv-grid button[data-id="del"],
+        .mouse-joystick .pv-grid button[data-id="esc"] {
+            background: rgba(100, 116, 139, 0.12);
+            border-color: rgba(100, 116, 139, 0.40);
+            color: #475569;
+        }
+        .mouse-joystick .pv-grid button[data-id="up"],
+        .mouse-joystick .pv-grid button[data-id="arrleft"],
+        .mouse-joystick .pv-grid button[data-id="arrdown"],
+        .mouse-joystick .pv-grid button[data-id="arrright"] {
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.45);
+            color: #2563eb;
+        }
+        .mouse-joystick .pv-grid button[data-id="wheelup"],
+        .mouse-joystick .pv-grid button[data-id="wheeldown"] {
+            background: rgba(245, 158, 11, 0.14);
+            border-color: rgba(245, 158, 11, 0.50);
+            color: #b45309;
+        }
+        .mouse-joystick .pv-grid button[data-id="undo"],
+        .mouse-joystick .pv-grid button[data-id="redo"] {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.45);
+            color: #7c3aed;
+        }
+        .mouse-joystick .pv-grid button:active {
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
+        }
+        .mouse-joystick .pv-grid button.pv-enter {
+            border-color: #07c160;
+            color: #07c160;
+            font-weight: 600;
+        }
+        .mouse-joystick .pv-stick {
+            flex: 2 2 0;
+            min-width: 104px;
+            align-self: stretch;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .mouse-joystick .pv-stick-base {
+            position: relative;
+            width: 112px;
+            height: 112px;
+            border-radius: 50%;
+            background: #ffffff;
+            border: 1.5px solid #dcdcdc;
+            box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.06);
+            touch-action: none;
+            flex-shrink: 0;
+        }
+        .mouse-joystick .pv-cross-h,
+        .mouse-joystick .pv-cross-v {
+            position: absolute;
+            background: #f0f0f0;
+        }
+        .mouse-joystick .pv-cross-h {
+            left: 14%;
+            right: 14%;
+            top: 50%;
+            height: 1px;
+            transform: translateY(-50%);
+        }
+        .mouse-joystick .pv-cross-v {
+            top: 14%;
+            bottom: 14%;
+            left: 50%;
+            width: 1px;
+            transform: translateX(-50%);
+        }
+        .mouse-joystick .pv-knob {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 34%;
+            height: 34%;
+            margin: -17%;
+            border-radius: 50%;
+            background: radial-gradient(circle at 35% 35%, #7bd8c6, #07c160);
+            border: 2px solid rgba(7, 193, 96, 0.6);
+            box-shadow: 0 0 16px rgba(7, 193, 96, 0.35);
+        }
+            `;
+        }
+
+        constructor(root, options = {}) {
+            this.root = root;
+            this.onCommand = options.onCommand || function () {};
+            this.maxSpeed = options.maxSpeed || 1500;   // px/s 满推速度
+            this.deadzone = options.deadzone || 0.12;   // 死区比例
+
+            this.active = false;
+            this.dirX = 0;      // 单位方向向量
+            this.dirY = 0;
+            this.mag = 0;       // 幅度 0~1
+            this.dragOn = false;
+            this._accX = 0;     // 位移小数余量，跨帧累加避免截断误差
+            this._accY = 0;
+            this._lastT = 0;
+            this._rafId = null;
+            this._ro = null;
+            this._wheelDelay = null;
+            this._wheelTimer = null;
+
+            this._boundLoop = this._loop.bind(this);
+            this._boundResize = this._fitStick.bind(this);
+
+            this._injectStyles();
+            // 与 TouchpadPanel 同一约定：面板类加在 section 内的独立根容器上，
+            // 不污染 section，避免 .mouse-joystick 之类规则干扰 .panel-view 的显隐。
+            this.root.innerHTML = '<div class="mouse-joystick"></div>';
+            this.root = this.root.querySelector('.mouse-joystick');
+            this._buildDOM();
+            this._bindPointer();
+            this._rafId = requestAnimationFrame(this._boundLoop);
+        }
+
+        // ---------- 构建 ----------
+
+        _injectStyles() {
+            if (document.getElementById('mouse-joystick-styles')) return;   // 幂等
+            const style = document.createElement('style');
+            style.id = 'mouse-joystick-styles';
+            style.textContent = MouseJoystick.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            const gridHtml = MouseJoystick.ACTIONS.map(function (act, i) {
+                const cls = ['pv-act', act.cls || ''].join(' ').trim();
+                const title = act.title ? ' title="' + act.title + '"' : '';
+                const label = act.i18n
+                    ? '<span data-i18n="' + act.i18n + '"></span>'
+                    : act.text;
+                return '<button type="button" class="' + cls + '"' + title +
+                       ' data-act="' + i + '" data-id="' + act.id + '">' + label + '</button>';
+            }).join('');
+
+            this.root.innerHTML = [
+                '<div class="pv-tuning">',
+                '  <div class="pv-tune">',
+                '    <label for="mj-speed" data-i18n="panel_tune_speed"></label>',
+                '    <input id="mj-speed" class="pv-speed-range" type="range" min="200" max="3000" step="50">',
+                '    <span class="val pv-speed-val"></span>',
+                '  </div>',
+                '  <div class="pv-tune">',
+                '    <label for="mj-dead" data-i18n="panel_tune_dead"></label>',
+                '    <input id="mj-dead" class="pv-dead-range" type="range" min="0" max="30">',
+                '    <span class="val pv-dead-val"></span>',
+                '  </div>',
+                '</div>',
+                '<div class="pv-readout">',
+                '  <span class="pv-readout-label" data-i18n="panel_mag"></span>',
+                '  <div class="pv-mag"><div class="pv-mag-fill"></div></div>',
+                '  <span class="pv-speed">0 px/s</span>',
+                '</div>',
+                '<div class="pv-control">',
+                '  <div class="pv-stick">',
+                '    <div class="pv-stick-base">',
+                '      <span class="pv-cross-h"></span><span class="pv-cross-v"></span>',
+                '      <div class="pv-knob"></div>',
+                '    </div>',
+                '  </div>',
+                '  <div class="pv-grid">' + gridHtml + '</div>',
+                '</div>',
+                '<div class="pv-hint" data-i18n="panel_hint_mouse"></div>'
+            ].join('');
+
+            // 语言包已由 loadI18n() 就绪，统一回填 data-i18n 文案
+            this.root.querySelectorAll('[data-i18n]').forEach(function (el) {
+                el.textContent = t(el.dataset.i18n);
+            });
+
+            this.base = this.root.querySelector('.pv-stick-base');
+            this.knob = this.root.querySelector('.pv-knob');
+            this.magFill = this.root.querySelector('.pv-mag-fill');
+            this.speedEl = this.root.querySelector('.pv-speed');
+            this.dragBtn = this.root.querySelector('[data-id="drag"]');
+
+            this._initTuning();
+            this._bindActions();
+
+            // 自适应尺寸：面板由隐藏切为可见时 ResizeObserver 会补一次测量
+            if (typeof ResizeObserver !== 'undefined') {
+                this._ro = new ResizeObserver(this._boundResize);
+                this._ro.observe(this.base.parentElement);
+            }
+            window.addEventListener('resize', this._boundResize);
+            this._fitStick();
+        }
+
+        _initTuning() {
+            const speedRange = this.root.querySelector('.pv-speed-range');
+            const speedVal = this.root.querySelector('.pv-speed-val');
+            const deadRange = this.root.querySelector('.pv-dead-range');
+            const deadVal = this.root.querySelector('.pv-dead-val');
+
+            speedRange.value = this.maxSpeed;
+            speedVal.textContent = this.maxSpeed;
+            speedRange.addEventListener('input', () => {
+                this.maxSpeed = +speedRange.value;
+                speedVal.textContent = this.maxSpeed;
+            });
+
+            deadRange.value = Math.round(this.deadzone * 100);
+            deadVal.textContent = this.deadzone.toFixed(2);
+            deadRange.addEventListener('input', () => {
+                this.deadzone = +deadRange.value / 100;
+                deadVal.textContent = this.deadzone.toFixed(2);
+            });
+        }
+
+        // ---------- 输出（唯一出口） ----------
+
+        // dx / dy 是每帧小数位移。沿方向取整（而非按轴独立截断）：pyautogui 只收
+        // 整数像素，按轴截断会让慢速 45° 方向某帧只走 x、某帧只走 y，方向漂成纯
+        // 水平/纯垂直。沿方向取整保证每帧输出向量方向与累加方向一致、模长精确。
+        _emitMove(dx, dy) {
+            this._accX += dx;
+            this._accY += dy;
+            const mag = Math.hypot(this._accX, this._accY);
+            if (mag < 1) return;                      // 不足 1px，留到下一帧
+            const n = Math.floor(mag);
+            const ox = Math.round(this._accX / mag * n);
+            const oy = Math.round(this._accY / mag * n);
+            this._accX -= ox;                          // 向量减法，方向与模长都守恒
+            this._accY -= oy;
+            if (ox === 0 && oy === 0) return;
+            this.onCommand({ type: 'mouse', a: 'move', dx: ox, dy: oy });
+        }
+
+        _emitAction(frame) {
+            this.onCommand(frame);
+        }
+
+        _setDrag(on) {
+            this.dragOn = on;
+            if (this.dragBtn) this.dragBtn.classList.toggle('on', on);
+            this._emitAction({ type: 'mouse', a: on ? 'down' : 'up', btn: 'left' });
+        }
+
+        // ---------- 交互 ----------
+
+        _bindPointer() {
+            const base = this.base;
+            base.addEventListener('pointerdown', (e) => {
+                this.active = true;
+                try { base.setPointerCapture(e.pointerId); } catch (err) {}
+                this._updateStick(e.clientX, e.clientY);
+                this._lastT = performance.now();
+                e.preventDefault();
+            });
+            base.addEventListener('pointermove', (e) => {
+                if (!this.active) return;
+                this._updateStick(e.clientX, e.clientY);
+                e.preventDefault();
+            });
+            base.addEventListener('pointerup', () => this._endStick());
+            base.addEventListener('pointercancel', () => this._endStick());
+        }
+
+        _updateStick(clientX, clientY) {
+            const rect = this.base.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let dx = clientX - cx;
+            let dy = clientY - cy;
+            const dist = Math.hypot(dx, dy);
+            const maxR = Math.max(8, (rect.width - this.knob.offsetWidth) / 2);
+            if (dist > maxR) {
+                // 位置 clamp 到圆边，但方向向量直接用 clamp 后的 dx/dy 除以 maxR，
+                // 因此 dirX/dirY 始终是“单位方向”，与手指推出多远无关（sample 算法）。
+                dx = dx / dist * maxR;
+                dy = dy / dist * maxR;
+            }
+            this.mag = Math.min(1, dist / maxR);
+            this.dirX = dist > 0 ? dx / maxR : 0;
+            this.dirY = dist > 0 ? dy / maxR : 0;
+            this.knob.style.transition = 'none';
+            this.knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        }
+
+        _endStick() {
+            if (!this.active) return;
+            this.active = false;
+            this.dirX = this.dirY = 0;
+            this.mag = 0;
+            this._accX = this._accY = 0;
+            this.knob.style.transition = 'transform 0.18s ease-out';
+            this.knob.style.transform = 'translate(0,0)';
+        }
+
+        _bindActions() {
+            const self = this;
+            this.root.querySelectorAll('.pv-act').forEach(function (el) {
+                const act = MouseJoystick.ACTIONS[+el.dataset.act];
+                el.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    if (act.toggle) {
+                        self._setDrag(!self.dragOn);
+                        return;
+                    }
+                    self._emitAction(act.frame);
+                    if (act.repeat) self._startRepeat(act.frame);
+                });
+                if (act.repeat) {
+                    el.addEventListener('pointerup', () => self._stopRepeat());
+                    el.addEventListener('pointercancel', () => self._stopRepeat());
+                    el.addEventListener('pointerleave', () => self._stopRepeat());
+                }
+            });
+        }
+
+        // 滚轮长按连发：首次立即发，延迟 350ms 后每 140ms 一格
+        _startRepeat(frame) {
+            this._stopRepeat();
+            this._wheelDelay = setTimeout(() => {
+                this._wheelTimer = setInterval(() => this._emitAction(frame), 140);
+            }, 350);
+        }
+
+        _stopRepeat() {
+            if (this._wheelDelay) { clearTimeout(this._wheelDelay); this._wheelDelay = null; }
+            if (this._wheelTimer) { clearInterval(this._wheelTimer); this._wheelTimer = null; }
+        }
+
+        // ---------- 帧循环 ----------
+
+        _loop(now) {
+            const dt = Math.min(50, now - this._lastT) / 1000;   // 上限 50ms，防切后台回来跳变
+            this._lastT = now;
+
+            let speed = 0;
+            if (this.active && this.mag > this.deadzone) {
+                // 与 sample 一致：线性曲线。dirX/dirY 已是“单位方向 × 幅度”，
+                // eff 做死区归一化后线性映射到 maxSpeed，方向变化线性可感、满推行程恒定。
+                const eff = Math.min(1, (this.mag - this.deadzone) / (1 - this.deadzone));
+                speed = eff * this.maxSpeed;
+                this._emitMove(this.dirX * speed * dt, this.dirY * speed * dt);
+            }
+            this._updateReadout(speed);
+            this._rafId = requestAnimationFrame(this._boundLoop);
+        }
+
+        _updateReadout(speed) {
+            this.magFill.style.width = (this.mag * 100).toFixed(1) + '%';
+            this.speedEl.textContent = Math.round(speed) + ' px/s';
+        }
+
+        // 摇杆底座尽量大：占满 .pv-stick 可用区域并保持圆形
+        _fitStick() {
+            const stick = this.base.parentElement;
+            if (!stick) return;
+            const w = stick.clientWidth;
+            const h = stick.clientHeight;
+            if (w < 20 || h < 20) return;   // 面板收起 / 未激活时跳过
+            const s = Math.max(88, Math.min(w, h) - 8);
+            this.base.style.width = s + 'px';
+            this.base.style.height = s + 'px';
+        }
+
+        // ---------- 生命周期 ----------
+
+        start() {
+            if (this._rafId === null) {
+                this._lastT = performance.now();
+                this._rafId = requestAnimationFrame(this._boundLoop);
+            }
+        }
+
+        destroy() {
+            if (this._rafId !== null) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+            this._stopRepeat();
+            if (this._ro) { this._ro.disconnect(); this._ro = null; }
+            window.removeEventListener('resize', this._boundResize);
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
+        }
+    }
+
+    /**
+     * 鼠标子面板：触控板模式（矩形触摸板）。
+     *
+     * 触摸逻辑移植自 docs/touchpad-sample.html：
+     *   - 单指拖拽 → move 帧（dx/dy = 手指位移 × 速度倍率）
+     *   - 轻点（位移 < 10px 且 < 300ms）→ 左键单击
+     *   - 双指上下拖 → 滚轮帧（每累计 6px 一个刻度，上 = -120 / 下 = +120）
+     * 自带按钮列（左/右/双击/拖拽 + Enter/Shift+Enter/Undo/Redo），不复用摇杆的动作网格。
+     * 输出只走 onCommand(frame) 一个出口，不碰 WebSocket（与 MouseJoystick 同约定）。
+     */
+    class TouchpadPanel {
+        static get STYLES() {
+            return `
+        .touchpad-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+        }
+        .touchpad-panel .tp-speed-bar {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 2px 8px 6px;
+            border-bottom: 1px solid var(--border-color, #3a3a42);
+            margin-bottom: 4px;
+        }
+        .touchpad-panel .tp-speed-bar label {
+            font-size: 11px;
+            color: #9aa;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .touchpad-panel .tp-speed-bar input[type="range"] {
+            flex: 1;
+            min-width: 60px;
+            height: 3px;
+            accent-color: #07c160;
+            cursor: pointer;
+            touch-action: none;
+        }
+        .touchpad-panel .tp-speed-bar .tp-speed-val {
+            font-size: 12px;
+            font-weight: 600;
+            color: #07c160;
+            min-width: 34px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+        }
+        .touchpad-panel .tp-main-row {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            gap: 5px;
+            align-items: stretch;
+            justify-content: center;
+            padding: 2px 4px 4px;
+        }
+        .touchpad-panel .tp-btn-col,
+        .touchpad-panel .tp-btn-col-right {
+            flex: 0 0 44px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-height: 0;
+        }
+        .touchpad-panel .tp-btn-col button,
+        .touchpad-panel .tp-btn-col-right button {
+            flex: 1;
+            min-height: 0;
+            border-radius: 8px;
+            border: 1px solid #c8ccd2;
+            background: #ffffff;
+            color: #1c1c20;
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            touch-action: none;
+            transition: background 0.08s, border-color 0.08s, transform 0.06s, color 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 2px;
+            text-align: center;
+            line-height: 1.2;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        }
+        .touchpad-panel .tp-btn-col button:active,
+        .touchpad-panel .tp-btn-col-right button:active {
+            transform: scale(0.94);
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
+        }
+        /* 拖拽为开关态：激活时反白（深底白字）以区分 */
+        .touchpad-panel .tp-btn-col button[data-act="drag"].on {
+            background: #0d9488; color: #ffffff; border-color: #0d9488;
+            box-shadow: 0 0 16px rgba(20, 184, 166, 0.3);
+        }
+        /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
+        .touchpad-panel .tp-btn-col button[data-act="left"],
+        .touchpad-panel .tp-btn-col button[data-act="double"],
+        .touchpad-panel .tp-btn-col-right button[data-act="enter"],
+        .touchpad-panel .tp-btn-col-right button[data-act="shiftenter"] {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .touchpad-panel .tp-btn-col button[data-act="right"] {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.45);
+            color: #d23b3b;
+        }
+        .touchpad-panel .tp-btn-col button[data-act="drag"] {
+            background: rgba(20, 184, 166, 0.12);
+            border-color: rgba(20, 184, 166, 0.45);
+            color: #0d9488;
+        }
+        .touchpad-panel .tp-btn-col-right button[data-act="undo"],
+        .touchpad-panel .tp-btn-col-right button[data-act="redo"] {
+            background: rgba(139, 92, 246, 0.12);
+            border-color: rgba(139, 92, 246, 0.45);
+            color: #7c3aed;
+        }
+        .touchpad-panel .tp-touchpad-wrap {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px;
+        }
+        .touchpad-panel .tp-touchpad {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            border-radius: 14px;
+            background: radial-gradient(circle at 30% 30%, rgba(79, 209, 197, 0.06), rgba(79, 209, 197, 0.01));
+            border: 2px solid rgba(255, 255, 255, 0.12);
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(79, 209, 197, 0.12);
+            touch-action: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            min-height: 60px;
+            min-width: 60px;
+            transition: border-color 0.25s, box-shadow 0.25s;
+        }
+        .touchpad-panel .tp-touchpad.active {
+            border-color: #4fd1c5;
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.4), 0 0 40px rgba(79, 209, 197, 0.2);
+        }
+        .touchpad-panel .tp-touchpad .tp-grid-h {
+            position: absolute; left: 10%; right: 10%; top: 50%; height: 1px;
+            background: rgba(255, 255, 255, 0.05); transform: translateY(-50%); pointer-events: none;
+        }
+        .touchpad-panel .tp-touchpad .tp-grid-v {
+            position: absolute; top: 10%; bottom: 10%; left: 50%; width: 1px;
+            background: rgba(255, 255, 255, 0.05); transform: translateX(-50%); pointer-events: none;
+        }
+        .touchpad-panel .tp-touchpad .tp-icon {
+            position: relative; z-index: 1; font-size: 22px; opacity: 0.15;
+            color: #9aa; pointer-events: none; transition: opacity 0.3s;
+        }
+        .touchpad-panel .tp-touchpad.active .tp-icon { opacity: 0.3; }
+        .touchpad-panel .tp-touchpad .tp-hint {
+            position: absolute; bottom: 12%; left: 0; right: 0; text-align: center;
+            font-size: 8px; color: #666; pointer-events: none; opacity: 0.5;
+            letter-spacing: 0.3px; transition: opacity 0.3s;
+        }
+        .touchpad-panel .tp-touchpad.active .tp-hint { opacity: 0; }
+        .touchpad-panel .tp-touchpad .tp-hud {
+            position: absolute; top: 6px; left: 10px; right: 10px;
+            display: flex; gap: 14px; font-size: 10px; color: #9aa;
+            pointer-events: none; z-index: 4;
+        }
+        .touchpad-panel .tp-touchpad .tp-hud .val { color: #4fd1c5; font-variant-numeric: tabular-nums; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind {
+            position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+            display: flex; flex-direction: column; align-items: center; gap: 2px;
+            opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 4;
+            background: rgba(0, 0, 0, 0.7); padding: 5px 7px; border-radius: 10px; border: 1px solid #3d3d48;
+        }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind.show { opacity: 1; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow { font-size: 13px; line-height: 1; color: #9aa; transition: color 0.15s, transform 0.15s; }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow.up.active { color: #7bcfa6; transform: scale(1.2); }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .arrow.down.active { color: #ff7eb3; transform: scale(1.2); }
+        .touchpad-panel .tp-touchpad .tp-scroll-ind .line { width: 2px; flex: 1; min-height: 10px; background: #3a3a42; border-radius: 1px; }
+        .touchpad-panel .tp-touchpad .tp-finger {
+            position: absolute; width: 22px; height: 22px; border-radius: 50%;
+            background: rgba(79, 209, 197, 0.5); border: 2px solid #4fd1c5;
+            transform: translate(-50%, -50%) scale(0); opacity: 0; pointer-events: none;
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s; z-index: 3;
+            box-shadow: 0 0 20px rgba(79, 209, 197, 0.2);
+        }
+        .touchpad-panel .tp-touchpad .tp-finger.show { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        .touchpad-panel .tp-touchpad .tp-finger.two { width: 30px; height: 30px; border-color: #f6ad55; background: rgba(246, 173, 85, 0.25); }
+        .touchpad-panel .tp-touchpad .tp-ripple {
+            position: absolute; width: 24px; height: 24px; margin: -12px; border-radius: 50%;
+            border: 2.5px solid rgba(255, 255, 255, 0.85); pointer-events: none; z-index: 5;
+            animation: tpRipple 0.45s ease-out forwards;
+        }
+        .touchpad-panel .tp-touchpad .tp-ripple.right { border-color: #f6ad55; }
+        .touchpad-panel .tp-touchpad .tp-ripple.double { border-color: #c9a0ff; }
+        .touchpad-panel .tp-touchpad .tp-ripple.scroll-up { border-color: #7bcfa6; }
+        .touchpad-panel .tp-touchpad .tp-ripple.scroll-down { border-color: #ff7eb3; }
+        @keyframes tpRipple { to { transform: scale(4); opacity: 0; } }
+        .touchpad-panel .tp-touchpad .tp-keyfb {
+            position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%) scale(0.8);
+            background: rgba(0, 0, 0, 0.7); color: #ddd; padding: 4px 14px; border-radius: 16px;
+            font-size: 12px; font-weight: 600; border: 1px solid #3d3d48; pointer-events: none; z-index: 6;
+            opacity: 0; white-space: nowrap; transition: opacity 0.3s, transform 0.3s;
+        }
+        .touchpad-panel .tp-touchpad .tp-keyfb.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        .touchpad-panel .tp-touchpad .tp-keyfb.hide { opacity: 0; transform: translate(-50%, -50%) scale(1.2); }
+        `;
+        }
+
+        constructor(root, options = {}) {
+            this.root = root;
+            this.onCommand = options.onCommand || function () {};
+            this.speed = options.speed || 7.5;        // 触控板灵敏度倍率（手指位移 × speed）
+            this.dragOn = false;
+            this._accX = 0;
+            this._accY = 0;
+            this._ts = {
+                active: false, fingerCount: 0, startTime: 0,
+                startX: 0, startY: 0, lastX: 0, lastY: 0,
+                maxDist: 0, twoFingerPrevY: 0, scrollAccum: 0,
+                speedSmooth: 0, lastMoveTime: 0
+            };
+            this._scrollHideTimer = null;
+            this._spdTimer = null;
+
+            this._injectStyles();
+            // 在 section 内生成独立根容器：
+            // 否则 .touchpad-panel{display:flex} 会盖过 .panel-view 的显隐控制，导致切面板时触控板无法隐藏。
+            this.root.innerHTML = '<div class="touchpad-panel"></div>';
+            this.root = this.root.querySelector('.touchpad-panel');
+            this._buildDOM();
+            this._bindTouch();
+            this._bindButtons();
+        }
+
+        // ---------- 构建 ----------
+
+        _injectStyles() {
+            if (document.getElementById('touchpad-panel-styles')) return;   // 幂等
+            const style = document.createElement('style');
+            style.id = 'touchpad-panel-styles';
+            style.textContent = TouchpadPanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            this.root.innerHTML = [
+                '<div class="tp-speed-bar">',
+                '  <label>🐢 速度</label>',
+                '  <input id="tp-speed" type="range" min="1" max="20" step="0.5" value="5">',
+                '  <span class="tp-speed-val">1.00</span>',
+                '</div>',
+                '<div class="tp-main-row">',
+                '  <div class="tp-btn-col">',
+                '    <button type="button" data-act="left">左键</button>',
+                '    <button type="button" data-act="right">右键</button>',
+                '    <button type="button" data-act="double">双击</button>',
+                '    <button type="button" data-act="drag">拖拽</button>',
+                '  </div>',
+                '  <div class="tp-touchpad-wrap">',
+                '    <div class="tp-touchpad">',
+                '      <div class="tp-grid-h"></div>',
+                '      <div class="tp-grid-v"></div>',
+                '      <div class="tp-icon">✚</div>',
+                '      <div class="tp-hud">',
+                '        <div class="tp-spd">速度 <span class="val tp-spd-val">0</span> px/s</div>',
+                '        <div class="tp-fingers">手指 <span class="val tp-fingers-val">0</span></div>',
+                '      </div>',
+                '      <div class="tp-scroll-ind">',
+                '        <div class="arrow up">▲</div>',
+                '        <div class="line"></div>',
+                '        <div class="arrow down">▼</div>',
+                '      </div>',
+                '      <div class="tp-finger"></div>',
+                '      <div class="tp-hint">滑动 · 轻点 · 双指滚动</div>',
+                '    </div>',
+                '  </div>',
+                '  <div class="tp-btn-col-right">',
+                '    <button type="button" data-act="enter" class="enter-btn">↵ Enter</button>',
+                '    <button type="button" data-act="shiftenter" class="shift-enter-btn">⇧ Enter</button>',
+                '    <button type="button" data-act="undo" class="undo-btn">↩ Undo</button>',
+                '    <button type="button" data-act="redo" class="redo-btn">↪ Redo</button>',
+                '  </div>',
+                '</div>'
+            ].join('');
+
+            this.touchpad = this.root.querySelector('.tp-touchpad');
+            this.finger = this.root.querySelector('.tp-finger');
+            this.speedRange = this.root.querySelector('#tp-speed');
+            this.speedVal = this.root.querySelector('.tp-speed-val');
+            this.spdVal = this.root.querySelector('.tp-spd-val');
+            this.fingersVal = this.root.querySelector('.tp-fingers-val');
+            this.scrollInd = this.root.querySelector('.tp-scroll-ind');
+            this.scrollUp = this.root.querySelector('.tp-scroll-ind .arrow.up');
+            this.scrollDown = this.root.querySelector('.tp-scroll-ind .arrow.down');
+
+            // 速度倍率滑块（触控板手感：默认 5.0，最高 20）
+            this.speedRange.value = this.speed;
+            this.speedVal.textContent = this.speed.toFixed(1);
+            this.speedRange.addEventListener('input', () => {
+                this.speed = parseFloat(this.speedRange.value);
+                this.speedVal.textContent = this.speed.toFixed(1);
+            });
+        }
+
+        // ---------- 输出（唯一出口） ----------
+
+        static get FRAMES() {
+            return {
+                left:       { type: 'mouse', a: 'click', btn: 'left' },
+                right:      { type: 'mouse', a: 'click', btn: 'right' },
+                double:     { type: 'mouse', a: 'double', btn: 'left' },
+                enter:      { type: 'key', keys: 'enter' },
+                shiftenter: { type: 'key', keys: 'shift+enter' },
+                undo:       { type: 'key', keys: 'ctrl+z' },
+                redo:       { type: 'key', keys: 'ctrl+y' }
+            };
+        }
+
+        // 位移小数余量跨帧累加，沿方向取整发整数像素（与 MouseJoystick 同策略）
+        _emitMove(dx, dy) {
+            this._accX += dx;
+            this._accY += dy;
+            const mag = Math.hypot(this._accX, this._accY);
+            if (mag < 1) return;
+            const n = Math.floor(mag);
+            const ox = Math.round(this._accX / mag * n);
+            const oy = Math.round(this._accY / mag * n);
+            this._accX -= ox;
+            this._accY -= oy;
+            if (ox === 0 && oy === 0) return;
+            this._emitAction({ type: 'mouse', a: 'move', dx: ox, dy: oy });
+        }
+
+        _emitAction(frame) {
+            this.onCommand(frame);
+        }
+
+        // ---------- 按钮 ----------
+
+        _bindButtons() {
+            const self = this;
+            this.root.querySelectorAll('.tp-btn-col button, .tp-btn-col-right button').forEach(function (el) {
+                const act = el.dataset.act;
+                el.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    if (act === 'drag') {
+                        self._toggleDrag(el);
+                        return;
+                    }
+                    const frame = TouchpadPanel.FRAMES[act];
+                    if (frame) self._emitAction(frame);
+                    self._spawnRipple('');
+                    self._showKeyFeedback(el.textContent.trim());
+                });
+            });
+        }
+
+        _toggleDrag(el) {
+            this.dragOn = !this.dragOn;
+            el.classList.toggle('on', this.dragOn);
+            this._emitAction({ type: 'mouse', a: this.dragOn ? 'down' : 'up', btn: 'left' });
+            this._showKeyFeedback(this.dragOn ? '拖拽 ON' : '拖拽 OFF');
+        }
+
+        // ---------- 触摸核心 ----------
+
+        _center(touches) {
+            let cx = 0, cy = 0;
+            for (let i = 0; i < touches.length; i++) {
+                cx += touches[i].clientX;
+                cy += touches[i].clientY;
+            }
+            return { x: cx / touches.length, y: cy / touches.length };
+        }
+
+        _bindTouch() {
+            const tp = this.touchpad;
+            const self = this;
+            const ts = self._ts;
+
+            tp.addEventListener('touchstart', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                ts.active = true;
+                ts.fingerCount = count;
+                ts.maxDist = 0;
+                ts.startTime = performance.now();
+                ts.lastMoveTime = ts.startTime;
+                const center = self._center(touches);
+                ts.startX = ts.lastX = center.x;
+                ts.startY = ts.lastY = center.y;
+                if (count === 1) {
+                    ts.twoFingerPrevY = 0;
+                    ts.scrollAccum = 0;
+                    self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    tp.classList.add('active');
+                } else if (count >= 2) {
+                    ts.twoFingerPrevY = center.y;
+                    ts.scrollAccum = 0;
+                    self._showFinger(center.x, center.y, 2);
+                    tp.classList.add('active');
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchmove', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                if (!ts.active || count === 0) return;
+                const center = self._center(touches);
+                if (count === 1) {
+                    const dx = center.x - ts.lastX;
+                    const dy = center.y - ts.lastY;
+                    ts.maxDist = Math.max(ts.maxDist, Math.hypot(center.x - ts.startX, center.y - ts.startY));
+                    self._emitMove(dx * self.speed, dy * self.speed);
+                    self._updateSpeed(dx * self.speed, dy * self.speed);
+                    self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    tp.classList.add('active');
+                    ts.lastX = center.x;
+                    ts.lastY = center.y;
+                } else if (count >= 2) {
+                    // 双指上下拖 → 滚轮（与 MouseJoystick 的 wheelup=-120 / wheeldown=+120 对齐）
+                    const deltaY = center.y - ts.twoFingerPrevY;
+                    const sens = 0.8;
+                    ts.scrollAccum += -deltaY * sens * 0.5;
+                    const threshold = 6;
+                    if (Math.abs(ts.scrollAccum) >= threshold) {
+                        const steps = Math.floor(ts.scrollAccum / threshold);
+                        const up = steps > 0;
+                        self._emitAction({ type: 'mouse', a: 'wheel', delta: up ? -120 : 120 });
+                        self._spawnRipple(up ? 'scroll-up' : 'scroll-down');
+                        self._showScroll(up);
+                        ts.scrollAccum -= steps * threshold;
+                    }
+                    ts.twoFingerPrevY = center.y;
+                    self._showFinger(center.x, center.y, 2);
+                    tp.classList.add('active');
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchend', function (e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+                if (count === 0) {
+                    const elapsed = performance.now() - ts.startTime;
+                    // 轻点判定：几乎没移动且时间短 → 左键单击（与 sample 一致）
+                    if (ts.maxDist < 10 && elapsed < 300) {
+                        self._emitAction({ type: 'mouse', a: 'click', btn: 'left' });
+                        self._spawnRipple('');
+                    }
+                    ts.active = false;
+                    ts.fingerCount = 0;
+                    ts.maxDist = 0;
+                    ts.scrollAccum = 0;
+                    tp.classList.remove('active');
+                    self._hideFinger();
+                    self._clearSpeedLater();
+                } else {
+                    ts.fingerCount = count;
+                    const center = self._center(touches);
+                    if (count === 1) {
+                        ts.lastX = center.x;
+                        ts.lastY = center.y;
+                        self._showFinger(touches[0].clientX, touches[0].clientY, 1);
+                    } else if (count >= 2) {
+                        ts.twoFingerPrevY = center.y;
+                        self._showFinger(center.x, center.y, 2);
+                    }
+                }
+            }, { passive: false });
+
+            tp.addEventListener('touchcancel', function (e) {
+                e.preventDefault();
+                ts.active = false;
+                ts.fingerCount = 0;
+                ts.maxDist = 0;
+                ts.scrollAccum = 0;
+                tp.classList.remove('active');
+                self._hideFinger();
+                self._clearSpeed();
+            }, { passive: false });
+        }
+
+        // ---------- 视觉反馈 ----------
+
+        _showFinger(clientX, clientY, count) {
+            const rect = this.touchpad.getBoundingClientRect();
+            const w = rect.width, h = rect.height;
+            const cx = rect.left + w / 2, cy = rect.top + h / 2;
+            let dx = (clientX - cx) / (w / 2);
+            let dy = (clientY - cy) / (h / 2);
+            if (Math.abs(dx) > 1) dx = Math.sign(dx);
+            if (Math.abs(dy) > 1) dy = Math.sign(dy);
+            const px = cx + dx * (w / 2) * 0.85 - rect.left;
+            const py = cy + dy * (h / 2) * 0.85 - rect.top;
+            this.finger.style.left = px + 'px';
+            this.finger.style.top = py + 'px';
+            this.finger.classList.add('show');
+            if (count >= 2) this.finger.classList.add('two');
+            else this.finger.classList.remove('two');
+            this.fingersVal.textContent = count;
+        }
+
+        _hideFinger() {
+            this.finger.classList.remove('show', 'two');
+            this.fingersVal.textContent = '0';
+        }
+
+        _spawnRipple(cls) {
+            const rip = document.createElement('div');
+            rip.className = 'tp-ripple' + (cls ? ' ' + cls : '');
+            rip.style.left = '50%';
+            rip.style.top = '50%';
+            this.touchpad.appendChild(rip);
+            setTimeout(function () { rip.remove(); }, 500);
+        }
+
+        _showKeyFeedback(label) {
+            const el = document.createElement('div');
+            el.className = 'tp-keyfb';
+            el.textContent = label;
+            this.touchpad.appendChild(el);
+            requestAnimationFrame(function () { el.classList.add('show'); });
+            setTimeout(function () {
+                el.classList.remove('show');
+                el.classList.add('hide');
+                setTimeout(function () { el.remove(); }, 400);
+            }, 600);
+        }
+
+        _showScroll(up) {
+            this.scrollInd.classList.add('show');
+            if (up) {
+                this.scrollUp.classList.add('active');
+                this.scrollDown.classList.remove('active');
+            } else {
+                this.scrollDown.classList.add('active');
+                this.scrollUp.classList.remove('active');
+            }
+            clearTimeout(this._scrollHideTimer);
+            this._scrollHideTimer = setTimeout(() => {
+                this.scrollInd.classList.remove('show');
+                this.scrollUp.classList.remove('active');
+                this.scrollDown.classList.remove('active');
+            }, 600);
+        }
+
+        _updateSpeed(mx, my) {
+            const now = performance.now();
+            const dt = (now - this._ts.lastMoveTime) / 1000 || 0.016;
+            const dist = Math.hypot(mx, my);
+            if (dt > 0.01) {
+                const spd = dist / dt;
+                this._ts.speedSmooth = this._ts.speedSmooth * 0.7 + spd * 0.3;
+                this.spdVal.textContent = Math.round(this._ts.speedSmooth);
+                this._ts.lastMoveTime = now;
+            }
+        }
+
+        _clearSpeedLater() {
+            const self = this;
+            clearTimeout(this._spdTimer);
+            this._spdTimer = setTimeout(function () {
+                if (!self._ts.active) self.spdVal.textContent = '0';
+            }, 320);
+        }
+
+        _clearSpeed() {
+            clearTimeout(this._spdTimer);
+            this.spdVal.textContent = '0';
+        }
+
+        // ---------- 生命周期 ----------
+
+        destroy() {
+            clearTimeout(this._scrollHideTimer);
+            clearTimeout(this._spdTimer);
+            // 触摸 / 按钮监听器挂在 this.touchpad 与按钮上，随根节点移除自动失效
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
+        }
+    }
+
+    // ========== 6.5 键盘面板 ==========
+    /**
+     * KeyboardPanel：键盘快捷键面板，5 行 × 4 键，无分类标题：
+     *   R1 发送/输入：⇧Enter 换行 ｜ Ctrl+A 全选 ｜ Space ｜ Enter 发送（主键）
+     *   R2 纠错：Ctrl+Z 撤销 ｜ Ctrl+Y 重做 ｜ Del ｜ ⌫ 退格
+     *   R3 界面救急：Esc ｜ Tab ｜ ⇧Tab ｜ Alt+Tab
+     *   R4/R5 光标导航：PgUp·Home·↑·End ／ PgDn·←·↓·→（上下成对，方向键与翻页按住连发）
+     * 约定与 MouseJoystick / TouchpadPanel 一致：
+     *   - CSS 由类自带（static get STYLES），选择器挂 .keyboard-panel，注入一次（幂等）；
+     *   - 在 section 内生成独立根容器（不污染 section，避免 display 规则盖过 .panel-view 显隐）；
+     *   - DOM 由 _buildDOM() 生成；输出只经 onCommand(frame) 一个出口，不碰 WebSocket；
+     *   - 提供 destroy()。
+     * 设计决策：
+     *   - 只发完整按键/组合，不放裸修饰键（Shift/Ctrl/Alt 需维护按住态，易卡死难恢复）；
+     *   - 按键全部映射 pyautogui 键名组合（keys 帧），PC 端 send_keys 校验后执行；
+     *   - 行高自适应面板：每行 flex:1 均分可用高度（按钮随之放大），
+     *     仅当高度不足（低于 min-height）时才出现竖向滚动。
+     */
+    class KeyboardPanel {
+        static get ACTIONS() {
+            return [
+                // R1 发送 / 输入（中性行，Enter 为实心主键）
+                { id: 'shiftenter', text: '⇧Enter',  row: 1, frame: { type: 'key', keys: 'shift+enter' } },
+                { id: 'selectall',  text: 'Ctrl+A',  row: 1, frame: { type: 'key', keys: 'ctrl+a' } },
+                { id: 'space',      text: 'Space',   row: 1, frame: { type: 'key', keys: 'space' } },
+                { id: 'enter',      text: 'Enter',   row: 1, frame: { type: 'key', keys: 'enter' } },
+                // R2 纠错（绿，Del / ⌫ 红色特例）
+                { id: 'undo',       text: 'Ctrl+Z',  row: 2, frame: { type: 'key', keys: 'ctrl+z' } },
+                { id: 'redo',       text: 'Ctrl+Y',  row: 2, frame: { type: 'key', keys: 'ctrl+y' } },
+                { id: 'delete',     text: 'Del',     row: 2, frame: { type: 'key', keys: 'delete' } },
+                { id: 'backspace',  text: '⌫',       row: 2, frame: { type: 'key', keys: 'backspace' } },
+                // R3 界面救急（琥珀）
+                { id: 'esc',        text: 'Esc',     row: 3, frame: { type: 'key', keys: 'esc' } },
+                { id: 'tab',        text: 'Tab',     row: 3, frame: { type: 'key', keys: 'tab' } },
+                { id: 'shifttab',   text: '⇧Tab',   row: 3, frame: { type: 'key', keys: 'shift+tab' } },
+                { id: 'alttab',     text: 'Alt+Tab', row: 3, frame: { type: 'key', keys: 'alt+tab' } },
+                // R4 / R5 光标导航（蓝，方向键与翻页按住连发）
+                { id: 'pgup',  text: 'PgUp', row: 4, repeat: true, frame: { type: 'key', keys: 'pageup' } },
+                { id: 'home',  text: 'Home', row: 4, frame: { type: 'key', keys: 'home' } },
+                { id: 'up',    text: '↑',    row: 4, repeat: true, frame: { type: 'key', keys: 'up' } },
+                { id: 'end',   text: 'End',  row: 4, frame: { type: 'key', keys: 'end' } },
+                { id: 'pgdn',  text: 'PgDn', row: 5, repeat: true, frame: { type: 'key', keys: 'pagedown' } },
+                { id: 'left',  text: '←',    row: 5, repeat: true, frame: { type: 'key', keys: 'left' } },
+                { id: 'down',  text: '↓',    row: 5, repeat: true, frame: { type: 'key', keys: 'down' } },
+                { id: 'right', text: '→',    row: 5, repeat: true, frame: { type: 'key', keys: 'right' } }
+            ];
+        }
+
+        static get STYLES() {
+            return `
+        .keyboard-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            overflow-y: auto;            /* 高度不足（低于行 min-height）时才滚动 */
+            box-sizing: border-box;
+            gap: 6px;
+            padding: 3px 10px 2px;
+        }
+        .keyboard-panel .kb-grid {
+            flex: 1 1 0;                 /* 每行均分面板高度 → 按钮随面板自动放大 */
+            min-height: 34px;            /* 行最小高度：低于此值由面板竖向滚动兜底 */
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+        .keyboard-panel .kb-grid button {
+            height: 100%;                /* 撑满所在行 */
+            min-height: 34px;            /* 与行 min-height 一致，双保险 */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #555;
+            font-size: 12px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            touch-action: none;          /* 长按连发期间不让页面滚动 */
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            transition: transform 0.06s, background-color 0.1s;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        .keyboard-panel .kb-grid button:active {
+            transform: scale(0.94);
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
+        }
+        .keyboard-panel .pv-hint {
+            flex-shrink: 0;
+        }
+        /* 行语义色：柔和低饱和，延续触控板 / 摇杆配色体系 */
+        .keyboard-panel .kb-grid[data-row="1"] button {  /* 发送 / 输入 */
+            background: rgba(100, 116, 139, 0.10);
+            border-color: rgba(100, 116, 139, 0.38);
+            color: #475569;
+        }
+        .keyboard-panel .kb-grid[data-row="2"] button {  /* 纠错 */
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
+        }
+        .keyboard-panel .kb-grid[data-row="3"] button {  /* 界面救急 */
+            background: rgba(217, 119, 6, 0.13);
+            border-color: rgba(217, 119, 6, 0.45);
+            color: #b45309;
+        }
+        .keyboard-panel .kb-grid[data-row="4"] button,
+        .keyboard-panel .kb-grid[data-row="5"] button {  /* 光标导航 */
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.45);
+            color: #2563eb;
+        }
+        /* 方向键（←↑↓→）：浅紫 */
+        .keyboard-panel .kb-grid button[data-id="left"],
+        .keyboard-panel .kb-grid button[data-id="up"],
+        .keyboard-panel .kb-grid button[data-id="down"],
+        .keyboard-panel .kb-grid button[data-id="right"] {
+            background: rgba(139, 92, 246, 0.13);
+            border-color: rgba(139, 92, 246, 0.40);
+            color: #8b5cf6;
+        }
+        /* 破坏性键（删除 / 退格）：浅红提醒 */
+        .keyboard-panel .kb-grid button[data-id="delete"],
+        .keyboard-panel .kb-grid button[data-id="backspace"] {
+            background: rgba(239, 68, 68, 0.10);
+            border-color: rgba(239, 68, 68, 0.35);
+            color: #e57373;
+        }
+        /* Enter 发送：深绿实心主键 */
+        .keyboard-panel .kb-grid button[data-id="enter"] {
+            background: #047857;
+            border-color: #047857;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        `;
+        }
+
+        constructor(root, options = {}) {
+            this.onCommand = options.onCommand || function () {};
+            this._repDelay = null;
+            this._repTimer = null;
+
+            this._injectStyles();
+            // 在 section 内生成独立根容器：
+            // 否则 .keyboard-panel 的 display 规则会盖过 .panel-view 的显隐控制（见 TouchpadPanel 同注）。
+            root.innerHTML = '<div class="keyboard-panel"></div>';
+            this.root = root.querySelector('.keyboard-panel');
+            this._buildDOM();
+            this._bindActions();
+        }
+
+        // ---------- 构建 ----------
+
+        _injectStyles() {
+            if (document.getElementById('keyboard-panel-styles')) return;   // 幂等
+            const style = document.createElement('style');
+            style.id = 'keyboard-panel-styles';
+            style.textContent = KeyboardPanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            // 按键按 row 分组 → 每行一个 4 列 kb-grid，行间无标题，天然连成键盘
+            const rows = {};
+            KeyboardPanel.ACTIONS.forEach(function (a) {
+                (rows[a.row] = rows[a.row] || []).push(a);
+            });
+            const html = Object.keys(rows).sort(function (a, b) { return Number(a) - Number(b); })
+                .map(function (r) {
+                    const btns = rows[r].map(function (act) {
+                        const label = act.i18n ? t(act.i18n) : act.text;
+                        return '<button type="button" data-id="' + act.id + '">' + label + '</button>';
+                    }).join('');
+                    return '<div class="kb-grid" data-row="' + r + '">' + btns + '</div>';
+                }).join('');
+            this.root.innerHTML = html +
+                '<div class="pv-hint" data-i18n="panel_hint_keys"></div>';
+
+            // 语言包已由 loadI18n() 就绪，统一回填 data-i18n 文案（与 MouseJoystick 同套路）
+            this.root.querySelectorAll('[data-i18n]').forEach(function (el) {
+                el.textContent = t(el.dataset.i18n);
+            });
+        }
+
+        // ---------- 交互 ----------
+
+        _bindActions() {
+            const self = this;
+            this.root.querySelectorAll('.kb-grid button').forEach(function (el) {
+                const act = KeyboardPanel.ACTIONS.filter(function (a) { return a.id === el.dataset.id; })[0];
+                el.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    self.onCommand(act.frame);
+                    if (act.repeat) self._startRepeat(act.frame);
+                });
+                if (act.repeat) {
+                    el.addEventListener('pointerup', () => self._stopRepeat());
+                    el.addEventListener('pointercancel', () => self._stopRepeat());
+                    el.addEventListener('pointerleave', () => self._stopRepeat());
+                }
+            });
+        }
+
+        // 按住连发：pointerdown 已立即发一帧，延迟 350ms 后每 140ms 一发（与摇杆面板一致）
+        _startRepeat(frame) {
+            this._stopRepeat();
+            this._repDelay = setTimeout(() => {
+                this._repTimer = setInterval(() => this.onCommand(frame), 140);
+            }, 350);
+        }
+
+        _stopRepeat() {
+            if (this._repDelay) { clearTimeout(this._repDelay); this._repDelay = null; }
+            if (this._repTimer) { clearInterval(this._repTimer); this._repTimer = null; }
+        }
+
+        // ---------- 生命周期 ----------
+
+        destroy() {
+            this._stopRepeat();
+            // 监听器挂在 this.root 内的按钮上，随根节点移除自动失效
+            if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
+        }
+    }
+
+    // ========== 6.5 文件子面板：发送文件到 PC（wire-protocol.md §9 / §9.2） ==========
+    // 套路与 KeyboardPanel 等一致：static STYLES 注入、section 内独立根容器、
+    // 出口统一 onCommand(frame)；下行 ack/error 通过 ws.on(type, handler) 订阅。
+    class FilePanel {
+        static get CHUNK_SIZE() { return 256 * 1024; }   // 协议固定 256KB
+
+        static get STYLES() {
+            return `
+        .file-panel {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            min-height: 0;
+            padding: 8px 16px;
+            box-sizing: border-box;
+            gap: 10px;
+        }
+        .file-panel .fp-pick {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+        }
+        .file-panel .fp-pick button {
+            flex: 1;
+            max-width: 104px;
+            min-height: 96px;
+            padding: 10px 4px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            border: 1px dashed #c8ccd2;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.7);
+            color: #666;
+            font-size: 12px;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: transform 0.06s, background-color 0.1s;
+        }
+        .file-panel .fp-pick button:active {
+            background: #eef2ee;
+            transform: scale(0.96);
+        }
+        .file-panel .fp-pick button:disabled {
+            opacity: 0.45;
+            pointer-events: none;
+        }
+        .file-panel .fp-pick .ico {
+            font-size: 30px;
+            line-height: 1;
+        }
+        .file-panel .fp-pick .fp-sub {
+            font-size: 10px;
+            line-height: 1.25;
+            color: #9ca3af;
+            text-align: center;
+        }
+        /* 发送进度态：发送期间仅「取消」可点 */
+        .file-panel .fp-progress {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        .file-panel .fp-progress[hidden] { display: none; }
+        .file-panel .fp-name {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 14px;
+            color: #374151;
+        }
+        .file-panel .fp-bar {
+            width: 82%;
+            height: 10px;
+            border-radius: 5px;
+            background: #e5e7eb;
+            overflow: hidden;
+        }
+        .file-panel .fp-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 5px;
+            background: #07c160;
+            transition: width 0.15s;
+        }
+        .file-panel .fp-pct {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        .file-panel .fp-cancel {
+            min-width: 120px;
+            height: 44px;
+            border: 1px solid #c8ccd2;
+            border-radius: 10px;
+            background: #ffffff;
+            color: #ef4444;
+            font-size: 15px;
+            cursor: pointer;
+            touch-action: manipulation;
+        }
+        .file-panel .fp-cancel:active {
+            background: #fdecec;
+            transform: scale(0.96);
+        }
+        .file-panel .pv-hint {
+            font-size: 11px;
+            color: #9ca3af;
+            text-align: center;
+        }
+        `;
+        }
+
+        constructor(root, opts) {
+            this.root = root;
+            this.onCommand = opts.onCommand;     // 唯一出口：帧发给 wsClient
+            this.chat = opts.chat;               // ChatListManager：写结果气泡
+            this.ws = opts.ws;                   // 订阅下行 ack/error
+            this.revealPanel = opts.revealPanel || null;  // 发送开始时切到本面板（入口注入）
+
+            this._id = 0;            // 传输会话 id：每连接从 1 递增（协议 §9）
+            this._state = 'idle';    // idle | sending
+            this._kind = 'file';     // 当前传输类型：'file' 落盘 | 'photo' 到剪贴板
+            this._file = null;       // 发送中的 File（取消/出错时留作重发）
+            this._cancelRequested = false;
+
+            this._injectStyles();
+            this._buildDOM();
+            this._bind();
+
+            // 下行 ack：进度条推进（file 的 ref:"file"、photo 的 ref:"photo"，协议 §9）
+            this.ws.on('ack', (f) => {
+                if (this._state === 'sending' && f.ref === this._kind && f.id === this._id) {
+                    this._updateProgress(f.received);
+                }
+            });
+            // 下行 error：PC 端拒收（字段非法/已有传输占线等）→ 视为失败收尾
+            this.ws.on('error', () => {
+                if (this._state === 'sending') this._finish(false);
+            });
+        }
+
+        _injectStyles() {
+            if (document.getElementById('file-panel-styles')) return;
+            const style = document.createElement('style');
+            style.id = 'file-panel-styles';
+            style.textContent = FilePanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            this.root.innerHTML = `
+                <div class="file-panel">
+                    <div class="fp-pick">
+                        <button type="button" data-fp="doc">
+                            <span class="ico">📄</span><span data-i18n="panel_file_doc"></span>
+                            <span class="fp-sub" data-i18n="panel_file_doc_hint"></span>
+                        </button>
+                        <button type="button" data-fp="image">
+                            <span class="ico">🖼️</span><span data-i18n="panel_file_image"></span>
+                            <span class="fp-sub" data-i18n="panel_file_image_hint"></span>
+                        </button>
+                        <input type="file" class="fp-input" hidden>
+                    </div>
+                    <div class="fp-progress" hidden>
+                        <div class="fp-name"></div>
+                        <div class="fp-bar"><div class="fp-fill"></div></div>
+                        <div class="fp-pct">0%</div>
+                        <button type="button" class="fp-cancel" data-i18n="panel_file_cancel"></button>
+                    </div>
+                    <div class="pv-hint" data-i18n="panel_hint_file"></div>
+                </div>`;
+            // 语言包已由 loadI18n() 就绪，统一回填 data-i18n 文案（与其他面板同套路）
+            this.root.querySelectorAll('[data-i18n]').forEach(el => {
+                el.textContent = t(el.dataset.i18n);
+            });
+            this.pickRow = this.root.querySelector('.fp-pick');
+            this.progressBox = this.root.querySelector('.fp-progress');
+            this.fileInput = this.root.querySelector('.fp-input');
+            this.nameEl = this.root.querySelector('.fp-name');
+            this.fillEl = this.root.querySelector('.fp-fill');
+            this.pctEl = this.root.querySelector('.fp-pct');
+        }
+
+        _bind() {
+            // 按钮决定传输类型：图片 → 剪贴板(photo)，文件 → 磁盘(file)
+            const pickKind = (kind) => {
+                if (this._state !== 'idle') return;
+                this._pendingKind = kind;
+                this.fileInput.accept = kind === 'photo' ? 'image/*' : '';
+                this.fileInput.click();
+            };
+            this.pickRow.querySelector('[data-fp="image"]').addEventListener('click', () => pickKind('photo'));
+            this.pickRow.querySelector('[data-fp="doc"]').addEventListener('click', () => pickKind('file'));
+            this.fileInput.addEventListener('change', () => {
+                const f = this.fileInput.files && this.fileInput.files[0];
+                this.fileInput.value = '';   // 允许下次选同一个文件仍触发 change
+                if (f) {
+                    const kind = this._pendingKind || 'file';
+                    this._pendingKind = null;
+                    this._start(f, kind);
+                }
+            });
+            this.root.querySelector('.fp-cancel').addEventListener('click', () => this._cancel());
+        }
+
+        /** 外部重发入口（消息气泡点击）：重新发送同一文件（仅 file 可重发） */
+        resend(file) {
+            if (this._state === 'idle') this._start(file, 'file');
+        }
+
+        /** 结果气泡文案键：photo 与 file 各自一套（bubble_photo_* / bubble_file_*） */
+        _bubbleKey(base) {
+            return this._kind === 'photo' ? 'bubble_photo_' + base : 'bubble_file_' + base;
+        }
+
+        async _start(file, kind = 'file') {
+            if (this._state === 'sending') return;
+            if (!this.ws.getConnected()) {
+                alert(t('panel_file_disconnected'));
+                return;
+            }
+
+            this._id += 1;
+            this._kind = kind;               // 'file' → 磁盘；'photo' → 剪贴板
+            this._file = file;
+            this._cancelRequested = false;
+            this._state = 'sending';
+
+            // 发送期间需要看到进度与取消：若附件面板收起/在别的 tab，先切回本面板
+            if (this.revealPanel) this.revealPanel();
+
+            // 切到进度态：选择区锁定（仅取消可点）
+            this.pickRow.style.display = 'none';
+            this.progressBox.hidden = false;
+            this.nameEl.textContent = file.name;
+            this._updateProgress(0);
+
+            const total = Math.ceil(file.size / FilePanel.CHUNK_SIZE);
+            // 帧 type 随传输类型（wire-protocol.md §9：file/photo 线格式相同）
+            this.onCommand({ type: kind, a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
+
+            for (let n = 0; n < total; n++) {
+                if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾
+                if (!this.ws.getConnected()) { this._finish(false); return; }
+                try {
+                    const blob = file.slice(n * FilePanel.CHUNK_SIZE, (n + 1) * FilePanel.CHUNK_SIZE);
+                    const buf = await blob.arrayBuffer();
+                    const ok = this.onCommand({ type: kind, a: 'data', id: this._id, n, chunk: new Uint8Array(buf) });
+                    if (!ok) { this._finish(false); return; }   // 连接断开，sendFrame 静默 false
+                } catch (e) {
+                    console.error('[FILE] read/send chunk failed:', e);
+                    this.onCommand({ type: kind, a: 'cancel', id: this._id });
+                    this._finish(false);
+                    return;
+                }
+            }
+
+            if (this._cancelRequested) return;
+            this.onCommand({ type: kind, a: 'end', id: this._id });
+            this._finish(true);
+        }
+
+        _cancel() {
+            if (this._state !== 'sending') return;
+            this._cancelRequested = true;
+            const kind = this._kind;
+            this.onCommand({ type: kind, a: 'cancel', id: this._id });   // file 删 .part、photo 丢 buffer（§9）
+            const file = this._file;
+            this._resetUI();
+            this._state = 'idle';
+            // 灰色气泡入聊天记录：file 可点重发；photo 纯结果展示不可重发
+            const ref = kind === 'file' ? file : null;
+            this.chat.addFileMessage(t(this._bubbleKey('canceled'), { name: file.name }), 'cancel', ref, kind);
+        }
+
+        _finish(success) {
+            const file = this._file;
+            const kind = this._kind;
+            this._resetUI();
+            this._state = 'idle';
+            if (!file) return;
+            if (success) {
+                // 完成：file 深绿、photo 也用深绿，靠文案/图标（📄/🖼️）区分
+                this.chat.addFileMessage(t(this._bubbleKey('done'), { name: file.name }), 'done', null, kind);
+            } else {
+                // 失败：file 可点重发；photo 纯结果展示
+                const ref = kind === 'file' ? file : null;
+                this.chat.addFileMessage(t(this._bubbleKey('failed'), { name: file.name }), 'cancel', ref, kind);
+            }
+        }
+
+        _resetUI() {
+            this.progressBox.hidden = true;
+            this.pickRow.style.display = '';
+            this._file = null;
+        }
+
+        _updateProgress(received) {
+            const file = this._file;
+            if (!file || !file.size) return;
+            const pct = Math.min(100, Math.round((received / file.size) * 100));
+            this.fillEl.style.width = pct + '%';
+            this.pctEl.textContent = pct + '%';
+        }
+    }
+
     // ========== 7. 主程序入口 ==========
     window.onload = async () => {
         await loadI18n();   // 必须先加载语言包，再初始化各组件
@@ -1279,10 +3402,41 @@
         const chatManager = new ChatListManager(chatContainer, appConfig);
         window.chatManagerInstance = chatManager;
 
+        // 附件面板：子面板切换条（依赖语言包，必须在 loadI18n() 之后）
+        initPanelTabs();
+
         const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         // 跟随当前页面路径：加密模式页面在 /{secret}/ 下 → /{secret}/ws；明文模式在 / 下 → /ws
         const wsClient = new WSClient(`${wsProto}//${location.host}${location.pathname}ws`, appConfig);
         const uiController = new UIController(inputBox, btnSend, btnClear, modeToggle, chatManager, wsClient, appConfig);
+
+        // 鼠标子面板：虚拟摇杆（速度模型）+ 4×4 动作按钮网格。
+        // 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板。
+        // 两者都只用 onCommand(frame) 作为唯一出口（docs/mouse-joystick-design.md §3.2），
+        // 帧字段平铺在顶层，原样交给 wsClient；未连接时 sendFrame 静默返回 false。
+        window._mouseJoystick = new MouseJoystick(document.getElementById('view-mouse'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        window._touchpad = new TouchpadPanel(document.getElementById('view-touchpad'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        // 键盘子面板：组合快捷键（编辑/导航/系统），同样只走 onCommand 单一出口
+        window._keyboard = new KeyboardPanel(document.getElementById('view-keys'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        // 文件子面板：发送文件到 PC（下行 ack/error 由 ws.on 订阅）。
+        // revealPanel：发送开始时若附件面板收起则展开、并切到文件 tab，保证用户能看到进度/取消。
+        window._filePanel = new FilePanel(document.getElementById('view-file'), {
+            onCommand: (frame) => wsClient.sendFrame(frame),
+            chat: chatManager,
+            ws: wsClient,
+            revealPanel: () => {
+                const ap = window._accessoryPanel;
+                if (ap && !ap.isVisible) uiController.showAccessoryPanel();  // 展开并露出切换条
+                if (window._activatePanel) window._activatePanel('file');    // 切到文件 tab
+                if (window._adjustViewport) window._adjustViewport();
+            }
+        });
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);
 

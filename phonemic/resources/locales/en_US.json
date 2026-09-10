@@ -57,6 +57,13 @@
     "menu_about": "About",
     "menu_quit": "Quit",
     "minimized_title": "PhoneMic",
+    "file_saved_title": "File received",
+    "file_saved_msg": "{name} saved. Tap the notification to open the folder",
+    "photo_copied_title": "Image copied",
+    "photo_copied_msg": "{name} copied to the clipboard, ready to paste",
+    "photo_failed_title": "Image copy failed",
+    "photo_failed_msg": "Could not put {name} on the clipboard",
+
     "minimized_message": "Program minimized to system tray. Click the tray icon to restore."
   },
   "settings": {
@@ -117,6 +124,38 @@
     "remember": "Remember my choice (can be changed in Preferences)"
   },
   "mobile": {
+    "panel_hint_mouse": "Mouse panel · coming soon",
+    "panel_hint_keys": "Keyboard panel · shortcuts",
+    "panel_hint_file": "Files are saved to Downloads/PhoneMic on the PC",
+    "panel_tune_speed": "Speed",
+    "panel_tune_dead": "Deadzone",
+    "panel_tab_mouse": "Mouse",
+    "panel_tab_keys": "Keyboard",
+    "panel_tab_file": "Files",
+    "panel_tab_touchpad": "Touchpad",
+    "panel_mag": "Mag",
+    "panel_btn_left": "Left",
+    "panel_btn_right": "Right",
+    "panel_btn_double": "Double",
+    "panel_btn_drag": "Drag",
+    "panel_btn_wheel_up": "Wheel↑",
+    "panel_btn_wheel_down": "Wheel↓",
+    "panel_file_image": "Image",
+    "panel_file_image_hint": "Copy to PC clipboard",
+
+    "panel_file_doc": "File",
+    "panel_file_doc_hint": "Docs & images, saved to PC",
+
+
+    "panel_file_cancel": "Cancel",
+    "panel_file_disconnected": "Not connected to PC, cannot send files",
+    "bubble_file_done": "📄 Sent {name}",
+    "bubble_file_canceled": "📄 Canceled {name} (tap to resend)",
+    "bubble_file_failed": "📄 Failed to send {name} (tap to resend)",
+    "bubble_photo_done": "🖼️ {name} copied to PC clipboard",
+    "bubble_photo_canceled": "🖼️ Copying {name} canceled",
+    "bubble_photo_failed": "🖼️ Failed to copy {name}",
+
     "input_placeholder_auto": "Recognition auto-send",
     "input_placeholder_manual": "Type and tap send",
     "input_placeholder_disconnected": "Disconnected...",
@@ -128,6 +167,7 @@
     "status_connecting_text": "Connecting to server...",
     "status_load_failed_text": "Crypto library failed to load, please refresh the page",
     "confirm_resend": "Resend this message?",
+    "confirm_resend_file": "Resend this file?",
     "log_ws_connected": "[WS] Connected",
     "log_ws_disconnected": "[WS] Disconnected",
     "log_ws_unknown_type": "[WS] Unknown message type:",

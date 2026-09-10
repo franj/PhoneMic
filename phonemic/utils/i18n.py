@@ -144,6 +144,15 @@ class I18n(QObject):
         """返回当前语言代码（如 'zh_CN', 'en_US'）"""
         return self._current_lang
 
+    def reload(self) -> None:
+        """从磁盘重读当前语言文件。
+
+        开发期修改 locale JSON 后无需重启 PC 端：/api/lang.json 每次请求前调用，
+        手机端刷新即可拿到最新翻译。加载失败时保留内存中的现有翻译（_try_load
+        只在成功时才覆盖 _strings），不会因坏文件导致语言包丢失。
+        """
+        self._try_load(self._current_lang)
+
     def get_section(self, key: str) -> Dict[str, Any]:
         """
         获取指定路径下的整个 JSON 部分（字典），用于批量导出（如手机端翻译）。

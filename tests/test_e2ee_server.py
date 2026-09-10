@@ -12,8 +12,9 @@ import urllib.error
 
 import pytest
 from websockets.sync.client import connect as ws_connect
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.utils import random as random_bytes
+from hashlib import blake2b
+from nacl.bindings import crypto_scalarmult
+from nacl.public import PrivateKey, PublicKey, SealedBox
 
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import (
@@ -21,6 +22,9 @@ from phonemic.server.api import (
     set_secure_channel, send_to_phone,
 )
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.crypto import create_provider
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 
 from conftest import get_test_port
 
@@ -54,49 +58,74 @@ def ws_url(host, port, sc):
 
 
 class PhoneSimulator:
-    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。"""
+    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。
 
-    def __init__(self, pc_public_key_b64: str):
+    与 JS 端 SecureClient / CryptoProvider 行为一致：
+    - auth：密封 {"algo","pk"} JSON（algo 不明文传输）
+    - 会话密钥：ECDH + blake2b(32) 派生，交给 CryptoProvider
+    - 防重放 seq 由 Provider 在加密层承载，不进应用层 JSON
+    """
+
+    def __init__(self, pc_public_key_b64: str, algo: str = "xsalsa20"):
+        self._algo = algo
+        if algo == "none":
+            # none+CF：pc_public_key_b64 实为 token
+            self._token = pc_public_key_b64
+            self._provider = None
+            return
         pc_pub_bytes = base64.urlsafe_b64decode(pc_public_key_b64 + "==")
         self._pc_public = PublicKey(pc_pub_bytes)
         self._phone_private = PrivateKey.generate()
         self._phone_public = self._phone_private.public_key
-        self._box = Box(self._phone_private, self._pc_public)
-        self._seq = 0
+        shared = crypto_scalarmult(bytes(self._phone_private), pc_pub_bytes)
+        session_key = blake2b(shared, digest_size=32).digest()
+        self._provider = create_provider(algo, session_key)
 
-    def make_auth(self, algo: str = "xsalsa20") -> dict:
-        """模拟手机端 auth：algo 为客户端从 a= 列表中协商选择的算法。"""
-        sb = SealedBox(self._pc_public)
-        sealed = sb.encrypt(bytes(self._phone_public))
-        return {
-            "type": "auth",
-            "algo": algo,
-            "data": base64.urlsafe_b64encode(sealed).decode().rstrip("="),
-        }
+    def make_auth(self, algo: str = None) -> dict:
+        """模拟手机端 auth：加密模式密封 {"algo","pk"}；none+CF 明文 token。
 
-    def verify_auth_ack(self, ack_data: str) -> bool:
-        raw = base64.urlsafe_b64decode(ack_data + "==")
-        nonce = raw[:Box.NONCE_SIZE]
-        ct = raw[Box.NONCE_SIZE:]
+        每次握手（= 新连接/新会话）开始时归零 seq 计数器，与服务端对齐。
+        """
+        algo = algo or self._algo
+        if self._provider is not None and hasattr(self._provider, "reset"):
+            self._provider.reset()
+        if algo == "none":
+            return {"type": "auth", "algo": "none", "data": self._token}
+        inner = json.dumps(
+            {
+                "algo": algo,
+                "pk": base64.urlsafe_b64encode(
+                    bytes(self._phone_public)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
+        sealed = SealedBox(self._pc_public).encrypt(inner)
+        # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
+        return {"type": "auth", "data": sealed}
+
+    def verify_auth_ack(self, ack_frame: bytes) -> bool:
+        """模拟 JS 端 handleAuthAck：整帧解密 ack（首帧 seq=0）。"""
         try:
-            pt = self._box.decrypt(ct, nonce)
-            msg = json.loads(pt)
-            return msg.get("status") == "OK"
+            msg = self.decrypt(ack_frame)
+            return msg.get("type") == "auth_ack" and msg.get("status") == "OK"
         except Exception:
             return False
 
-    def encrypt(self, msg: dict) -> dict:
-        # 与手机端 JS 一致：明文中注入递增 seq 供服务端防重放
-        payload = dict(msg)
-        payload["seq"] = self._seq
-        self._seq += 1
-        pt = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        nonce = random_bytes(Box.NONCE_SIZE)
-        encrypted = self._box.encrypt(pt, nonce)
-        return {
-            "type": "data",
-            "data": base64.urlsafe_b64encode(bytes(encrypted)).decode().rstrip("="),
-        }
+    def encrypt(self, msg: dict) -> bytes:
+        # 产出线上字节：none 模式直接 msgpack 编码，加密模式整帧加密；无信封
+        pt = frame_encode(msg)
+        if self._provider is None:
+            return pt
+        # seq 由 Provider 在加密层自动打上
+        return bytes(self._provider.encrypt(pt))
+
+    def decrypt(self, raw: bytes) -> dict:
+        # 还原应用层报文：none 模式直接解码，加密模式整帧解密
+        if self._provider is None:
+            return frame_decode(raw)
+        # 重放/乱序/篡改由 Provider 校验并抛错
+        pt = self._provider.decrypt(raw)
+        return frame_decode(pt)
 
 
 # ---------- Fixtures ----------
@@ -134,19 +163,18 @@ class TestAuthHandshake:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             msg = ws.recv(timeout=5)
-            data = json.loads(msg)
-            assert data["type"] == "auth_ack"
-            assert phone.verify_auth_ack(data["data"]) is True
+            # 成功 ack = 整帧加密（无信封），能整帧解密即验证通过
+            assert phone.verify_auth_ack(msg) is True
 
     def test_invalid_auth_closes_connection(self, secure_server):
         host, port, queue, sc = secure_server
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps({"type": "auth", "algo": "xsalsa20", "data": "garbage!!!"}))
+            ws.send(frame_encode({"type": "auth", "algo": "xsalsa20", "data": b"garbage!!!"}))
             # 服务端先发送拒绝消息再关闭
-            ack = json.loads(ws.recv(timeout=3))
+            ack = frame_decode(ws.recv(timeout=3))
             assert ack["type"] == "auth_ack"
             assert ack.get("rejected") is True
             with pytest.raises(Exception):
@@ -156,7 +184,7 @@ class TestAuthHandshake:
         host, port, queue, sc = secure_server
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps({"type": "data", "data": "anything"}))
+            ws.send(frame_encode({"type": "data", "data": b"anything"}))
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
 
@@ -165,7 +193,7 @@ class TestAuthHandshake:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
 
             msg_type, text = queue.get(timeout=2)
@@ -180,11 +208,11 @@ class TestEncryptedMessageFlow:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect event
 
-            ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "secret hello"})))
+            ws.send(phone.encrypt({"type": "preview", "text": "secret hello"}))
 
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "preview"
@@ -195,11 +223,11 @@ class TestEncryptedMessageFlow:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             ws.recv(timeout=5)
             queue.get(timeout=2)
 
-            ws.send(json.dumps(phone.encrypt({"type": "send", "text": "encrypted send"})))
+            ws.send(phone.encrypt({"type": "send", "text": "encrypted send"}))
 
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "send"
@@ -214,32 +242,33 @@ class TestServerSendsEncrypted:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
-            ws.recv(timeout=5)  # auth_ack
+            ws.send(frame_encode(phone.make_auth()))
+            ack_inner = phone.decrypt(ws.recv(timeout=5))
+            assert ack_inner["type"] == "auth_ack"  # 消费 ack（seq=0），对齐下行计数
             queue.get(timeout=2)  # connect
 
-            # 服务器发送的 config 应该是加密的 data 类型
-            msg = ws.recv(timeout=3)
-            data = json.loads(msg)
-            assert data["type"] == "data"
-            assert "data" in data
+            # config 应为整帧加密：能整帧解密即证明无明文泄漏、无外层信封
+            config = phone.decrypt(ws.recv(timeout=3))
+            assert config["type"] == "config"
+            assert "mobile_max_records" in config
 
     def test_push_config_encrypted(self, secure_server):
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
-            ws.recv(timeout=5)  # auth_ack
+            ws.send(frame_encode(phone.make_auth()))
+            ack_inner = phone.decrypt(ws.recv(timeout=5))
+            assert ack_inner["type"] == "auth_ack"  # 消费 ack（seq=0），对齐下行计数
             queue.get(timeout=2)  # connect
-            ws.recv(timeout=2)  # initial config
+            initial = phone.decrypt(ws.recv(timeout=2))
+            assert initial["type"] == "config"
 
             send_to_phone({"type": "config", "test_key": "test_val"})
 
-            msg = ws.recv(timeout=3)
-            data = json.loads(msg)
-            assert data["type"] == "data"
-            assert "data" in data
+            pushed = phone.decrypt(ws.recv(timeout=3))
+            assert pushed["type"] == "config"
+            assert pushed["test_key"] == "test_val"
 
 
 class TestStateMachineSecurity:
@@ -249,7 +278,7 @@ class TestStateMachineSecurity:
         host, port, queue, sc = secure_server
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps({"type": "data", "data": "anything"}))
+            ws.send(frame_encode({"type": "data", "data": b"anything"}))
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
 
@@ -258,12 +287,12 @@ class TestStateMachineSecurity:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             ws.recv(timeout=5)  # auth_ack
             queue.get(timeout=2)  # connect
             ws.recv(timeout=2)  # config (encrypted)
 
             # 再次发送 auth → 应断开
-            ws.send(json.dumps(phone.make_auth()))
+            ws.send(frame_encode(phone.make_auth()))
             with pytest.raises(Exception):
                 ws.recv(timeout=3)

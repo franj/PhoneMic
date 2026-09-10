@@ -18,7 +18,10 @@ from phonemic.bridge_queue import QueueEventBridge
 from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
-from phonemic.gui.keyboard import flash_insert
+from phonemic.gui.keyboard import flash_insert, send_keys
+from phonemic.gui.clipboard import copy_image
+from phonemic.gui.mouse import perform_mouse, set_stats_hook
+from phonemic.gui.mouse_debug import MouseDebugWindow
 from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server, restart_server, set_secure_channel, get_secret_path, request_client_rescan
 from phonemic.tunnel.e2ee import SecureChannel
@@ -181,6 +184,11 @@ def main():
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     dashboard.tray = tray
 
+    # 鼠标帧调试窗口（临时工具）：独立弹出、默认隐藏，从 Dashboard「程序」菜单打开
+    mouse_debug_win = MouseDebugWindow()
+    set_stats_hook(mouse_debug_win.widget.push)
+    dashboard.set_mouse_debug_window(mouse_debug_win)
+
     if args.silent:
         dashboard.hide()
     else:
@@ -272,6 +280,23 @@ def main():
             if not command_interceptor.process_send_text(payload):
                 flash_insert(payload)
             hud.hide()
+        elif event_type == "key":
+            # 面板快捷键按钮：keys 为 "ctrl+z" / "ctrl+a, delete" 形式
+            send_keys(payload)
+        elif event_type == "mouse":
+            # 鼠标面板：payload 是完整 mouse 帧，a 决定动作（wire-protocol.md §7）
+            perform_mouse(payload)
+        elif event_type == "file_saved":
+            # 手机端文件传输完成落盘（payload: {path, name, size}），弹托盘通知
+            tray.notify_file_saved(payload["path"], payload["name"])
+        elif event_type == "photo_received":
+            # 手机端图片传完（payload: {data, name, size}）→ 写系统剪贴板。
+            # Qt 剪贴板必须在 GUI 线程操作，本回调跑在主线程，安全。
+            name = payload.get("name") or ""
+            if copy_image(payload["data"]):
+                tray.notify_photo_copied(name)
+            else:
+                tray.notify_photo_failed(name)
         elif event_type == "connect":
             # payload 为本次握手协商出的算法名（明文模式为 "none"）
             algo = payload if isinstance(payload, str) else None

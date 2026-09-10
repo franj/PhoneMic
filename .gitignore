@@ -218,3 +218,4 @@ __marimo__/
 .aider*
 .openai/
 .anthropic/
+.trae/

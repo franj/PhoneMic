@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>触摸板 · 矩形</title>
+    <style>
+        /* ===== 重置 & 主题 ===== */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        :root {
+            --bg-primary: #1c1c20;
+            --bg-secondary: #26262c;
+            --bg-control: #1c1c20;
+            --bg-surface: #2b2b33;
+            --bg-surface-lighter: #383840;
+            --border-color: #3a3a42;
+            --border-light: #3d3d48;
+            --text-primary: #ddd;
+            --text-secondary: #9aa;
+            --text-muted: #666;
+            --accent-cyan: #4fd1c5;
+            --accent-orange: #f6ad55;
+            --accent-purple: #c9a0ff;
+            --accent-green: #7bcfa6;
+            --accent-pink: #ff7eb3;
+            --shadow-color: rgba(0, 0, 0, 0.4);
+            --ripple-border: rgba(255, 255, 255, 0.85);
+            --hud-color: #9aa;
+            --hud-val: #4fd1c5;
+            --btn-text: #ccc;
+            --btn-bg: #2b2b33;
+            --btn-active: #3d3d4a;
+            --slider-track: #444;
+            --slider-thumb: #4fd1c5;
+            --indicator-bg: rgba(0, 0, 0, 0.7);
+            --touchpad-bg: radial-gradient(circle at 30% 30%, rgba(79, 209, 197, 0.06), rgba(79, 209, 197, 0.01));
+            --touchpad-border: rgba(255, 255, 255, 0.12);
+            --touchpad-glow: rgba(79, 209, 197, 0.15);
+            --theme-btn-bg: rgba(255, 255, 255, 0.08);
+            --theme-btn-border: rgba(255, 255, 255, 0.15);
+            --touch-finger: rgba(79, 209, 197, 0.5);
+            --btn-border: #3a3a42;
+        }
+
+        [data-theme="light"] {
+            --bg-primary: #f0f0f4;
+            --bg-secondary: #e8e8ee;
+            --bg-control: #f0f0f4;
+            --bg-surface: #ffffff;
+            --bg-surface-lighter: #f5f5f8;
+            --border-color: #c8c8d0;
+            --border-light: #d0d0d8;
+            --text-primary: #222;
+            --text-secondary: #556;
+            --text-muted: #888;
+            --accent-cyan: #2a9d8f;
+            --accent-orange: #e76f51;
+            --accent-purple: #7b4c9e;
+            --accent-green: #4a9e6e;
+            --accent-pink: #d45a8a;
+            --shadow-color: rgba(0, 0, 0, 0.12);
+            --ripple-border: rgba(30, 30, 40, 0.7);
+            --hud-color: #667;
+            --hud-val: #2a9d8f;
+            --btn-text: #333;
+            --btn-bg: #ffffff;
+            --btn-active: #d8d8e0;
+            --slider-track: #bbb;
+            --slider-thumb: #2a9d8f;
+            --indicator-bg: rgba(255, 255, 255, 0.9);
+            --theme-btn-bg: rgba(0, 0, 0, 0.06);
+            --theme-btn-border: rgba(0, 0, 0, 0.12);
+            --touchpad-bg: radial-gradient(circle at 30% 30%, rgba(42, 157, 143, 0.06), rgba(42, 157, 143, 0.01));
+            --touchpad-border: rgba(0, 0, 0, 0.12);
+            --touchpad-glow: rgba(42, 157, 143, 0.15);
+            --touch-finger: rgba(42, 157, 143, 0.5);
+            --btn-border: #c8c8d0;
+        }
+
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            transition: background 0.25s, color 0.25s;
+        }
+
+        /* ===== 屏幕（上半部分） ===== */
+        #screen {
+            position: relative;
+            width: 100%;
+            height: calc(100% - 300px);
+            min-height: 120px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            overflow: hidden;
+            transition: background 0.25s, border-color 0.25s;
+        }
+
+        #cursor {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 18px;
+            height: 18px;
+            margin: -9px;
+            border-radius: 50%;
+            background: var(--accent-cyan);
+            box-shadow: 0 0 18px var(--accent-cyan), 0 0 40px rgba(79, 209, 197, 0.2);
+            will-change: transform;
+            pointer-events: none;
+            z-index: 2;
+            transition: background 0.2s, box-shadow 0.2s, width 0.15s, height 0.15s, margin 0.15s;
+        }
+        #cursor.dragging {
+            background: var(--accent-orange);
+            box-shadow: 0 0 22px var(--accent-orange), 0 0 50px rgba(246, 173, 85, 0.25);
+            width: 22px;
+            height: 22px;
+            margin: -11px;
+        }
+
+        /* 涟漪 */
+        .ripple {
+            position: absolute;
+            width: 24px;
+            height: 24px;
+            margin: -12px;
+            border-radius: 50%;
+            border: 2.5px solid var(--ripple-border);
+            pointer-events: none;
+            animation: rippleAnim .45s ease-out forwards;
+            z-index: 3;
+        }
+        .ripple.right {
+            border-color: var(--accent-orange);
+        }
+        .ripple.double {
+            border-color: var(--accent-purple);
+            animation-duration: .55s;
+        }
+        .ripple.scroll-up {
+            border-color: var(--accent-green);
+        }
+        .ripple.scroll-down {
+            border-color: var(--accent-pink);
+        }
+        @keyframes rippleAnim {
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
+        }
+
+        /* 按键反馈浮标 */
+        .key-feedback {
+            position: absolute;
+            pointer-events: none;
+            z-index: 6;
+            background: var(--indicator-bg);
+            color: var(--text-primary);
+            padding: 4px 14px;
+            border-radius: 16px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid var(--border-light);
+            backdrop-filter: blur(6px);
+            transition: opacity 0.3s, transform 0.3s;
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(0.8);
+            white-space: nowrap;
+        }
+        .key-feedback.show {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+        }
+        .key-feedback.hide {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(1.2);
+        }
+
+        /* 滚轮指示器 */
+        #scroll-indicator {
+            position: absolute;
+            right: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 4;
+            background: var(--indicator-bg);
+            padding: 6px 8px;
+            border-radius: 12px;
+            border: 1px solid var(--border-light);
+            backdrop-filter: blur(4px);
+        }
+        #scroll-indicator.show {
+            opacity: 1;
+        }
+        #scroll-indicator .arrow {
+            font-size: 14px;
+            line-height: 1;
+            color: var(--text-secondary);
+            transition: color 0.15s, transform 0.15s;
+        }
+        #scroll-indicator .arrow.active-up {
+            color: var(--accent-green);
+            transform: scale(1.2);
+        }
+        #scroll-indicator .arrow.active-down {
+            color: var(--accent-pink);
+            transform: scale(1.2);
+        }
+        #scroll-indicator .line {
+            width: 2px;
+            flex: 1;
+            min-height: 12px;
+            background: var(--border-color);
+            border-radius: 1px;
+        }
+        #scroll-indicator .val {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--hud-val);
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* HUD */
+        #hud {
+            position: absolute;
+            top: 6px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 2px 14px;
+            font-size: 11px;
+            line-height: 1.5;
+            color: var(--hud-color);
+            z-index: 5;
+            pointer-events: none;
+        }
+        #hud .val {
+            color: var(--hud-val);
+            font-variant-numeric: tabular-nums;
+            transition: color 0.25s;
+        }
+        #hud .hud-spacer {
+            flex: 1;
+            min-width: 12px;
+        }
+
+        #theme-toggle {
+            pointer-events: auto;
+            background: var(--theme-btn-bg);
+            border: 1px solid var(--theme-btn-border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 15px;
+            padding: 0 8px;
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: background 0.2s, border-color 0.2s, color 0.2s, transform 0.08s;
+            line-height: 1.6;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+            flex-shrink: 0;
+        }
+        #theme-toggle:active {
+            transform: scale(0.92);
+            background: var(--btn-active);
+        }
+
+        /* ===== 控制区（下半部分） ===== */
+        #control {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 300px;
+            background: var(--bg-control);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 6px 6px 4px 6px;
+            transition: background 0.25s, border-color 0.25s, height 0.2s;
+            overflow: hidden;
+        }
+
+        /* 速度控制条 */
+        #speed-bar {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 4px 6px 4px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 4px;
+            transition: border-color 0.25s;
+        }
+        #speed-bar label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        #speed-bar input[type="range"] {
+            flex: 1;
+            height: 3px;
+            background: var(--slider-track);
+            border-radius: 2px;
+            -webkit-appearance: none;
+            appearance: none;
+            outline: none;
+            transition: background 0.25s;
+            min-width: 60px;
+        }
+        #speed-bar input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--slider-thumb);
+            cursor: pointer;
+            border: none;
+            transition: background 0.25s;
+            box-shadow: 0 0 8px rgba(79, 209, 197, 0.3);
+        }
+        #speed-bar input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--slider-thumb);
+            cursor: pointer;
+            border: none;
+        }
+        #speed-bar .speed-val {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--hud-val);
+            min-width: 38px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            transition: color 0.25s;
+            flex-shrink: 0;
+        }
+
+        /* ===== 主行：按钮 + 触摸板 ===== */
+        #main-row {
+            display: flex;
+            flex: 1;
+            gap: 5px;
+            min-height: 0;
+            align-items: stretch;
+            justify-content: center;
+            position: relative;
+        }
+
+        /* ---- 按钮列通用 ---- */
+        .btn-col,
+        .btn-col-right {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            justify-content: stretch;
+            flex: 0 0 46px;
+            min-height: 0;
+        }
+        .btn-col button,
+        .btn-col-right button {
+            flex: 1;
+            min-height: 0;
+            border-radius: 8px;
+            border: 1px solid var(--btn-border);
+            background: var(--btn-bg);
+            color: var(--btn-text);
+            font-size: 10px;
+            font-weight: 500;
+            cursor: pointer;
+            touch-action: none;
+            transition: background 0.08s, border-color 0.08s, transform 0.06s, color 0.2s, background 0.2s, box-shadow 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 3px;
+            letter-spacing: 0.2px;
+            white-space: nowrap;
+            box-shadow: 0 1px 3px var(--shadow-color);
+            text-align: center;
+            line-height: 1.2;
+        }
+        .btn-col button:active,
+        .btn-col-right button:active {
+            background: var(--btn-active);
+            transform: scale(0.94);
+        }
+
+        /* 左侧按钮颜色 */
+        .btn-col button#btn-left {
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+        .btn-col button#btn-left:active {
+            background: var(--accent-cyan);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-right {
+            border-color: var(--accent-orange);
+            color: var(--accent-orange);
+        }
+        .btn-col button#btn-right:active {
+            background: var(--accent-orange);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-double {
+            border-color: var(--accent-purple);
+            color: var(--accent-purple);
+        }
+        .btn-col button#btn-double:active {
+            background: var(--accent-purple);
+            color: var(--bg-primary);
+        }
+        .btn-col button#btn-drag {
+            border-color: var(--border-light);
+            color: var(--text-secondary);
+        }
+        .btn-col button#btn-drag:active {
+            background: var(--btn-active);
+        }
+        .btn-col button#btn-drag.on {
+            background: var(--accent-orange);
+            color: var(--bg-primary);
+            border-color: var(--accent-orange);
+            box-shadow: 0 0 16px rgba(246, 173, 85, 0.3);
+        }
+
+        /* 右侧按钮颜色 */
+        .btn-col-right button.enter-btn {
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            font-size: 10px;
+        }
+        .btn-col-right button.enter-btn:active {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+        }
+        .btn-col-right button.shift-enter-btn {
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+            font-size: 8px;
+            letter-spacing: 0;
+        }
+        .btn-col-right button.shift-enter-btn:active {
+            background: var(--accent-green);
+            color: var(--bg-primary);
+        }
+        .btn-col-right button.undo-btn {
+            border-color: var(--accent-pink);
+            color: var(--accent-pink);
+            font-size: 8px;
+        }
+        .btn-col-right button.undo-btn:active {
+            background: var(--accent-pink);
+            color: var(--bg-primary);
+        }
+        .btn-col-right button.redo-btn {
+            border-color: var(--accent-purple);
+            color: var(--accent-purple);
+            font-size: 8px;
+        }
+        .btn-col-right button.redo-btn:active {
+            background: var(--accent-purple);
+            color: var(--bg-primary);
+        }
+
+        /* ---- 触摸板 ---- */
+        #touchpad-wrap {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2px;
+        }
+        #touchpad {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            border-radius: 14px;
+            background: var(--touchpad-bg);
+            border: 2px solid var(--touchpad-border);
+            box-shadow: inset 0 0 40px var(--shadow-color), 0 0 30px var(--touchpad-glow);
+            touch-action: none;
+            transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            min-height: 60px;
+            min-width: 60px;
+        }
+        #touchpad.active {
+            border-color: var(--accent-cyan);
+            box-shadow: inset 0 0 40px var(--shadow-color), 0 0 40px rgba(79, 209, 197, 0.2);
+        }
+
+        /* 网格线 */
+        #touchpad .grid-h {
+            position: absolute;
+            left: 10%;
+            right: 10%;
+            top: 50%;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.04);
+            transform: translateY(-50%);
+            pointer-events: none;
+        }
+        #touchpad .grid-v {
+            position: absolute;
+            top: 10%;
+            bottom: 10%;
+            left: 50%;
+            width: 1px;
+            background: rgba(255, 255, 255, 0.04);
+            transform: translateX(-50%);
+            pointer-events: none;
+        }
+        [data-theme="light"] #touchpad .grid-h,
+        [data-theme="light"] #touchpad .grid-v {
+            background: rgba(0, 0, 0, 0.06);
+        }
+
+        /* 触摸板中心图标 */
+        #touchpad .icon {
+            position: relative;
+            z-index: 1;
+            font-size: 22px;
+            opacity: 0.15;
+            pointer-events: none;
+            transition: opacity 0.3s;
+            color: var(--text-secondary);
+        }
+        #touchpad.active .icon {
+            opacity: 0.3;
+        }
+
+        /* 手指指示器 */
+        #touch-finger {
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--touch-finger);
+            border: 2px solid var(--accent-cyan);
+            pointer-events: none;
+            transform: translate(-50%, -50%) scale(0);
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s;
+            opacity: 0;
+            z-index: 2;
+            box-shadow: 0 0 20px rgba(79, 209, 197, 0.2);
+        }
+        #touch-finger.show {
+            transform: translate(-50%, -50%) scale(1);
+            opacity: 1;
+        }
+        #touch-finger.two {
+            width: 30px;
+            height: 30px;
+            border-color: var(--accent-orange);
+            background: rgba(246, 173, 85, 0.25);
+            box-shadow: 0 0 30px rgba(246, 173, 85, 0.15);
+        }
+
+        /* 触摸板底部提示 */
+        #touchpad-hint {
+            position: absolute;
+            bottom: 12%;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 8px;
+            color: var(--text-muted);
+            pointer-events: none;
+            letter-spacing: 0.3px;
+            opacity: 0.5;
+            transition: opacity 0.3s, color 0.25s;
+        }
+        #touchpad.active #touchpad-hint {
+            opacity: 0;
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 580px) {
+            #control {
+                height: 280px;
+                padding: 4px 4px 3px 4px;
+            }
+            #screen {
+                height: calc(100% - 280px);
+            }
+            .btn-col,
+            .btn-col-right {
+                flex: 0 0 38px;
+                gap: 3px;
+            }
+            .btn-col button,
+            .btn-col-right button {
+                font-size: 8px;
+                border-radius: 5px;
+                padding: 0 2px;
+            }
+            .btn-col-right button.enter-btn {
+                font-size: 9px;
+            }
+            .btn-col-right button.shift-enter-btn {
+                font-size: 7px;
+            }
+            .btn-col-right button.undo-btn,
+            .btn-col-right button.redo-btn {
+                font-size: 7px;
+            }
+            #speed-bar {
+                padding: 0 2px 4px 2px;
+                gap: 6px;
+            }
+            #speed-bar label {
+                font-size: 10px;
+            }
+            #speed-bar .speed-val {
+                font-size: 11px;
+                min-width: 32px;
+            }
+            #hud {
+                font-size: 10px;
+                gap: 1px 10px;
+                top: 4px;
+                left: 6px;
+                right: 6px;
+            }
+            #theme-toggle {
+                font-size: 13px;
+                height: 22px;
+                padding: 0 6px;
+            }
+            #touchpad .icon {
+                font-size: 18px;
+            }
+            #touchpad-hint {
+                font-size: 7px;
+                bottom: 10%;
+            }
+            #scroll-indicator {
+                right: 10px;
+                padding: 4px 6px;
+            }
+            #scroll-indicator .arrow {
+                font-size: 12px;
+            }
+            #scroll-indicator .val {
+                font-size: 9px;
+            }
+        }
+
+        @media (max-width: 440px) {
+            #control {
+                height: 250px;
+                padding: 3px 3px 2px 3px;
+            }
+            #screen {
+                height: calc(100% - 250px);
+                min-height: 80px;
+            }
+            .btn-col,
+            .btn-col-right {
+                flex: 0 0 32px;
+                gap: 2px;
+            }
+            .btn-col button,
+            .btn-col-right button {
+                font-size: 7px;
+                border-radius: 4px;
+                padding: 0 1px;
+            }
+            .btn-col-right button.enter-btn {
+                font-size: 8px;
+            }
+            .btn-col-right button.shift-enter-btn {
+                font-size: 6px;
+            }
+            .btn-col-right button.undo-btn,
+            .btn-col-right button.redo-btn {
+                font-size: 6px;
+            }
+            #speed-bar {
+                padding: 0 2px 3px 2px;
+                gap: 4px;
+            }
+            #speed-bar label {
+                font-size: 9px;
+            }
+            #speed-bar .speed-val {
+                font-size: 10px;
+                min-width: 28px;
+            }
+            #hud {
+                font-size: 8px;
+                gap: 1px 6px;
+                top: 3px;
+                left: 4px;
+                right: 4px;
+            }
+            #theme-toggle {
+                font-size: 11px;
+                height: 18px;
+                padding: 0 4px;
+            }
+            #touchpad .icon {
+                font-size: 14px;
+            }
+            #touchpad-hint {
+                font-size: 6px;
+                bottom: 8%;
+            }
+            #touch-finger {
+                width: 18px;
+                height: 18px;
+            }
+            #touch-finger.two {
+                width: 24px;
+                height: 24px;
+            }
+            #cursor {
+                width: 14px;
+                height: 14px;
+                margin: -7px;
+            }
+            #cursor.dragging {
+                width: 18px;
+                height: 18px;
+                margin: -9px;
+            }
+            #scroll-indicator {
+                right: 6px;
+                padding: 3px 5px;
+                border-radius: 8px;
+            }
+            #scroll-indicator .arrow {
+                font-size: 10px;
+            }
+            #scroll-indicator .val {
+                font-size: 8px;
+            }
+            #scroll-indicator .line {
+                min-height: 8px;
+            }
+        }
+
+        @media (max-height: 680px) and (min-width: 580px) {
+            #control {
+                height: 260px;
+            }
+            #screen {
+                height: calc(100% - 260px);
+            }
+            .btn-col,
+            .btn-col-right {
+                flex: 0 0 40px;
+            }
+            .btn-col button,
+            .btn-col-right button {
+                font-size: 9px;
+            }
+        }
+
+        /* 小屏按钮文字换行辅助 */
+        .btn-col button span,
+        .btn-col-right button span {
+            display: block;
+            line-height: 1.2;
+            text-align: center;
+        }
+        .btn-col-right button.shift-enter-btn span {
+            font-size: 7px;
+        }
+        @media (max-width: 440px) {
+            .btn-col-right button.shift-enter-btn span {
+                font-size: 5px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ====== 屏幕（上半部分） ====== -->
+    <div id="screen">
+        <div id="hud">
+            <div>位置 <span class="val" id="pos">0, 0</span></div>
+            <div>速度 <span class="val" id="spd">0</span> px/s</div>
+            <div>滚轮 <span class="val" id="scrollVal">0</span></div>
+            <span class="hud-spacer"></span>
+            <button id="theme-toggle" title="切换暗色/亮色主题">🌓</button>
+        </div>
+        <div id="cursor"></div>
+
+        <!-- 滚轮指示器 -->
+        <div id="scroll-indicator">
+            <div class="arrow" id="scroll-up">▲</div>
+            <div class="line"></div>
+            <div class="arrow" id="scroll-down">▼</div>
+            <div class="val" id="scrollCount">0</div>
+        </div>
+
+        <div id="hint" style="position:absolute;bottom:4px;left:0;right:0;text-align:center;font-size:8px;color:var(--text-muted);pointer-events:none;transition:color 0.25s;z-index:1;">
+            触摸板 · 单指移动 · 轻点左键 · 双指滚轮
+        </div>
+    </div>
+
+    <!-- ====== 控制区（下半部分） ====== -->
+    <div id="control">
+        <!-- 速度控制 -->
+        <div id="speed-bar">
+            <label>🐢 速度</label>
+            <input id="speedSlider" type="range" min="0.2" max="3.0" step="0.05" value="1.0">
+            <span class="speed-val" id="speedVal">1.00</span>
+        </div>
+
+        <!-- 主行 -->
+        <div id="main-row">
+            <!-- 左侧 4 个按钮 -->
+            <div class="btn-col">
+                <button id="btn-left">左键</button>
+                <button id="btn-right">右键</button>
+                <button id="btn-double">双击</button>
+                <button id="btn-drag">拖拽</button>
+            </div>
+
+            <!-- 矩形触摸板 -->
+            <div id="touchpad-wrap">
+                <div id="touchpad">
+                    <div class="grid-h"></div>
+                    <div class="grid-v"></div>
+                    <div class="icon">✚</div>
+                    <div id="touch-finger"></div>
+                    <div id="touchpad-hint">滑动 · 轻点 · 双指滚动</div>
+                </div>
+            </div>
+
+            <!-- 右侧 4 个按钮 -->
+            <div class="btn-col-right">
+                <button id="btn-enter" class="enter-btn">↵ Enter</button>
+                <button id="btn-shift-enter" class="shift-enter-btn"><span>⇧↵</span> Shift+Enter</button>
+                <button id="btn-undo" class="undo-btn">↩ Ctrl+Z</button>
+                <button id="btn-redo" class="redo-btn">↪ Ctrl+Y</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            // ===== DOM 引用 =====
+            const screen = document.getElementById('screen');
+            const cursor = document.getElementById('cursor');
+            const touchpad = document.getElementById('touchpad');
+            const touchFinger = document.getElementById('touch-finger');
+            const posEl = document.getElementById('pos');
+            const spdEl = document.getElementById('spd');
+            const scrollValEl = document.getElementById('scrollVal');
+            const scrollCountEl = document.getElementById('scrollCount');
+            const scrollUp = document.getElementById('scroll-up');
+            const scrollDown = document.getElementById('scroll-down');
+            const scrollIndicator = document.getElementById('scroll-indicator');
+
+            const btnLeft = document.getElementById('btn-left');
+            const btnRight = document.getElementById('btn-right');
+            const btnDouble = document.getElementById('btn-double');
+            const btnDrag = document.getElementById('btn-drag');
+            const btnEnter = document.getElementById('btn-enter');
+            const btnShiftEnter = document.getElementById('btn-shift-enter');
+            const btnUndo = document.getElementById('btn-undo');
+            const btnRedo = document.getElementById('btn-redo');
+
+            const speedSlider = document.getElementById('speedSlider');
+            const speedVal = document.getElementById('speedVal');
+
+            const themeToggle = document.getElementById('theme-toggle');
+
+            // ===== 状态 =====
+            let cursorX = screen.clientWidth / 2;
+            let cursorY = screen.clientHeight / 2;
+            let speed = 1.0;
+
+            let touchState = {
+                active: false,
+                fingerCount: 0,
+                startX: 0,
+                startY: 0,
+                startTime: 0,
+                moved: false,
+                lastX: 0,
+                lastY: 0,
+                twoFingerStartY: 0,
+                twoFingerPrevY: 0,
+                scrollAccum: 0,
+                dragMode: false,
+                lastMoveTime: 0,
+                speedSmooth: 0,
+            };
+
+            let scrollTotal = 0;
+
+            // ===== 主题 =====
+            function getTheme() {
+                return document.documentElement.getAttribute('data-theme') || 'dark';
+            }
+
+            function setTheme(theme) {
+                document.documentElement.setAttribute('data-theme', theme);
+                localStorage.setItem('touchpad-theme', theme);
+                themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
+            }
+
+            const savedTheme = localStorage.getItem('touchpad-theme') || 'dark';
+            setTheme(savedTheme);
+
+            themeToggle.addEventListener('click', function(e) {
+                e.preventDefault();
+                const current = getTheme();
+                setTheme(current === 'dark' ? 'light' : 'dark');
+            });
+
+            // ===== 涟漪 =====
+            function spawnRipple(x, y, cls) {
+                const rip = document.createElement('div');
+                rip.className = 'ripple' + (cls ? ' ' + cls : '');
+                rip.style.left = x + 'px';
+                rip.style.top = y + 'px';
+                screen.appendChild(rip);
+                setTimeout(() => rip.remove(), 500);
+            }
+
+            // ===== 按键反馈 =====
+            function showKeyFeedback(label, x, y, color) {
+                const el = document.createElement('div');
+                el.className = 'key-feedback';
+                el.textContent = label;
+                if (color) el.style.borderColor = color;
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+                screen.appendChild(el);
+                requestAnimationFrame(() => el.classList.add('show'));
+                setTimeout(() => {
+                    el.classList.remove('show');
+                    el.classList.add('hide');
+                    setTimeout(() => el.remove(), 400);
+                }, 700);
+            }
+
+            // ===== 更新光标 =====
+            function updateCursor() {
+                cursor.style.transform = 'translate(' + cursorX + 'px, ' + cursorY + 'px)';
+                posEl.textContent = Math.round(cursorX) + ', ' + Math.round(cursorY);
+            }
+
+            // ===== 限制光标在屏幕内 =====
+            function clampCursor() {
+                const pad = 10;
+                cursorX = Math.max(pad, Math.min(screen.clientWidth - pad, cursorX));
+                cursorY = Math.max(pad, Math.min(screen.clientHeight - pad, cursorY));
+            }
+
+            // ===== 滚轮指示器 =====
+            function updateScrollIndicator(val) {
+                scrollTotal += val;
+                scrollValEl.textContent = val > 0 ? '+' + val : val;
+                scrollCountEl.textContent = Math.round(scrollTotal);
+
+                if (val !== 0) {
+                    scrollIndicator.classList.add('show');
+                    if (val > 0) {
+                        scrollUp.classList.add('active-up');
+                        scrollDown.classList.remove('active-down');
+                    } else {
+                        scrollDown.classList.add('active-down');
+                        scrollUp.classList.remove('active-up');
+                    }
+                    clearTimeout(scrollIndicator._hideTimer);
+                    scrollIndicator._hideTimer = setTimeout(() => {
+                        scrollIndicator.classList.remove('show');
+                        scrollUp.classList.remove('active-up');
+                        scrollDown.classList.remove('active-down');
+                    }, 600);
+                }
+            }
+
+            // ===== 触摸板核心 =====
+
+            function getTouchCenter(touches) {
+                let cx = 0,
+                    cy = 0;
+                for (let i = 0; i < touches.length; i++) {
+                    cx += touches[i].clientX;
+                    cy += touches[i].clientY;
+                }
+                return { x: cx / touches.length, y: cy / touches.length };
+            }
+
+            function updateFingerIndicator(clientX, clientY, count) {
+                const rect = touchpad.getBoundingClientRect();
+                const w = rect.width;
+                const h = rect.height;
+                const cx = rect.left + w / 2;
+                const cy = rect.top + h / 2;
+
+                let dx = (clientX - cx) / (w / 2);
+                let dy = (clientY - cy) / (h / 2);
+                const maxDx = 1;
+                const maxDy = 1;
+                if (Math.abs(dx) > maxDx) dx = Math.sign(dx) * maxDx;
+                if (Math.abs(dy) > maxDy) dy = Math.sign(dy) * maxDy;
+
+                const px = cx + dx * (w / 2) * 0.85;
+                const py = cy + dy * (h / 2) * 0.85;
+                touchFinger.style.left = px + 'px';
+                touchFinger.style.top = py + 'px';
+                touchFinger.classList.add('show');
+                if (count >= 2) {
+                    touchFinger.classList.add('two');
+                } else {
+                    touchFinger.classList.remove('two');
+                }
+            }
+
+            function hideFingerIndicator() {
+                touchFinger.classList.remove('show');
+                touchFinger.classList.remove('two');
+            }
+
+            // ----- 触摸事件 -----
+            touchpad.addEventListener('touchstart', function(e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+
+                touchState.active = true;
+                touchState.fingerCount = count;
+                touchState.moved = false;
+                touchState.startTime = performance.now();
+
+                const center = getTouchCenter(touches);
+                touchState.startX = center.x;
+                touchState.startY = center.y;
+                touchState.lastX = center.x;
+                touchState.lastY = center.y;
+
+                if (count === 1) {
+                    touchState.twoFingerStartY = 0;
+                    touchState.twoFingerPrevY = 0;
+                    touchState.scrollAccum = 0;
+                    updateFingerIndicator(touches[0].clientX, touches[0].clientY, 1);
+                    touchpad.classList.add('active');
+                } else if (count >= 2) {
+                    touchState.twoFingerStartY = center.y;
+                    touchState.twoFingerPrevY = center.y;
+                    touchState.scrollAccum = 0;
+                    updateFingerIndicator(center.x, center.y, 2);
+                    touchpad.classList.add('active');
+                }
+            }, { passive: false });
+
+            touchpad.addEventListener('touchmove', function(e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+
+                if (!touchState.active || count === 0) return;
+
+                const center = getTouchCenter(touches);
+
+                if (count === 1) {
+                    // 单指：移动光标
+                    touchState.moved = true;
+                    const dx = center.x - touchState.lastX;
+                    const dy = center.y - touchState.lastY;
+
+                    const moveX = dx * speed;
+                    const moveY = dy * speed;
+
+                    cursorX += moveX;
+                    cursorY += moveY;
+                    clampCursor();
+                    updateCursor();
+
+                    const now = performance.now();
+                    const dt = (now - touchState.lastMoveTime) / 1000 || 0.016;
+                    const dist = Math.hypot(moveX, moveY);
+                    if (dt > 0.01) {
+                        const spd = dist / dt;
+                        touchState.speedSmooth = touchState.speedSmooth * 0.7 + spd * 0.3;
+                        spdEl.textContent = Math.round(touchState.speedSmooth);
+                    }
+                    touchState.lastMoveTime = now;
+
+                    updateFingerIndicator(touches[0].clientX, touches[0].clientY, 1);
+                    touchpad.classList.add('active');
+
+                    if (touchState.dragMode) {
+                        cursor.classList.add('dragging');
+                    }
+
+                    touchState.lastX = center.x;
+                    touchState.lastY = center.y;
+
+                } else if (count >= 2) {
+                    // 双指：滚轮
+                    touchState.moved = true;
+                    const deltaY = center.y - touchState.twoFingerPrevY;
+
+                    const scrollSensitivity = 0.8;
+                    let scrollDelta = -deltaY * scrollSensitivity * 0.5;
+
+                    touchState.scrollAccum += scrollDelta;
+                    const threshold = 6;
+                    if (Math.abs(touchState.scrollAccum) >= threshold) {
+                        const steps = Math.floor(touchState.scrollAccum / threshold);
+                        const val = steps > 0 ? 1 : -1;
+                        updateScrollIndicator(val);
+                        const cls = steps > 0 ? 'scroll-up' : 'scroll-down';
+                        spawnRipple(cursorX, cursorY, cls);
+                        showKeyFeedback(
+                            steps > 0 ? '⬆ 滚轮' : '⬇ 滚轮',
+                            cursorX,
+                            cursorY - 50,
+                            steps > 0 ? 'var(--accent-green)' : 'var(--accent-pink)'
+                        );
+                        touchState.scrollAccum -= steps * threshold;
+                    }
+
+                    touchState.twoFingerPrevY = center.y;
+
+                    updateFingerIndicator(center.x, center.y, 2);
+                    touchpad.classList.add('active');
+
+                    if (Math.abs(deltaY) > 2) {
+                        scrollIndicator.classList.add('show');
+                        clearTimeout(scrollIndicator._hideTimer);
+                        scrollIndicator._hideTimer = setTimeout(() => {
+                            scrollIndicator.classList.remove('show');
+                            scrollUp.classList.remove('active-up');
+                            scrollDown.classList.remove('active-down');
+                        }, 800);
+                    }
+                }
+            }, { passive: false });
+
+            touchpad.addEventListener('touchend', function(e) {
+                e.preventDefault();
+                const touches = e.touches;
+                const count = touches.length;
+
+                if (count === 0) {
+                    const elapsed = performance.now() - touchState.startTime;
+                    const moved = touchState.moved;
+
+                    if (!moved && elapsed < 300) {
+                        spawnRipple(cursorX, cursorY, '');
+                        showKeyFeedback('左键', cursorX, cursorY - 35, 'var(--accent-cyan)');
+                    }
+
+                    if (touchState.dragMode) {
+                        cursor.classList.remove('dragging');
+                    }
+
+                    touchState.active = false;
+                    touchState.fingerCount = 0;
+                    touchState.moved = false;
+                    touchState.scrollAccum = 0;
+                    touchpad.classList.remove('active');
+                    hideFingerIndicator();
+
+                    if (elapsed > 100) {
+                        setTimeout(() => {
+                            if (!touchState.active) {
+                                spdEl.textContent = '0';
+                            }
+                        }, 300);
+                    }
+
+                } else {
+                    touchState.fingerCount = count;
+                    const center = getTouchCenter(touches);
+                    if (count === 1) {
+                        touchState.lastX = center.x;
+                        touchState.lastY = center.y;
+                        updateFingerIndicator(touches[0].clientX, touches[0].clientY, 1);
+                    } else if (count >= 2) {
+                        touchState.twoFingerPrevY = center.y;
+                        updateFingerIndicator(center.x, center.y, 2);
+                    }
+                }
+            }, { passive: false });
+
+            touchpad.addEventListener('touchcancel', function(e) {
+                e.preventDefault();
+                touchState.active = false;
+                touchState.fingerCount = 0;
+                touchState.moved = false;
+                touchState.scrollAccum = 0;
+                touchpad.classList.remove('active');
+                hideFingerIndicator();
+                cursor.classList.remove('dragging');
+                spdEl.textContent = '0';
+            }, { passive: false });
+
+            // ===== 速度控制 =====
+            speedSlider.addEventListener('input', function() {
+                speed = parseFloat(this.value);
+                speedVal.textContent = speed.toFixed(2);
+            });
+
+            // ===== 按钮事件 =====
+
+            btnLeft.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, '');
+                showKeyFeedback('左键', cursorX, cursorY - 35, 'var(--accent-cyan)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            btnRight.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, 'right');
+                showKeyFeedback('右键', cursorX, cursorY - 35, 'var(--accent-orange)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            let doubleClickTimer = null;
+            btnDouble.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                spawnRipple(cursorX, cursorY, 'double');
+                showKeyFeedback('双击', cursorX, cursorY - 40, 'var(--accent-purple)');
+                if (navigator.vibrate) navigator.vibrate(15);
+                setTimeout(() => {
+                    spawnRipple(cursorX, cursorY, '');
+                }, 100);
+            });
+
+            btnDrag.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                touchState.dragMode = !touchState.dragMode;
+                btnDrag.classList.toggle('on', touchState.dragMode);
+                if (touchState.dragMode) {
+                    cursor.classList.add('dragging');
+                    showKeyFeedback('拖拽 ON', cursorX, cursorY - 40, 'var(--accent-orange)');
+                } else {
+                    cursor.classList.remove('dragging');
+                    showKeyFeedback('拖拽 OFF', cursorX, cursorY - 40, 'var(--text-secondary)');
+                }
+                if (navigator.vibrate) navigator.vibrate(12);
+            });
+
+            btnEnter.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('↵ Enter', cursorX, cursorY - 35, 'var(--accent-green)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            btnShiftEnter.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('⇧↵ Shift+Enter', cursorX, cursorY - 40, 'var(--accent-green)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            btnUndo.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('↩ Ctrl+Z', cursorX, cursorY - 35, 'var(--accent-pink)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            btnRedo.addEventListener('pointerdown', function(e) {
+                e.preventDefault();
+                showKeyFeedback('↪ Ctrl+Y', cursorX, cursorY - 35, 'var(--accent-purple)');
+                if (navigator.vibrate) navigator.vibrate(10);
+            });
+
+            // ===== 窗口变化 =====
+            function onResize() {
+                cursorX = Math.max(10, Math.min(screen.clientWidth - 10, cursorX));
+                cursorY = Math.max(10, Math.min(screen.clientHeight - 10, cursorY));
+                updateCursor();
+            }
+            window.addEventListener('resize', onResize);
+
+            // ===== 初始化 =====
+            cursorX = screen.clientWidth / 2;
+            cursorY = screen.clientHeight / 2;
+            updateCursor();
+
+            let lastSpeedUpdate = 0;
+
+            function speedLoop(now) {
+                if (now - lastSpeedUpdate > 100) {
+                    if (!touchState.active) {
+                        spdEl.textContent = '0';
+                    }
+                    lastSpeedUpdate = now;
+                }
+                requestAnimationFrame(speedLoop);
+            }
+            requestAnimationFrame(speedLoop);
+
+            console.log('🖱️ 矩形触摸板已启动 · 速度=' + speed + ' · 拖拽=' + touchState.dragMode);
+            console.log('💡 单指移动 | 轻点左键 | 双指滚轮 | 按钮辅助');
+
+            window.__touchpad = {
+                state: touchState,
+                cursor: { x: cursorX, y: cursorY },
+                speed: speed,
+            };
+
+        })();
+    </script>
+
+</body>
+</html>

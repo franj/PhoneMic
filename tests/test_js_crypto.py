@@ -18,20 +18,25 @@ from hashlib import blake2b
 from pathlib import Path
 
 import pytest
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.secret import Aead
+from nacl.public import PrivateKey, PublicKey, SealedBox
+from nacl.secret import Aead, SecretBox
 from nacl.bindings import crypto_scalarmult
 from nacl.utils import random as random_bytes
+
+from phonemic.tunnel.frame import encode as frame_encode
 
 pytest.importorskip("playwright")
 
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
 SODIUM_JS = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
+# crypto_providers.js 的 handleAuthAck 用 MessagePack 解析 ack 载荷
+MSGPACK_JS = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
 CRYPTO_JS = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
 
 TEST_HTML = (
     "<!DOCTYPE html><html><head>"
     f"<script>{SODIUM_JS}</script>"
+    f"<script>{MSGPACK_JS}</script>"
     f"<script>{CRYPTO_JS}</script>"
     "</head><body></body></html>"
 )
@@ -141,10 +146,13 @@ class TestNaClBoxProvider:
                 const pt = sodium.from_string('{"type":"send","text":"hello"}');
                 const encrypted = phone.encrypt(pt);
 
+                // PC 端：ECDH + BLAKE2b KDF 派生同一对称密钥，afternm 解密，剥 8B seq 前缀
+                const shared = sodium.crypto_scalarmult(pcKp.privateKey, phone._phonePublicKey);
+                const key = sodium.crypto_generichash(32, shared);
                 const nonce = encrypted.slice(0, sodium.crypto_box_NONCEBYTES);
                 const ct = encrypted.slice(sodium.crypto_box_NONCEBYTES);
-                const decrypted = sodium.crypto_box_open_easy(ct, nonce, phone._phonePublicKey, pcKp.privateKey);
-                return sodium.to_string(decrypted);
+                const body = sodium.crypto_box_open_easy_afternm(ct, nonce, key);
+                return sodium.to_string(body.slice(8));
             }
         """)
         assert json.loads(result)["text"] == "hello"
@@ -159,8 +167,14 @@ class TestNaClBoxProvider:
                 phone.setPcPublicKey(pcKp.publicKey);
 
                 const pt = sodium.from_string('{"type":"preview","text":"world"}');
+                // PC 端：派生同一对称密钥，明文前置 8B seq(=0) 后 afternm 加密
+                const shared = sodium.crypto_scalarmult(pcKp.privateKey, phone._phonePublicKey);
+                const key = sodium.crypto_generichash(32, shared);
                 const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
-                const ct = sodium.crypto_box_easy(pt, nonce, phone._phonePublicKey, pcKp.privateKey);
+                const body = new Uint8Array(8 + pt.length);
+                body.set(new Uint8Array(8), 0);
+                body.set(pt, 8);
+                const ct = sodium.crypto_box_easy_afternm(body, nonce, key);
                 const combined = new Uint8Array(nonce.length + ct.length);
                 combined.set(nonce, 0);
                 combined.set(ct, nonce.length);
@@ -191,8 +205,11 @@ class TestNaClBoxProvider:
         """, pc_pub_b64)
 
         phone_pub = PublicKey(_from_b64(js_result["phonePubB64"]))
-        box = Box(pc_priv, phone_pub)
-        plaintext = box.decrypt(_from_b64(js_result["encryptedB64"]))
+        # 与 JS 端同一派生链：ECDH → BLAKE2b(32) → SecretBox（afternm 语义）
+        shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
+        box = SecretBox(blake2b(shared, digest_size=32).digest())
+        # 解密结果为 seq(8B 大端) || 明文，剥前缀（首帧 seq=0）
+        plaintext = box.decrypt(_from_b64(js_result["encryptedB64"]))[8:]
         assert json.loads(plaintext)["text"] == "cross-js2py"
 
     def test_cross_platform_py_encrypt_js_decrypt(self, crypto_page):
@@ -211,11 +228,12 @@ class TestNaClBoxProvider:
             }
         """, pc_pub_b64)
 
-        # Step 2: Python 加密
+        # Step 2: Python 加密（与 JS 端同一派生链，明文前置 8B seq(=0)）
         phone_pub = PublicKey(_from_b64(js_setup))
-        box = Box(pc_priv, phone_pub)
-        plaintext = b'{"type":"preview","text":"cross-py2js"}'
-        nonce = random_bytes(Box.NONCE_SIZE)
+        shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
+        box = SecretBox(blake2b(shared, digest_size=32).digest())
+        plaintext = (0).to_bytes(8, "big") + b'{"type":"preview","text":"cross-py2js"}'
+        nonce = random_bytes(SecretBox.NONCE_SIZE)
         encrypted = bytes(box.encrypt(plaintext, nonce))
         encrypted_b64 = _to_b64(encrypted)
 
@@ -246,15 +264,20 @@ class TestNaClBoxProvider:
             }
         """, pc_pub_b64)
 
-        # Python 端：解封 auth data 获取手机公钥
+        # Python 端：解封 auth data——新语义密封的是 {"algo","pk"} JSON
         sealed = _from_b64(js_auth)
         sb = SealedBox(pc_priv)
-        phone_pub = PublicKey(sb.decrypt(sealed))
-        box = Box(pc_priv, phone_pub)
+        inner = json.loads(sb.decrypt(sealed).decode("utf-8"))
+        assert inner["algo"] == "xsalsa20"
+        phone_pub = PublicKey(_from_b64(inner["pk"]))
+        # 与 JS 端同一派生链：ECDH → BLAKE2b(32) → SecretBox（afternm 语义）
+        shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
+        box = SecretBox(blake2b(shared, digest_size=32).digest())
 
-        # Python 端：生成加密的 auth_ack
-        ack_payload = json.dumps({"status": "OK", "ts": 12345}).encode("utf-8")
-        ack_nonce = random_bytes(Box.NONCE_SIZE)
+        # Python 端：生成加密的 auth_ack——handleAuthAck 走统一 decrypt 路径，
+        # 期望首帧为 seq(8B)=0 前缀 + msgpack({"status":"OK"})
+        ack_payload = (0).to_bytes(8, "big") + frame_encode({"status": "OK"})
+        ack_nonce = random_bytes(SecretBox.NONCE_SIZE)
         ack_encrypted = bytes(box.encrypt(ack_payload, ack_nonce))
         ack_b64 = _to_b64(ack_encrypted)
 
@@ -275,8 +298,8 @@ class TestNaClBoxProvider:
 
         assert js_result["authenticated"] is True
 
-        # Python 端解密 JS 消息
-        plaintext = box.decrypt(_from_b64(js_result["encryptedB64"]))
+        # Python 端解密 JS 消息（剥 8B seq 前缀）
+        plaintext = box.decrypt(_from_b64(js_result["encryptedB64"]))[8:]
         assert json.loads(plaintext)["text"] == "handshake-ok"
 
 
@@ -298,13 +321,13 @@ class TestXChaCha20Provider:
                 const pt = sodium.from_string('{"type":"send","text":"xchacha-rt"}');
                 const encrypted = phone.encrypt(pt);
 
-                // PC 端：ECDH + BLAKE2b KDF + XChaCha20 解密
+                // PC 端：ECDH + BLAKE2b KDF + XChaCha20 解密（aad = seq(8B)，首帧 seq=0）
                 const shared = sodium.crypto_scalarmult(pcKp.privateKey, phone._phonePublicKey);
                 const key = sodium.crypto_generichash(32, shared);
                 const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
                 const nonce = encrypted.slice(0, nonceSize);
                 const ct = encrypted.slice(nonceSize);
-                const decrypted = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, null, nonce, key);
+                const decrypted = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, new Uint8Array(8), nonce, key);
                 return sodium.to_string(decrypted);
             }
         """)
@@ -332,7 +355,8 @@ class TestXChaCha20Provider:
         phone_pub = PublicKey(_from_b64(js_result["phonePubB64"]))
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
         aead = Aead(blake2b(shared, digest_size=32).digest())
-        plaintext = aead.decrypt(_from_b64(js_result["encryptedB64"]))
+        # JS 端加密 aad = seq(8B)，首帧 seq=0
+        plaintext = aead.decrypt(_from_b64(js_result["encryptedB64"]), aad=(0).to_bytes(8, "big"))
         assert json.loads(plaintext)["text"] == "xchacha-js2py"
 
     def test_cross_platform_py_encrypt_js_decrypt(self, crypto_page):
@@ -356,7 +380,8 @@ class TestXChaCha20Provider:
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
         aead = Aead(blake2b(shared, digest_size=32).digest())
         plaintext = b'{"type":"preview","text":"xchacha-py2js"}'
-        encrypted = bytes(aead.encrypt(plaintext))
+        # JS 端解密 aad = seq(8B)，首帧 seq=0
+        encrypted = bytes(aead.encrypt(plaintext, aad=(0).to_bytes(8, "big")))
         encrypted_b64 = _to_b64(encrypted)
 
         # Step 3: JS 解密

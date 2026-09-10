@@ -16,13 +16,16 @@
 - 参数化测试 xsalsa20 和 xchacha20 两种算法（通过调整 a= 列表顺序让客户端分别选中）
 """
 
-import json
+import re
 from pathlib import Path
+import json
 
 import pytest
 
 from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 
 pytest.importorskip("playwright")
 
@@ -38,9 +41,17 @@ MOCK_WS_SCRIPT = """
 window.__mockWS = {
     sentMessages: [],
     current: null,
-    triggerMessage: function(jsonString) {
+    // bin 字段（Uint8Array）无法跨 Playwright 边界传输，统一转成 int 数组
+    toPlain: function(msg) {
+        const out = {};
+        for (const k in msg) {
+            out[k] = (msg[k] instanceof Uint8Array) ? Array.from(msg[k]) : msg[k];
+        }
+        return out;
+    },
+    triggerMessage: function(byteList) {
         if (this.current && this.current.onmessage) {
-            this.current.onmessage({ data: jsonString });
+            this.current.onmessage({ data: new Uint8Array(byteList) });
         }
     },
     triggerClose: function() {
@@ -63,9 +74,16 @@ window.WebSocket = function(url) {
     this.send = function(data) {
         if (this.readyState !== 1) return false;
         try {
-            var msg = JSON.parse(data);
-            window.__mockWS.sentMessages.push(msg);
-        } catch(e) { window.__mockWS.sentMessages.push({ raw: data }); }
+            var msg = MessagePack.decode(data);
+            // 明文帧（可解码为对象）→ dict 存入；密文帧 → 保存原始字节供 Python 解密
+            if (msg && typeof msg === 'object') {
+                window.__mockWS.sentMessages.push(window.__mockWS.toPlain(msg));
+            } else {
+                window.__mockWS.sentMessages.push({ raw: Array.from(data) });
+            }
+        } catch(e) {
+            window.__mockWS.sentMessages.push({ raw: Array.from(data) });
+        }
         return true;
     };
     this.close = function() {
@@ -96,16 +114,25 @@ def _prepare_html(channel, offered, force_none_algo=False):
     """
     html = (RES_DIR / "mobile.html").read_text(encoding="utf-8")
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
+    msgpack_js = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
     html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
+    html = html.replace(
+        '<script src="msgpack.min.js" defer></script>', f"<script>{msgpack_js}</script>"
+    )
     html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
     html = html.replace(
         "window.i18n = {};",
         "window.i18n = " + json.dumps(MOBILE_I18N, ensure_ascii=False) + ";",
         1,
     )
-    html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
-
+    # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
+    html = re.sub(
+        r"<head[^>]*>",
+        lambda m: m.group(0) + "<script>" + MOCK_WS_SCRIPT + "</script>",
+        html,
+        count=1,
+    )
     # patch _parseUrlFragment：注入 PC 公钥/token 和 a= 算法列表
     pc_pubkey_b64 = channel.get_public_key_b64()
     offered_js = ",".join(f"'{a}'" for a in offered)
@@ -132,24 +159,48 @@ def _prepare_html(channel, offered, force_none_algo=False):
     return html
 
 
+def _as_frame(msg):
+    """把 mock WS 捕获的明文帧还原为 Python 帧（bin 字段由 int 数组转回 bytes）。"""
+    frame = dict(msg)
+    if isinstance(frame.get("data"), list):
+        frame["data"] = bytes(frame["data"])
+    return frame
+
+
+def _decode_sent(channel, msg):
+    """把 mock WS 捕获的一条 JS 上行帧还原为应用层 dict。
+
+    密文帧（mock 存 {raw: int[]}）走会话解密；明文帧（已解码 dict）
+    重新编码后由会话按明文还原。
+    """
+    if isinstance(msg, dict) and "raw" in msg:
+        return channel.unwrap(bytes(msg["raw"]))
+    return channel.unwrap(frame_encode(_as_frame(msg)))
+
+
 def _wait_auth(page):
     """等待 JS 发送 auth 消息并返回。"""
     page.wait_for_function(
         "() => window.__mockWS && window.__mockWS.sentMessages.some(m => m.type === 'auth')"
     )
-    return page.evaluate(
+    msg = page.evaluate(
         "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
     )
+    return _as_frame(msg)
 
 
 def _process_auth(page, channel):
-    """Python 处理 auth 并发送 auth_ack。"""
+    """Python 处理 auth 并发送 auth_ack。
+
+    与真实服务端一致：成功 ack = 整帧加密（session.wrap 产出密文字节），
+    无外层信封。这同时验证 JS 端 handleAuthAck 的解密路径。
+    """
     auth_msg = _wait_auth(page)
     assert channel.receive_auth(auth_msg) is True
     ack = channel.make_auth_ack()
     page.evaluate(
         "(msg) => window.__mockWS.triggerMessage(msg)",
-        json.dumps(ack),
+        list(channel.wrap(ack)),
     )
     page.wait_for_function(
         "() => window.__wsClient && window.__wsClient.isConnected"
@@ -184,12 +235,17 @@ class TestHandshake:
         assert page.evaluate("() => window.__wsClient.isConnected") is True
 
     def test_algorithm_selected_correctly(self, secure_pair):
-        """JS 选择的算法与指定的优先算法一致。"""
+        """JS 选择的算法与指定的优先算法一致。
+
+        algo 密封在 auth.data 内（线上不明文），通过服务端解封后的
+        协商结果验证；线上仅能确认 auth 帧不带明文 algo。
+        """
         page, channel, algo = secure_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
-        assert auth_msg["algo"] == algo
+        assert "algo" not in auth_msg  # 线上不泄露算法
+        assert channel.negotiated_algorithm == algo
 
     def test_auth_ack_received(self, secure_pair):
         """auth_ack 被正确处理，SecureClient 已认证。"""
@@ -215,8 +271,7 @@ class TestJSToPython:
         page.locator("#btn-send").click()
 
         sent = page.evaluate("() => window.__mockWS.sentMessages")
-        data_msgs = [m for m in sent if m["type"] == "data"]
-        send_msgs = [channel.unwrap(m) for m in data_msgs]
+        send_msgs = [_decode_sent(channel, m) for m in sent]
         send_msgs = [m for m in send_msgs if m and m.get("type") == "send"]
         assert len(send_msgs) >= 1
         assert send_msgs[-1]["text"] == "hello from JS"
@@ -228,9 +283,8 @@ class TestJSToPython:
         page.locator("#input-box").fill("preview text")
 
         sent = page.evaluate("() => window.__mockWS.sentMessages")
-        data_msgs = [m for m in sent if m["type"] == "data"]
-        assert len(data_msgs) >= 1
-        decrypted = channel.unwrap(data_msgs[-1])
+        frames = [f for f in (_decode_sent(channel, m) for m in sent) if f]
+        decrypted = frames[-1]
         assert decrypted["type"] == "preview"
         assert decrypted["text"] == "preview text"
 
@@ -245,8 +299,7 @@ class TestJSToPython:
             page.locator("#btn-send").click()
 
         sent = page.evaluate("() => window.__mockWS.sentMessages")
-        data_msgs = [m for m in sent if m["type"] == "data"]
-        send_msgs = [channel.unwrap(m) for m in data_msgs]
+        send_msgs = [_decode_sent(channel, m) for m in sent]
         send_msgs = [m for m in send_msgs if m and m.get("type") == "send"]
         assert len(send_msgs) == len(texts)
         for i, text in enumerate(texts):
@@ -273,7 +326,7 @@ class TestPythonToJS:
         wrapped = channel.wrap({"type": "config", "mobile_max_records": 10})
         page.evaluate(
             "(msg) => window.__mockWS.triggerMessage(msg)",
-            json.dumps(wrapped),
+            list(wrapped),
         )
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 10
@@ -283,12 +336,12 @@ class TestPythonToJS:
         page, channel, algo = secure_pair
 
         wrapped1 = channel.wrap({"type": "config", "mobile_max_records": 5})
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(wrapped1))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(wrapped1))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 5
 
         wrapped2 = channel.wrap({"type": "config", "mobile_max_records": 20})
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(wrapped2))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(wrapped2))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 20
 
@@ -296,7 +349,7 @@ class TestPythonToJS:
         """Python → JS：接收 send 回声不影响连接。"""
         page, channel, algo = secure_pair
         wrapped = channel.wrap({"type": "send", "text": "echo from Python"})
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(wrapped))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(wrapped))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.__wsClient.isConnected") is True
 
@@ -310,7 +363,7 @@ class TestRoundtrip:
 
         # Python → JS: config
         wrapped = channel.wrap({"type": "config", "mobile_max_records": 5})
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(wrapped))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(wrapped))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 5
 
@@ -320,8 +373,7 @@ class TestRoundtrip:
         page.locator("#btn-send").click()
 
         sent = page.evaluate("() => window.__mockWS.sentMessages")
-        data_msgs = [m for m in sent if m["type"] == "data"]
-        send_msgs = [channel.unwrap(m) for m in data_msgs]
+        send_msgs = [_decode_sent(channel, m) for m in sent]
         send_msgs = [m for m in send_msgs if m and m.get("type") == "send"]
         assert send_msgs[-1]["text"] == "roundtrip"
 
@@ -332,7 +384,7 @@ class TestRoundtrip:
 
         # Python → JS: 再次更新 config
         wrapped2 = channel.wrap({"type": "config", "mobile_max_records": 15})
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(wrapped2))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(wrapped2))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 15
 
@@ -352,10 +404,11 @@ class TestAlgorithmRejection:
 
         assert channel.receive_auth(auth_msg) is False
         assert channel.is_rejected
-        assert "not allowed" in channel.reject_reason
+        # 新协议下 algo 在密封 blob 内：none 算法走不到密钥交换，以解封失败被拒
+        assert channel.reject_reason
 
         ack = channel.make_auth_ack()
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(ack))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(channel.wrap(ack)))
 
         page.wait_for_function("() => !window.__wsClient.isConnected", timeout=2000)
         assert page.evaluate("() => window.__wsClient.isConnected") is False
@@ -406,12 +459,13 @@ class TestAlgorithmNegotiation:
         assert "a=xchacha20,xsalsa20" in url
 
     def test_auth_echoes_client_choice(self, secure_pair):
-        """auth 消息回传客户端协商出的算法，服务端 accept 并在 ack 中回显。"""
+        """客户端协商出的算法密封在 auth.data 内，服务端解封后按其建 Provider。"""
         page, channel, algo = secure_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
-        assert auth_msg["algo"] == algo
+        assert "algo" not in auth_msg  # algo 在密封 blob 内，不明文回传
+        assert channel.negotiated_algorithm == algo
 
 
 # ---------- 断线处理 ----------
@@ -435,7 +489,7 @@ class TestDisconnect:
 
 @pytest.fixture
 def none_lan_pair(page):
-    """none+LAN 模式：无认证，明文 JSON。"""
+    """none+LAN 模式：无认证，明文 msgpack。"""
     pc = SecureChannel(algorithm="none", mode="lan")
     channel = pc.new_session()
     html = _prepare_html(pc, ["none"])
@@ -473,15 +527,15 @@ class TestNoneLAN:
         assert len(send_msgs) >= 1
         assert send_msgs[-1]["text"] == "hello plaintext"
 
-        unwrapped = channel.unwrap(send_msgs[-1])
+        unwrapped = _decode_sent(channel, send_msgs[-1])
         assert unwrapped["text"] == "hello plaintext"
 
     def test_receive_plaintext_config(self, none_lan_pair):
         """none+LAN: Python → JS 明文 config。"""
         page, channel = none_lan_pair
         msg = channel.wrap({"type": "config", "mobile_max_records": 7})
-        assert msg["type"] == "config"
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        assert frame_decode(msg)["type"] == "config"
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 7
 
@@ -491,7 +545,7 @@ class TestNoneLAN:
 
         # Python → JS
         msg = channel.wrap({"type": "config", "mobile_max_records": 3})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 3
 
@@ -522,7 +576,7 @@ class TestNoneLAN:
 
 @pytest.fixture
 def none_cf_pair(page):
-    """none+Cloudflare 模式：token 认证，明文 JSON。"""
+    """none+Cloudflare 模式：token 认证，明文 msgpack。"""
     pc = SecureChannel(algorithm="none", mode="cloudflare")
     channel = pc.new_session()
     html = _prepare_html(pc, ["none"])
@@ -562,14 +616,14 @@ class TestNoneCloudflare:
         assert len(send_msgs) >= 1
         assert send_msgs[-1]["text"] == "cf plaintext"
 
-        unwrapped = channel.unwrap(send_msgs[-1])
+        unwrapped = _decode_sent(channel, send_msgs[-1])
         assert unwrapped["text"] == "cf plaintext"
 
     def test_receive_plaintext_config(self, none_cf_pair):
         """none+CF: Python → JS 明文 config。"""
         page, channel, pc = none_cf_pair
         msg = channel.wrap({"type": "config", "mobile_max_records": 8})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 8
 
@@ -579,7 +633,7 @@ class TestNoneCloudflare:
 
         # Python → JS
         msg = channel.wrap({"type": "config", "mobile_max_records": 15})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", json.dumps(msg))
+        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 15
 
@@ -611,7 +665,7 @@ class TestNoneCloudflareRejection:
         assert "token mismatch" in channel.reject_reason
 
         ack = channel.make_auth_ack()
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", json.dumps(ack))
+        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(channel.wrap(ack)))
 
         page.wait_for_function("() => !window.__wsClient.isConnected", timeout=2000)
         assert page.evaluate("() => window.__wsClient.isConnected") is False
@@ -634,7 +688,7 @@ class TestAuthFailureUX:
         # 服务端拒绝（对应二维码过期 / 密钥不匹配）
         page.evaluate(
             "(msg) => window.__mockWS.triggerMessage(msg)",
-            json.dumps({"type": "auth_ack", "rejected": True, "reason": "auth data processing failed"}),
+            list(frame_encode({"type": "auth_ack", "rejected": True, "reason": "auth data processing failed"})),
         )
 
         page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)

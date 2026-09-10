@@ -22,7 +22,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import uvicorn
 
 from phonemic.bridge_interface import EventBridge
+from phonemic.gui.file import FileReceiver
+from phonemic.gui.photo import PhotoReceiver
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.frame import FrameError
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
@@ -89,7 +94,7 @@ class ConnectionManager:
 
         # 发送当前配置（加密传输）
         try:
-            await _send_json(websocket, {
+            await _send_frame(websocket, {
                 "type": "config",
                 "mobile_max_records": self.max_records,
             })
@@ -111,6 +116,9 @@ class ConnectionManager:
         if self.active_websocket is websocket:
             self.active_websocket = None
             self.active_session = None
+            # 断连时丢弃未完成的文件/图片接收会话（wire-protocol.md §9）
+            _file_receiver.abort_all()
+            _photo_receiver.abort_all()
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -121,11 +129,26 @@ _manager: Optional[ConnectionManager] = None
 # 安全通道（所有模式共用，PC 密钥对在启动时生成一次）
 _secure_channel: Optional[SecureChannel] = None
 
+# 文件接收状态机（wire-protocol.md §9）。落盘回调走 bridge 发 file_saved 事件，
+# 主进程弹托盘通知；dest_dir 默认 ~/Downloads/PhoneMic（§9.2）。
+_file_receiver = FileReceiver()
+
+# 图片到剪贴板接收状态机（wire-protocol.md §9.1）：内存重组不落盘，
+# end 回调走 bridge 发 photo_received 事件，主进程写系统剪贴板 + 托盘通知。
+_photo_receiver = PhotoReceiver()
+
 
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
     global _manager
     _manager = ConnectionManager(bridge)
+    _file_receiver.on_done = lambda path, name, size: _manager.bridge.emit(
+        "file_saved", {"path": path, "name": name, "size": size}
+    )
+    # photo end 回调：把重组好的图片字节交给主进程（Qt 剪贴板写入必须在 GUI 线程）
+    _photo_receiver.on_done = lambda data, name, size: _manager.bridge.emit(
+        "photo_received", {"data": data, "name": name, "size": size}
+    )
     logger.info("Message bridge set for backend service")
 
 
@@ -144,16 +167,19 @@ def get_secret_path() -> str:
     return _secure_channel.secret_path if _secure_channel else ""
 
 
-async def _send_json(websocket, message: dict) -> None:
-    """发送 JSON 消息，按该连接自身的会话状态决定是否加密。
+async def _send_frame(websocket, message: dict) -> None:
+    """发送一帧消息，按该连接自身的会话状态决定是否加密。
 
-    加解密上下文取自连接自己的 SecureSession，而非共享对象，
-    因此处于握手中的新连接不会改变活动连接的加密状态。
+    线上字节一律由 session.wrap() 产出：加密模式整帧加密，明文模式 msgpack
+    编码，没有外层信封。加解密上下文取自连接自己的 SecureSession，而非共享
+    对象，因此处于握手中的新连接不会改变活动连接的加密状态。
     """
     session = _manager.session_for(websocket) if _manager else None
-    if session is not None and session.is_authenticated:
-        message = session.wrap(message)
-    await websocket.send_text(json.dumps(message, ensure_ascii=False))
+    if session is not None:
+        payload = session.wrap(message)
+    else:
+        payload = frame_encode(message)
+    await websocket.send_bytes(payload)
 
 
 # ---------- 公共 API：向手机端推送消息 ----------
@@ -176,7 +202,7 @@ def send_to_phone(message: dict) -> bool:
 
     async def _send():
         try:
-            await _send_json(_manager.active_websocket, message)
+            await _send_frame(_manager.active_websocket, message)
             logger.debug(f"Pushed message to phone: {message.get('type', 'unknown')}")
         except Exception as e:
             logger.warning(f"Failed to push message to phone: {e}")
@@ -222,9 +248,9 @@ def request_client_rescan() -> bool:
             if session is None:
                 return
             message = {"type": "reconnect", "reason": "config_changed"}
-            if session.is_authenticated:
-                message = session.wrap(message)
-            await ws.send_text(json.dumps(message, ensure_ascii=False))
+            # wrap 已产出线上字节（认证后=整帧加密 / 未认证=明文 msgpack），不再二次编码
+            payload = session.wrap(message)
+            await ws.send_bytes(payload)
             await ws.close(code=1000)
             logger.info("Client notified to rescan, connection closed.")
         except Exception as e:
@@ -251,7 +277,7 @@ async def _handle_auth(websocket, session) -> bool:
         return True
 
     try:
-        message = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
+        message = await asyncio.wait_for(websocket.receive(), timeout=10.0)
     except asyncio.TimeoutError:
         logger.warning("Auth timeout, closing")
         await websocket.close(code=1000)
@@ -264,9 +290,17 @@ async def _handle_auth(websocket, session) -> bool:
         await websocket.close(code=1000)
         return False
 
+    raw = message.get("bytes")
+    if raw is None:
+        # 协议全部走 binary：text 帧只可能来自未刷新的旧页面（旧 JSON 协议）
+        logger.warning("Auth: non-binary frame (stale client?), closing")
+        await websocket.close(code=1000)
+        return False
+
     try:
-        data = json.loads(message)
-    except json.JSONDecodeError:
+        data = frame_decode(raw)
+    except FrameError as e:
+        logger.warning(f"Invalid frame: {e}")
         await websocket.close(code=1000)
         return False
 
@@ -277,58 +311,89 @@ async def _handle_auth(websocket, session) -> bool:
 
     if not session.receive_auth(data):
         logger.warning(f"Auth failed: {session.reject_reason}, closing")
-        await websocket.send_text(json.dumps(session.make_auth_ack(), ensure_ascii=False))
+        # 握手失败无 Provider，wrap 按明文发出（rejected 本就可明文）
+        await websocket.send_bytes(session.wrap(session.make_auth_ack()))
         await websocket.close(code=1000)
         return False
 
-    ack = session.make_auth_ack()
-    await websocket.send_text(json.dumps(ack, ensure_ascii=False))
-    logger.info(f"Auth succeeded, algorithm={ack.get('algo')}, auth_ack sent")
+    await websocket.send_bytes(session.wrap(session.make_auth_ack()))
+    logger.info(f"Auth succeeded, algorithm={session.negotiated_algorithm}, auth_ack sent")
     return True
 
 
-async def _handle_client_message(websocket, session, raw: str) -> bool:
+async def _handle_client_message(websocket, session, raw: bytes) -> bool:
     """
-    S1：处理认证后的单条文本消息。
+    S1：处理认证后的单条 binary 消息。
 
-    校验消息形态（拒绝重复 auth；加密模式只接受 data 信封），
-    解密后把内部消息转发到事件桥。
+    加密与否由会话状态机决定（session.unwrap 内部按 Provider 是否存在判断），
+    不靠帧内容判别——因此加密帧没有外层信封，无法也不需要在解密前识别类型。
+    解密后拒绝重复 auth，其余转发到事件桥。
 
     Returns:
         True 表示继续接收下一条；False 表示需要关闭连接
     """
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Invalid JSON: {raw}, error: {e}")
+    message = session.unwrap(raw)
+    if message is None:
+        # 明文模式下帧非法只丢弃；加密模式下解密失败说明对端状态已错乱
+        if session.is_encrypted:
+            logger.warning("Decryption failed, closing")
+            await websocket.close(code=1000)
+            return False
+        logger.warning("Invalid frame, ignored")
         return True
 
     # 拒绝重复 auth
-    if data.get("type") == "auth":
+    if message.get("type") == "auth":
         logger.warning("Received auth after authentication, closing")
         await websocket.close(code=1000)
         return False
 
-    if session.is_encrypted:
-        if data.get("type") != "data":
-            logger.warning(f"Expected data, got: {data.get('type')}, closing")
-            await websocket.close(code=1000)
-            return False
-        inner = session.unwrap(data)
-        if inner is None:
-            logger.warning("Decryption failed, closing")
-            await websocket.close(code=1000)
-            return False
-    else:
-        inner = data
+    inner = message
 
     msg_type = inner.get("type")
     text = inner.get("text", "")
     if msg_type in ("preview", "send"):
         _manager.bridge.emit(msg_type, text)
         logger.debug(f"Received {msg_type}: {text[:50]}...")
+    elif msg_type == "key":
+        # keys 直接喂给 phonemic/gui/keyboard.py:send_keys()
+        _manager.bridge.emit("key", inner.get("keys", ""))
+        logger.debug(f"Received key: {inner.get('keys', '')}")
+    elif msg_type == "mouse":
+        # 整帧交给 PC 端，a 决定动作（wire-protocol.md §7）
+        _manager.bridge.emit("mouse", inner)
+        logger.debug(f"Received mouse: a={inner.get('a')}")
+    elif msg_type == "file":
+        # 文件分块接收（wire-protocol.md §9）：写盘放线程，不阻塞事件循环。
+        # WS 有序 + 每帧串行 await，保证 data 块按序落盘。
+        ack, err = await asyncio.to_thread(_file_receiver.handle, inner)
+        if err is not None:
+            await _send_frame(websocket, {
+                "type": "error",
+                "code": "malformed",
+                "msg": err,
+            })
+        elif ack is not None:
+            await _send_frame(websocket, ack)
+    elif msg_type == "photo":
+        # 图片到剪贴板（wire-protocol.md §9.1）：与 file 线格式相同但内存重组、
+        # 不落盘；end 后由 on_done 回调把字节经 bridge 交给主进程写系统剪贴板。
+        ack, err = await asyncio.to_thread(_photo_receiver.handle, inner)
+        if err is not None:
+            await _send_frame(websocket, {
+                "type": "error",
+                "code": "malformed",
+                "msg": err,
+            })
+        elif ack is not None:
+            await _send_frame(websocket, ack)
     else:
         logger.warning(f"Unknown inner message type: {msg_type}")
+        await _send_frame(websocket, {
+            "type": "error",
+            "code": "malformed",
+            "msg": f"unknown type: {msg_type}",
+        })
     return True
 
 
@@ -348,10 +413,10 @@ async def _serve_messages(websocket, session) -> None:
             logger.info("WebSocket disconnected")
             break
 
-        text = message.get("text")
+        text = message.get("bytes")
         if text is None:
-            # 二进制消息：忽略（协议层面手机端只发 UTF-8 文本）
-            logger.debug("Ignoring binary WebSocket message")
+            # 文本消息：协议已全 binary，忽略（旧页面未刷新）
+            logger.debug("Ignoring text WebSocket message")
             continue
 
         if not await _handle_client_message(websocket, session, text):
@@ -386,6 +451,7 @@ def _serve_lang_json() -> Response:
     """
     try:
         i18n = I18n.instance()
+        i18n.reload()   # 每次请求重读当前语言文件：改 locale 后手机端刷新即生效，无需重启
         mobile_data = i18n.get_section("mobile")
         return JSONResponse(
             content=mobile_data,
@@ -444,12 +510,20 @@ def _serve_crypto_providers() -> Response:
     return FileResponse(path, media_type="application/javascript")
 
 
+def _serve_msgpack() -> Response:
+    """返回 msgpack.min.js（浏览器端 MessagePack 编解码库）。"""
+    path = get_res_path("msgpack.min.js")
+    return FileResponse(path, media_type="application/javascript")
+
+
 # 明文模式放行的白名单（根路径入口）
+
 _PUBLIC_PATHS = {
     "/",
     "/favicon.ico",
     "/sodium.js",
     "/crypto_providers.js",
+    "/msgpack.min.js",
     "/ws",
     "/api/lang.json",
 }
@@ -492,6 +566,8 @@ async def _dispatch_http(request: Request, path: str) -> Response:
         return _serve_sodium(request)
     if normalized == "/crypto_providers.js":
         return _serve_crypto_providers()
+    if normalized == "/msgpack.min.js":
+        return _serve_msgpack()
     if normalized == "/favicon.ico":
         return _serve_favicon()
     if normalized == "/test":
@@ -538,6 +614,10 @@ async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
 
     # 完成 WebSocket 握手
     await websocket.accept()
+
+    # 打印客户端 UA，便于排查不同浏览器的兼容性问题
+    user_agent = websocket.headers.get("user-agent", "unknown")
+    logger.info(f"WebSocket client UA: {user_agent}")
 
     # 该连接独立的握手上下文，与活动连接互不干扰
     session = _secure_channel.new_session()

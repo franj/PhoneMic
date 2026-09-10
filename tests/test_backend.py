@@ -13,8 +13,9 @@ import urllib.error
 
 import pytest
 from websockets.sync.client import connect as ws_connect
-from nacl.public import Box, PrivateKey, PublicKey, SealedBox
-from nacl.utils import random as random_bytes
+from nacl.bindings import crypto_scalarmult
+from nacl.public import PrivateKey, PublicKey, SealedBox
+from hashlib import blake2b
 
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import (
@@ -22,6 +23,9 @@ from phonemic.server.api import (
     push_config, send_to_phone, set_secure_channel, request_client_rescan,
 )
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.crypto import create_provider
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 
 from conftest import get_test_port
 
@@ -64,59 +68,88 @@ def http_url(host, port, sc, path="/"):
 
 
 class PhoneSimulator:
-    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。"""
+    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。
 
-    def __init__(self, pc_public_key_b64: str):
+    与 JS 端 SecureClient / CryptoProvider 行为一致：
+    - auth：密封 {"algo","pk"} JSON（algo 不明文传输）
+    - 会话密钥：ECDH + blake2b(32) 派生，交给 CryptoProvider
+    - 防重放 seq 由 Provider 在加密层承载，不进应用层 JSON
+    """
+
+    def __init__(self, pc_public_key_b64: str, algo: str = "xsalsa20"):
+        self._algo = algo
+        if algo == "none":
+            # none+CF：pc_public_key_b64 实为 token
+            self._token = pc_public_key_b64
+            self._provider = None
+            return
         pc_pub_bytes = base64.urlsafe_b64decode(pc_public_key_b64 + "==")
         self._pc_public = PublicKey(pc_pub_bytes)
         self._phone_private = PrivateKey.generate()
         self._phone_public = self._phone_private.public_key
-        self._box = Box(self._phone_private, self._pc_public)
-        self._seq = 0
+        shared = crypto_scalarmult(bytes(self._phone_private), pc_pub_bytes)
+        session_key = blake2b(shared, digest_size=32).digest()
+        self._provider = create_provider(algo, session_key)
 
-    def make_auth(self, algo: str = "xsalsa20") -> dict:
-        sb = SealedBox(self._pc_public)
-        sealed = sb.encrypt(bytes(self._phone_public))
-        return {
-            "type": "auth",
-            "algo": algo,
-            "data": base64.urlsafe_b64encode(sealed).decode().rstrip("="),
-        }
+    def make_auth(self, algo: str = None) -> dict:
+        """模拟手机端 auth：加密模式密封 {"algo","pk"}；none+CF 明文 token。
 
-    def encrypt(self, msg: dict) -> dict:
-        # 与手机端 JS 一致：明文中注入递增 seq 供服务端防重放
-        payload = dict(msg)
-        payload["seq"] = self._seq
-        self._seq += 1
-        pt = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        nonce = random_bytes(Box.NONCE_SIZE)
-        encrypted = self._box.encrypt(pt, nonce)
-        return {
-            "type": "data",
-            "data": base64.urlsafe_b64encode(bytes(encrypted)).decode().rstrip("="),
-        }
+        每次握手（= 新连接/新会话）开始时归零 seq 计数器，与服务端对齐。
+        """
+        algo = algo or self._algo
+        if self._provider is not None and hasattr(self._provider, "reset"):
+            self._provider.reset()
+        if algo == "none":
+            return {"type": "auth", "algo": "none", "data": self._token}
+        inner = json.dumps(
+            {
+                "algo": algo,
+                "pk": base64.urlsafe_b64encode(
+                    bytes(self._phone_public)
+                ).decode().rstrip("="),
+            }
+        ).encode("utf-8")
+        sealed = SealedBox(self._pc_public).encrypt(inner)
+        # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
+        return {"type": "auth", "data": sealed}
 
-    def decrypt(self, envelope: dict) -> dict:
-        raw = base64.urlsafe_b64decode(envelope["data"] + "==")
-        nonce = raw[:Box.NONCE_SIZE]
-        ct = raw[Box.NONCE_SIZE:]
-        pt = self._box.decrypt(ct, nonce)
-        return json.loads(pt)
+    def encrypt(self, msg: dict) -> bytes:
+        # 产出线上字节：none 模式直接 msgpack 编码，加密模式整帧加密；无信封
+        pt = frame_encode(msg)
+        if self._provider is None:
+            return pt
+        # seq 由 Provider 在加密层自动打上
+        return bytes(self._provider.encrypt(pt))
+
+    def decrypt(self, raw: bytes) -> dict:
+        # 还原应用层报文：none 模式直接解码，加密模式整帧解密
+        if self._provider is None:
+            return frame_decode(raw)
+        # 重放/乱序/篡改由 Provider 校验并抛错
+        pt = self._provider.decrypt(raw)
+        return frame_decode(pt)
 
 
 def authenticate(ws, phone):
-    """完成 auth 握手，返回 auth_ack 原始 dict。"""
-    ws.send(json.dumps(phone.make_auth()))
+    """完成 auth 握手，返回解密后的 auth_ack 内容。
+
+    ack 是下行首帧（服务端 tx_seq=0，整帧加密）：此处必须解密消费，
+    手机端 rx 计数才能与服务端后续下行帧（config 等）对齐。
+    """
+    ws.send(frame_encode(phone.make_auth()))
     msg = ws.recv(timeout=5)
-    data = json.loads(msg)
-    assert data["type"] == "auth_ack"
-    return data
+    inner = phone.decrypt(msg)
+    assert inner["type"] == "auth_ack"
+    assert inner["status"] == "OK"
+    return inner
 
 
 def authenticate_and_verify(ws, phone):
     """完成 auth 握手并验证 auth_ack 可被客户端解密，返回解密后的内容。"""
-    ack = authenticate(ws, phone)
-    inner = phone.decrypt(ack)
+    ws.send(frame_encode(phone.make_auth()))
+    msg = ws.recv(timeout=5)
+    inner = phone.decrypt(msg)
+    assert inner["type"] == "auth_ack"
     assert inner["status"] == "OK"
     assert "ts" in inner
     return inner
@@ -130,11 +163,9 @@ def consume_connect(queue, algo="xsalsa20"):
 
 
 def consume_initial_config(ws, phone):
-    """认证后服务器发送的加密 config，消费并解密验证。"""
+    """认证后服务器发送的加密 config，消费并整帧解密验证。"""
     msg = ws.recv(timeout=2)
-    data = json.loads(msg)
-    assert data["type"] == "data"
-    inner = phone.decrypt(data)
+    inner = phone.decrypt(msg)
     assert inner["type"] == "config"
     assert "mobile_max_records" in inner
 
@@ -200,19 +231,23 @@ def test_websocket_message_parsing(secure_server):
         consume_connect(queue)
         consume_initial_config(ws, phone)
 
-        ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "hello"})))
+        ws.send(phone.encrypt({"type": "preview", "text": "hello"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "hello"
 
-        ws.send(json.dumps(phone.encrypt({"type": "send", "text": "world"})))
+        ws.send(phone.encrypt({"type": "send", "text": "world"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "send"
         assert text == "world"
 
 
-def test_websocket_invalid_json(secure_server):
-    """无效 JSON 不应崩溃，但新协议下非 data 消息会断开连接"""
+def test_websocket_invalid_frame(secure_server):
+    """加密模式收到无法解密的帧 → 服务端关闭连接。
+
+    解密失败意味着两端密钥/seq 计数失步，留在同一连接上只会持续错位；
+    主动关闭让客户端走重连（新握手新建 Provider、seq 归零）恢复。
+    """
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
@@ -221,10 +256,10 @@ def test_websocket_invalid_json(secure_server):
         consume_connect(queue)
         consume_initial_config(ws, phone)
 
-        # 发送无效 JSON → 服务器应断开连接
-        ws.send("this is not json")
+        # 发送无法解密的字节（明文 msgpack 也会被当密文解密失败）
+        ws.send(b"this is not msgpack")
         with pytest.raises(Exception):
-            ws.recv(timeout=3)
+            ws.recv(timeout=3)  # 服务端主动关闭，而非静默丢弃
 
 
 def test_connection_lifecycle(secure_server):
@@ -247,7 +282,7 @@ def test_only_one_active_connection(secure_server):
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     ws1 = ws_connect(ws_url(host, port, sc))
-    ws1.send(json.dumps(phone.make_auth()))
+    ws1.send(frame_encode(phone.make_auth()))
     ws1.recv(timeout=5)  # auth_ack
     event, _ = queue.get(timeout=2)
     assert event == "connect"
@@ -255,7 +290,7 @@ def test_only_one_active_connection(secure_server):
 
     ws2 = ws_connect(ws_url(host, port, sc))
     # 新连接会替换旧连接
-    ws2.send(json.dumps(phone.make_auth()))
+    ws2.send(frame_encode(phone.make_auth()))
     ws2.recv(timeout=5)  # auth_ack
 
     events = []
@@ -280,9 +315,7 @@ def test_config_message_on_connect(secure_server):
 
         # 客户端应收到加密的 config 消息
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        inner = phone.decrypt(data)
+        inner = phone.decrypt(msg)
         assert inner["type"] == "config"
         assert "mobile_max_records" in inner
         assert isinstance(inner["mobile_max_records"], int)
@@ -302,9 +335,7 @@ def test_push_config_to_connected_phone(secure_server):
         assert result is True
 
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        inner = phone.decrypt(data)
+        inner = phone.decrypt(msg)
         assert inner["type"] == "config"
         assert inner["mobile_max_records"] == 25
 
@@ -323,9 +354,7 @@ def test_send_to_phone_custom_message(secure_server):
         assert result is True
 
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        inner = phone.decrypt(data)
+        inner = phone.decrypt(msg)
         assert inner["type"] == "notice"
         assert inner["text"] == "hello from server"
 
@@ -344,8 +373,7 @@ def test_request_client_rescan_notifies_and_closes(secure_server):
         assert request_client_rescan() is True
 
         # 手机端收到 reconnect 消息（加密信封，解密后为明文指令）
-        msg = json.loads(ws.recv(timeout=2))
-        assert msg["type"] == "data"
+        msg = ws.recv(timeout=2)
         inner = phone.decrypt(msg)
         assert inner["type"] == "reconnect"
         assert inner["reason"] == "config_changed"
@@ -395,11 +423,11 @@ def test_unknown_inner_type_tolerance(secure_server):
         consume_initial_config(ws, phone)
 
         # 发送加密的未知类型消息（服务器会记录警告但不断开）
-        ws.send(json.dumps(phone.encrypt({"type": "unknown_type", "text": "???"})))
+        ws.send(phone.encrypt({"type": "unknown_type", "text": "???"}))
         time.sleep(0.3)
 
         # 后续合法消息应正常工作
-        ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "still working"})))
+        ws.send(phone.encrypt({"type": "preview", "text": "still working"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "still working"
@@ -413,13 +441,12 @@ def test_full_e2e_flow(secure_server):
 
     with ws_connect(ws_url(host, port, sc)) as ws:
         # 1. 发送 auth
-        ws.send(json.dumps(phone.make_auth()))
+        ws.send(frame_encode(phone.make_auth()))
 
         # 2. 接收并解密 auth_ack（之前未覆盖的关键步骤）
         msg = ws.recv(timeout=5)
-        data = json.loads(msg)
-        assert data["type"] == "auth_ack"
-        ack_inner = phone.decrypt(data)
+        ack_inner = phone.decrypt(msg)
+        assert ack_inner["type"] == "auth_ack"
         assert ack_inner["status"] == "OK"
         assert "ts" in ack_inner
 
@@ -429,14 +456,12 @@ def test_full_e2e_flow(secure_server):
 
         # 4. 接收并解密 config
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        config_inner = phone.decrypt(data)
+        config_inner = phone.decrypt(msg)
         assert config_inner["type"] == "config"
         assert "mobile_max_records" in config_inner
 
         # 5. 发送加密消息 → 服务器接收
-        ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "hello e2e"})))
+        ws.send(phone.encrypt({"type": "preview", "text": "hello e2e"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "hello e2e"
@@ -444,9 +469,7 @@ def test_full_e2e_flow(secure_server):
         # 6. 服务器推送 → 客户端解密
         send_to_phone({"type": "notice", "text": "server push"})
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        notice_inner = phone.decrypt(data)
+        notice_inner = phone.decrypt(msg)
         assert notice_inner["type"] == "notice"
         assert notice_inner["text"] == "server push"
 
@@ -461,17 +484,12 @@ def test_auth_ack_decryption(secure_server):
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     with ws_connect(ws_url(host, port, sc)) as ws:
-        ws.send(json.dumps(phone.make_auth()))
+        ws.send(frame_encode(phone.make_auth()))
         msg = ws.recv(timeout=5)
-        data = json.loads(msg)
-        assert data["type"] == "auth_ack"
 
-        # 模拟 JS: handleAuthAck(data.data)
-        raw = base64.urlsafe_b64decode(data["data"] + "==")
-        nonce = raw[:Box.NONCE_SIZE]
-        ct = raw[Box.NONCE_SIZE:]
-        pt = phone._box.decrypt(ct, nonce)
-        inner = json.loads(pt)
+        # 模拟 JS handleAuthAck：整帧解密——seq 由 Provider 内部校验（首帧 seq=0）
+        inner = phone.decrypt(msg)
+        assert inner["type"] == "auth_ack"
         assert inner["status"] == "OK"
         assert isinstance(inner["ts"], int)
 
@@ -487,7 +505,7 @@ def test_reconnection_cycle(secure_server):
         consume_connect(queue)
         consume_initial_config(ws1, phone)
 
-        ws1.send(json.dumps(phone.encrypt({"type": "preview", "text": "first"})))
+        ws1.send(phone.encrypt({"type": "preview", "text": "first"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "first"
@@ -502,7 +520,7 @@ def test_reconnection_cycle(secure_server):
         consume_connect(queue)
         consume_initial_config(ws2, phone)
 
-        ws2.send(json.dumps(phone.encrypt({"type": "send", "text": "second"})))
+        ws2.send(phone.encrypt({"type": "send", "text": "second"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "send"
         assert text == "second"
@@ -522,9 +540,9 @@ def test_rapid_reconnect(secure_server):
             consume_connect(queue)
             consume_initial_config(ws, phone)
 
-            ws.send(json.dumps(phone.encrypt({
+            ws.send(phone.encrypt({
                 "type": "preview", "text": f"cycle {i}"
-            })))
+            }))
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "preview"
             assert text == f"cycle {i}"
@@ -644,7 +662,7 @@ def test_real_server_with_websocket_client():
             consume_initial_config(ws, phone)
 
             for orig_type, orig_text in test_msgs:
-                ws.send(json.dumps(phone.encrypt({"type": orig_type, "text": orig_text})))
+                ws.send(phone.encrypt({"type": orig_type, "text": orig_text}))
                 msg_type, text = queue.get(timeout=2)
                 assert msg_type == orig_type
                 assert text == orig_text
@@ -703,7 +721,7 @@ def test_server_restart_cycle():
         consume_connect(bridge.queue)
         consume_initial_config(ws, phone)
 
-        ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "after restart"})))
+        ws.send(phone.encrypt({"type": "preview", "text": "after restart"}))
         msg_type, text = bridge.queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "after restart"
@@ -735,7 +753,7 @@ def test_restart_server_with_different_host():
         consume_connect(bridge.queue)
         consume_initial_config(ws, phone)
 
-        ws.send(json.dumps(phone.encrypt({"type": "preview", "text": "after mode switch"})))
+        ws.send(phone.encrypt({"type": "preview", "text": "after mode switch"}))
         msg_type, text = bridge.queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "after mode switch"
@@ -773,9 +791,7 @@ def test_restart_server_preserves_bridge():
         assert result is True
 
         msg = ws.recv(timeout=2)
-        data = json.loads(msg)
-        assert data["type"] == "data"
-        inner = phone.decrypt(data)
+        inner = phone.decrypt(msg)
         assert inner["text"] == "post-restart"
 
     stop_server()
@@ -792,11 +808,12 @@ class TestConnectionPreemption:
     """
 
     def _assert_still_encrypted(self, ws, phone, value):
-        """推送配置并断言活动连接收到的仍是加密信封。"""
+        """推送配置并断言活动连接收到的仍是整帧加密的下行帧。"""
         assert push_config("mobile_max_records", value) is True
-        data = json.loads(ws.recv(timeout=2))
-        assert data["type"] == "data", f"活动连接被降级为明文: {data}"
-        assert phone.decrypt(data)["mobile_max_records"] == value
+        msg = ws.recv(timeout=2)
+        inner = phone.decrypt(msg)
+        assert inner["type"] == "config", f"活动连接被降级为明文: {inner}"
+        assert inner["mobile_max_records"] == value
 
     def test_silent_connection_does_not_downgrade_active(self, secure_server):
         """新连接建连后不发 auth，活动连接保持加密。"""
@@ -825,9 +842,9 @@ class TestConnectionPreemption:
             consume_initial_config(ws, phone)
 
             with ws_connect(ws_url(host, port, sc)) as intruder:
-                bogus = {"type": "auth", "algo": "xsalsa20", "data": "bogus"}
-                intruder.send(json.dumps(bogus))
-                ack = json.loads(intruder.recv(timeout=2))
+                bogus = {"type": "auth", "algo": "xsalsa20", "data": b"bogus"}
+                intruder.send(frame_encode(bogus))
+                ack = frame_decode(intruder.recv(timeout=2))
                 assert ack.get("rejected") is True
 
             time.sleep(0.3)
@@ -854,9 +871,10 @@ class TestConnectionPreemption:
                 consume_initial_config(ws_b, phone_b)
 
                 assert push_config("mobile_max_records", 99) is True
-                data = json.loads(ws_b.recv(timeout=2))
-                assert data["type"] == "data"
-                assert phone_b.decrypt(data)["mobile_max_records"] == 99
+                msg = ws_b.recv(timeout=2)
+                inner = phone_b.decrypt(msg)
+                assert inner["type"] == "config"
+                assert inner["mobile_max_records"] == 99
 
             with pytest.raises(Exception):
                 ws_a.recv(timeout=2)

@@ -19,6 +19,7 @@ from websockets.sync.client import connect as ws_connect
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import set_bridge, start_server, stop_server, set_secure_channel, get_secret_path
 from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.frame import decode as frame_decode, encode as frame_encode
 
 from conftest import get_test_port
 
@@ -111,7 +112,7 @@ class TestEncryptedPathGuard:
 
     def test_secret_subresources_200(self, enc_server):
         host, port, sc, _ = enc_server
-        for path in ("/sodium.js", "/crypto_providers.js", "/favicon.ico"):
+        for path in ("/sodium.js", "/msgpack.min.js", "/crypto_providers.js", "/favicon.ico"):
             status, _ = _get(host, port, f"/{sc.secret_path}{path}")
             assert status == 200, f"{path} 应返回 200"
 
@@ -150,7 +151,7 @@ class TestPlainPathGuard:
 
     def test_known_resources_200(self, plain_server):
         host, port, sc, _ = plain_server
-        for path in ("/sodium.js", "/crypto_providers.js", "/favicon.ico"):
+        for path in ("/sodium.js", "/msgpack.min.js", "/crypto_providers.js", "/favicon.ico"):
             status, _ = _get(host, port, path)
             assert status == 200, f"{path} 应返回 200"
 
@@ -215,3 +216,67 @@ def test_get_secret_path_tracks_latest_channel():
         assert get_secret_path() == ""
     finally:
         set_secure_channel(None)
+
+
+# ---------- WS 消息类型分派（wire-protocol.md §6 / §7 / §10） ----------
+class TestMessageDispatch:
+    """明文模式下消息帧的类型分派：key / mouse 转发，未知 type 回 error。"""
+
+    @staticmethod
+    def _drain_connect(queue):
+        """连接建立时会先入队一个 connect 事件，测试前消费掉。"""
+        msg_type, _ = queue.get(timeout=2)
+        assert msg_type == "connect"
+
+    @staticmethod
+    def _recv_type(ws, want_type, timeout=2.0):
+        """跳过 config 等自动下发帧，取到指定 type 的帧。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            inner = frame_decode(ws.recv(timeout=max(0.1, deadline - time.time())))
+            if inner.get("type") == want_type:
+                return inner
+        raise AssertionError(f"未收到 {want_type} 帧")
+
+    def test_key_frame_forwarded(self, plain_server):
+        """key 帧的 keys 原样转发给事件桥，由 PC 端 send_keys 执行。"""
+        host, port, sc, bridge = plain_server
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            self._drain_connect(bridge.queue)
+            ws.send(frame_encode({"type": "key", "keys": "ctrl+z"}))
+            event_type, payload = bridge.queue.get(timeout=2)
+            assert event_type == "key"
+            assert payload == "ctrl+z"
+
+    def test_mouse_click_frame_forwarded(self, plain_server):
+        """mouse 帧整帧转发，PC 端按 a 决定动作。"""
+        host, port, sc, bridge = plain_server
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            self._drain_connect(bridge.queue)
+            ws.send(frame_encode({"type": "mouse", "a": "click", "btn": "right"}))
+            event_type, payload = bridge.queue.get(timeout=2)
+            assert event_type == "mouse"
+            assert payload == {"type": "mouse", "a": "click", "btn": "right"}
+
+    def test_mouse_move_dx_dy_preserved(self, plain_server):
+        """move 帧的 dx/dy 是整数像素，负值必须原样保留（方向语义）。"""
+        host, port, sc, bridge = plain_server
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            self._drain_connect(bridge.queue)
+            ws.send(frame_encode({"type": "mouse", "a": "move", "dx": 12, "dy": -3}))
+            event_type, payload = bridge.queue.get(timeout=2)
+            assert event_type == "mouse"
+            assert payload["dx"] == 12
+            assert payload["dy"] == -3
+
+    def test_unknown_type_replies_error(self, plain_server):
+        """wire-protocol.md §10：type 不在分派表内 → 丢弃并回 error(malformed)。"""
+        host, port, sc, bridge = plain_server
+        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+            self._drain_connect(bridge.queue)
+            ws.send(frame_encode({"type": "no_such_type"}))
+            inner = self._recv_type(ws, "error")
+            assert inner["code"] == "malformed"
+            assert "no_such_type" in inner["msg"]
+            # 未知帧不产生任何事件
+            assert bridge.queue.empty()
