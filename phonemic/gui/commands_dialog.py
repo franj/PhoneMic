@@ -5,6 +5,7 @@
 """
 
 import logging
+import re
 from typing import Optional, Dict, Any
 from uuid import uuid4
 
@@ -56,6 +57,7 @@ class CommandEditDialog(QDialog):
         self.match_type_combo = QComboBox()
         self.match_type_combo.addItem(self.i18n.tr("commands.match_exact"), "exact")
         self.match_type_combo.addItem(self.i18n.tr("commands.match_prefix"), "prefix")
+        self.match_type_combo.addItem(self.i18n.tr("commands.match_regex"), "regex")
         help_match_type = QLabel(self.i18n.tr("commands.match_type_help"))
         help_match_type.setStyleSheet("color: gray; font-size: 11px;")
         form_layout.addRow(self.i18n.tr("commands.match_type") + ":", self.match_type_combo)
@@ -146,6 +148,16 @@ class CommandEditDialog(QDialog):
                                 self.i18n.tr("commands.error_pattern_empty"))
             self.match_pattern_edit.setFocus()
             return
+
+        # 正则匹配类型：提前校验正则是否能编译，避免保存后静默失效
+        if self.match_type_combo.currentData() == "regex":
+            try:
+                re.compile(match_pattern)
+            except re.error as e:
+                QMessageBox.warning(self, self.i18n.tr("error"),
+                                    self.i18n.tr("commands.error_regex_invalid").format(e))
+                self.match_pattern_edit.setFocus()
+                return
 
         action_params = self.action_param_edit.text().strip()
         if not action_params:
@@ -256,7 +268,11 @@ class CommandsDialog(QDialog):
             self.table.item(row, 1).setData(Qt.UserRole, cmd.id)
 
             # 匹配类型
-            match_type_display = self.i18n.tr("commands.match_exact") if cmd.matchType == "exact" else self.i18n.tr("commands.match_prefix")
+            match_type_display = {
+                "exact": self.i18n.tr("commands.match_exact"),
+                "prefix": self.i18n.tr("commands.match_prefix"),
+                "regex": self.i18n.tr("commands.match_regex"),
+            }.get(cmd.matchType, cmd.matchType)
             self._set_item(row, 2, match_type_display, center=True)
 
             # 匹配模式

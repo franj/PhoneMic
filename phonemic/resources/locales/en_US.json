@@ -200,7 +200,8 @@
     "match_type": "Match Type",
     "match_exact": "Exact Match",
     "match_prefix": "Prefix Match",
-    "match_type_help": "Exact: text must be identical; Prefix: text starts with pattern",
+    "match_regex": "Regex Match",
+    "match_type_help": "Exact: text must be identical; Prefix: text starts with pattern; Regex: search the whole text with a regular expression (case-insensitive), reference capture groups with {0}/{1} in the action params",
     "match_pattern": "Match Pattern",
     "match_pattern_placeholder": "e.g., Clear or Please log ",
     "match_pattern_help": "Trigger text (watch trailing spaces for prefix)",
@@ -215,7 +216,7 @@
     "enabled_help": "Uncheck to disable this command temporarily",
     "example_btn": "📋 Examples",
     "example_title": "Action Parameter Examples",
-    "example_content": "[Key Examples]\n- Single key: enter, tab, space, backspace, delete\n- Combination: ctrl+c, shift+alt+a, ctrl+shift+esc\n- Sequence (select all then delete): ctrl+a, delete\n- Sequence (copy then paste): ctrl+c, ctrl+v\n\n[Text Examples]\nWrap text in single or double quotes:\n- Type and press enter: \"hello\", enter\n- Type current time: \"now: {time}\"\n- Type today's date: \"date: {date}\"\n\nTo type quote characters, wrap with the other quote type:\n- Type two double quotes and move cursor left: '\"\"', left\n- Type two single quotes and move cursor left: \"''\", left\n\nInside double quotes, escape \" with \\\":\n- \"a\\\"b\" -> types a\"b\n- Or just use single quotes: 'a\"b'\n\n[Run Program Examples]\n- Simple program: calc\n- With argument: python D:\\script.py {content}\n- With placeholder: echo \"User said: {all_text}\" >> log.txt\n\n[Custom Working Directory]\nAdd {cwd:\"absolute_path\"} at the beginning:\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n[Placeholders]\n{time} -> current HH:MM:SS (e.g. 14:30:25)\n{date} -> today's date (e.g. 2026-08-08)\n{content} -> remaining text after prefix match\n{prefix} -> the matched pattern itself\n{all_text} -> full text sent from phone",
+    "example_content": "[Key Examples]\n- Single key: enter, tab, space, backspace, delete\n- Combination: ctrl+c, shift+alt+a, ctrl+shift+esc\n- Sequence (select all then delete): ctrl+a, delete\n- Sequence (copy then paste): ctrl+c, ctrl+v\n\n[Text Examples]\nWrap text in single or double quotes:\n- Type and press enter: \"hello\", enter\n- Type current time: \"now: {time}\"\n- Type today's date: \"date: {date}\"\n\nTo type quote characters, wrap with the other quote type:\n- Type two double quotes and move cursor left: '\"\"', left\n- Type two single quotes and move cursor left: \"''\", left\n\nInside double quotes, escape \" with \\\":\n- \"a\\\"b\" -> types a\"b\n- Or just use single quotes: 'a\"b'\n\n[Run Program Examples]\n- Simple program: calc\n- With argument: python D:\\script.py {content}\n- With placeholder: echo \"User said: {all_text}\" >> log.txt\n\n[Custom Working Directory]\nAdd {cwd:\"absolute_path\"} at the beginning:\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n[Placeholders]\n{time} -> current HH:MM:SS (e.g. 14:30:25)\n{date} -> today's date (e.g. 2026-08-08)\n{content} -> remaining text after prefix match\n{prefix} -> the matched pattern itself\n{all_text} -> full text sent from phone\n\n[Regex Match]\nWhen match type is Regex, the pattern is searched anywhere in the text (case-insensitive):\n- In action params, {0} is the whole match, {1}/{2} are capture groups 1/2 (the backslash-digit form also works)\n- Example: pattern ([0-9]+) yuan, param echo amount is {1} yuan\n- Missing or out-of-range group numbers are kept as-is",
     "column_enabled": "Enabled",
     "column_name": "Name",
     "column_match_type": "Match Type",
@@ -240,6 +241,7 @@
     "confirm_delete_msg": "Are you sure you want to delete this command?",
     "error_name_empty": "Name cannot be empty",
     "error_pattern_empty": "Match pattern cannot be empty",
+    "error_regex_invalid": "Invalid regular expression: {}",
     "error_param_empty": "Action parameters cannot be empty"
   },
   "error": {

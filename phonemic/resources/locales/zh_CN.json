@@ -201,7 +201,8 @@
     "match_type": "匹配类型",
     "match_exact": "完全匹配",
     "match_prefix": "前缀匹配",
-    "match_type_help": "完全匹配：文字必须完全相同；前缀匹配：文字以该模式开头",
+    "match_regex": "正则匹配",
+    "match_type_help": "完全匹配：文字必须完全相同；前缀匹配：文字以该模式开头；正则匹配：用正则表达式在整句中搜索（不区分大小写），可在动作参数里用 {0}/{1} 引用捕获组",
     "match_pattern": "匹配模式",
     "match_pattern_placeholder": "例如：清空 或 请帮我记录 ",
     "match_pattern_help": "触发命令的文本（前缀匹配注意末尾空格）",
@@ -216,7 +217,7 @@
     "enabled_help": "勾选后命令生效",
     "example_btn": "📋 示例",
     "example_title": "动作参数编写示例",
-    "example_content": "【按键示例】\n- 单个按键：enter, tab, space, backspace, delete\n- 组合键：ctrl+c, shift+alt+a, ctrl+shift+esc\n- 序列（先全选后删除）：ctrl+a, delete\n- 序列（复制后粘贴）：ctrl+c, ctrl+v\n\n【文本示例】\n用双引号或单引号包裹要输入的文本：\n- 输入并回车：\"你好\", enter\n- 输入当前时间：\"现在：{time}\"\n- 输入今天日期：\"日期：{date}\"\n\n如果要输入引号本身，用另一种引号包裹即可：\n- 输入两个双引号并左移光标：'\"\"', left\n- 输入两个单引号并左移光标：\"''\", left\n\n双引号内需要双引号时，用 \\\" 转义：\n- \"a\\\"b\" → 输入 a\"b\n- 也可以直接用单引号：'a\"b'\n\n【运行程序示例】\n- 普通程序：calc\n- 带参数：python D:\\script.py {content}\n- 带占位符：echo \"用户说了：{all_text}\" >> log.txt\n\n【自定义工作目录】\n在命令行最前面加 {cwd:\"绝对路径\"}：\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n【占位符说明】\n{time} → 当前时分秒（如 14:30:25）\n{date} → 今天日期（如 2026-08-08）\n{content} → 前缀匹配的剩余文本\n{prefix} → 匹配模式本身\n{all_text} → 手机发送的完整文本",
+    "example_content": "【按键示例】\n- 单个按键：enter, tab, space, backspace, delete\n- 组合键：ctrl+c, shift+alt+a, ctrl+shift+esc\n- 序列（先全选后删除）：ctrl+a, delete\n- 序列（复制后粘贴）：ctrl+c, ctrl+v\n\n【文本示例】\n用双引号或单引号包裹要输入的文本：\n- 输入并回车：\"你好\", enter\n- 输入当前时间：\"现在：{time}\"\n- 输入今天日期：\"日期：{date}\"\n\n如果要输入引号本身，用另一种引号包裹即可：\n- 输入两个双引号并左移光标：'\"\"', left\n- 输入两个单引号并左移光标：\"''\", left\n\n双引号内需要双引号时，用 \\\" 转义：\n- \"a\\\"b\" → 输入 a\"b\n- 也可以直接用单引号：'a\"b'\n\n【运行程序示例】\n- 普通程序：calc\n- 带参数：python D:\\script.py {content}\n- 带占位符：echo \"用户说了：{all_text}\" >> log.txt\n\n【自定义工作目录】\n在命令行最前面加 {cwd:\"绝对路径\"}：\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n【占位符说明】\n{time} → 当前时分秒（如 14:30:25）\n{date} → 今天日期（如 2026-08-08）\n{content} → 前缀匹配的剩余文本\n{prefix} → 匹配模式本身\n{all_text} → 手机发送的完整文本\n\n【正则匹配】\n匹配类型选「正则匹配」时，用正则表达式在整句搜索（不区分大小写）：\n- 参数里 {0} 表示整段匹配，{1}/{2} 表示第 1/2 个括号捕获的内容（反斜杠加数字的写法也同样支持）\n- 例：模式为 ([0-9]+) 元，参数写 echo 金额是 {1} 元\n- 没有或越界的组号会原样保留",
     "column_enabled": "启用",
     "column_name": "名称",
     "column_match_type": "匹配类型",
@@ -241,6 +242,7 @@
     "confirm_delete_msg": "确定要删除这条命令吗？",
     "error_name_empty": "名称不能为空",
     "error_pattern_empty": "匹配模式不能为空",
+    "error_regex_invalid": "正则表达式无效：{}",
     "error_param_empty": "动作参数不能为空"
   },
   "error": {

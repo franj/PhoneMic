@@ -47,7 +47,7 @@ def sample_commands():
 def test_match_command_exact(sample_commands):
     result = match_command("hello", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "1"
     assert prefix == "hello"
     assert content == ""
@@ -56,7 +56,7 @@ def test_match_command_exact(sample_commands):
 def test_match_command_prefix(sample_commands):
     result = match_command("calc 2+2", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "2"
     assert prefix == "calc "
     assert content == "2+2"
@@ -95,7 +95,7 @@ def test_match_command_exact_case_insensitive_upper(sample_commands):
     """完全匹配：输入大写，模式小写"""
     result = match_command("HELLO", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "1"
     assert content == ""
 
@@ -104,7 +104,7 @@ def test_match_command_exact_case_insensitive_mixed(sample_commands):
     """完全匹配：混合大小写"""
     result = match_command("HeLLo", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "1"
 
 
@@ -112,7 +112,7 @@ def test_match_command_prefix_case_insensitive(sample_commands):
     """前缀匹配：输入大写，模式小写"""
     result = match_command("CALC 2+2", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "2"
     assert content == "2+2"
 
@@ -121,7 +121,7 @@ def test_match_command_prefix_case_insensitive_mixed(sample_commands):
     """前缀匹配：混合大小写"""
     result = match_command("Calc 2+2", sample_commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "2"
     assert content == "2+2"
 
@@ -136,7 +136,7 @@ def test_match_command_prefix_pattern_upper():
     ]
     result = match_command("open notepad", commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert cmd.id == "u1"
     assert content == "notepad"
 
@@ -163,7 +163,7 @@ def test_match_command_prefix_chinese_unchanged():
     ]
     result = match_command("打开 记事本", commands)
     assert result is not None
-    cmd, prefix, content = result
+    cmd, prefix, content, groups = result
     assert content == "记事本"
 
 
@@ -495,3 +495,94 @@ def test_execute_command_without_cwd_uses_default_cwd(mock_get_workdir, mock_pop
 #    # 移除 {cwd} 后，参数应为 ['python', 'script.py']
 #    assert args[0] == ['python', 'script.py']
 #    assert kwargs.get("cwd") == "C:\\work"
+
+
+# ---------- match_command 测试：正则匹配 ----------
+def test_match_command_regex_groups():
+    """正则匹配：捕获组通过 groups 返回，prefix/content 留空"""
+    commands = [
+        VoiceCommand(
+            id="r1", name="amount", matchType="regex",
+            matchPattern=r"(\d+) 元", actionType="exec",
+            actionParams="echo 金额是 {1} 元", enabled=True,
+        ),
+    ]
+    result = match_command("我付了 42 元", commands)
+    assert result is not None
+    cmd, prefix, content, groups = result
+    assert cmd.id == "r1"
+    # groups[0] 为整段匹配，groups[1] 为第一个捕获组
+    assert groups == ["42 元", "42"]
+    assert prefix == ""
+    assert content == ""
+
+
+def test_match_command_regex_no_group():
+    """正则无捕获组时 groups 仅有整段匹配（group0）"""
+    commands = [
+        VoiceCommand(
+            id="r0", name="", matchType="regex", matchPattern=r"\d+",
+            actionType="exec", actionParams="echo {0}", enabled=True,
+        ),
+    ]
+    result = match_command("编号 7", commands)
+    assert result is not None
+    cmd, prefix, content, groups = result
+    assert groups == ["7"]
+
+
+def test_match_command_regex_case_insensitive():
+    """正则匹配不区分大小写"""
+    commands = [
+        VoiceCommand(
+            id="rc", name="", matchType="regex", matchPattern=r"hello (\w+)",
+            actionType="exec", actionParams="echo {1}", enabled=True,
+        ),
+    ]
+    result = match_command("HELLO World", commands)
+    assert result is not None
+    cmd, _, _, groups = result
+    assert groups[1] == "World"
+
+
+def test_match_command_regex_invalid_skipped(caplog):
+    """无效正则的命令被跳过（告警），不影响后续有效正则命令匹配"""
+    commands = [
+        VoiceCommand(id="bad", name="bad", matchType="regex", matchPattern="(unclosed",
+                     actionType="exec", actionParams="echo {1}", enabled=True),
+        VoiceCommand(id="good", name="good", matchType="regex", matchPattern=r"(\d+)",
+                     actionType="exec", actionParams="echo {1}", enabled=True),
+    ]
+    with caplog.at_level(logging.WARNING):
+        result = match_command("123", commands)
+    assert result is not None
+    assert result[0].id == "good"
+    assert "正则无效" in caplog.text
+
+
+@patch("phonemic.utils.command_processor.subprocess.Popen")
+def test_execute_command_regex_with_groups(mock_popen):
+    """正则命令：{1} 被捕获组替换后执行（先拆分再替换，无注入）"""
+    cmd = VoiceCommand(
+        id="r3", name="", matchType="regex", matchPattern=r"(\d+) 元",
+        actionType="exec", actionParams="echo {1}", enabled=True,
+    )
+    execute_command(cmd, all_text="付 42 元", prefix="", content="", groups=["付 42 元", "42"])
+    mock_popen.assert_called_once()
+    args, _ = mock_popen.call_args
+    assert args[0] == ["echo", "42"]
+
+
+@patch("phonemic.utils.command_processor.subprocess.Popen")
+def test_execute_command_regex_backslash_kept(mock_popen):
+    """正则命令：\\1/\\2 反斜杠写法不再支持，按原样保留"""
+    cmd = VoiceCommand(
+        id="r4", name="", matchType="regex", matchPattern=r"i am (\w+), live in (\w+)",
+        actionType="exec", actionParams=r"echo \2 来自 \1", enabled=True,
+    )
+    execute_command(cmd, all_text="i am Tom, live in Beijing", prefix="", content="",
+                    groups=["i am Tom, live in Beijing", "Tom", "Beijing"])
+    mock_popen.assert_called_once()
+    args, _ = mock_popen.call_args
+    # 先按空白切 token、再逐 token 套模板，反斜杠写法原样保留
+    assert args[0] == ["echo", "\\2", "来自", "\\1"]

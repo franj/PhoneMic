@@ -17,7 +17,7 @@ from .commands_manager import VoiceCommand, CommandsManager
 
 logger = logging.getLogger(__name__)
 
-def match_command(text: str, commands: List[VoiceCommand]) -> Optional[Tuple[VoiceCommand, str, str]]:
+def match_command(text: str, commands: List[VoiceCommand]) -> Optional[Tuple[VoiceCommand, str, str, List[str]]]:
     text_lower = text.lower()
     for cmd in commands:
         if not cmd.enabled:
@@ -27,10 +27,21 @@ def match_command(text: str, commands: List[VoiceCommand]) -> Optional[Tuple[Voi
         pattern_lower = pattern.lower()
         if match_type == "exact":
             if text_lower == pattern_lower:
-                return (cmd, text, "")
+                return (cmd, text, "", [])
         elif match_type == "prefix":
             if text_lower.startswith(pattern_lower):
-                return (cmd, pattern, text[len(pattern):])
+                return (cmd, pattern, text[len(pattern):], [])
+        elif match_type == "regex":
+            try:
+                m = re.search(pattern, text, re.IGNORECASE)
+            except re.error:
+                logger.warning("正则无效，跳过命令 %s: %s", cmd.name, pattern)
+                continue
+            if not m:
+                continue
+            # groups[0] 为整段匹配，groups[1..] 为各捕获组
+            groups = [m.group(i) or "" for i in range(len(m.groups()) + 1)]
+            return (cmd, "", "", groups)
     return None
 
 def extract_cwd_from_command_str(command_str: str) -> Tuple[str, Optional[Path]]:
@@ -85,7 +96,8 @@ def extract_cwd_from_tokens(tokens: List[str]) -> Tuple[List[str], Optional[Path
                 return tokens, None
     return tokens, None
 
-def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str) -> None:
+def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str,
+                    groups: Optional[List[str]] = None) -> None:
     action_type = cmd.actionType
     params = cmd.actionParams
     try:
@@ -99,7 +111,7 @@ def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str)
                 if seg_type == "key":
                     send_keys(seg_value)
                 elif seg_type == "text":
-                    text = apply_template(seg_value, all_text=all_text, prefix=prefix, content=content)
+                    text = apply_template(seg_value, all_text=all_text, prefix=prefix, content=content, groups=groups)
                     flash_insert(text)
                 time.sleep(0.05)
         elif action_type == "exec":
@@ -117,7 +129,7 @@ def execute_command(cmd: VoiceCommand, all_text: str, prefix: str, content: str)
 
             # 3. 对每个 token 独立替换占位符
             formatted_tokens = [
-                apply_template(token, all_text=all_text, prefix=prefix, content=content)
+                apply_template(token, all_text=all_text, prefix=prefix, content=content, groups=groups)
                 for token in tokens
             ]
 
@@ -165,7 +177,7 @@ class CommandInterceptor:
         result = match_command(text, self._cached_commands)
         if result is None:
             return False
-        cmd, prefix, content = result
+        cmd, prefix, content, groups = result
         logging.info(f"[CommandInterceptor] Match: id={cmd.id}, name={cmd.name}, text={text}")
-        execute_command(cmd, text, prefix, content)
+        execute_command(cmd, text, prefix, content, groups)
         return True

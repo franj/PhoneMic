@@ -12,7 +12,7 @@ from phonemic.utils.paths import get_config_dir
 class VoiceCommand:
     id: str
     name: str
-    matchType: Literal["exact", "prefix"]
+    matchType: Literal["exact", "prefix", "regex"]
     matchPattern: str
     actionType: Literal["key", "exec"]
     actionParams: str

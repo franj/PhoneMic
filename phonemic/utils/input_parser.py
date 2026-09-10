@@ -6,8 +6,9 @@
 - apply_template: 统一的占位符替换，exec 和文本输入共用。
 """
 import logging
+import re
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pyparsing as pp
 
@@ -98,7 +99,8 @@ def parse_exec_args(s: str) -> List[str]:
 
 # ---------- 模板替换 (exec 和文本输入共用) ----------
 
-def apply_template(text: str, all_text: str = "", prefix: str = "", content: str = "") -> str:
+def apply_template(text: str, all_text: str = "", prefix: str = "", content: str = "",
+                   groups: Optional[List[str]] = None) -> str:
     """
     统一占位符替换。全部用 str.replace，不用 str.format。
 
@@ -108,6 +110,8 @@ def apply_template(text: str, all_text: str = "", prefix: str = "", content: str
     - {content}  → 传入的 content
     - {prefix}   → 传入的 prefix
     - {all_text} → 传入的 all_text
+    - {0}/{1}/   → 正则匹配的各捕获组（{0} 为整段匹配）
+    - 越界或无法识别的占位符原样保留
 
     不认识的 {xxx} 原样保留。
     """
@@ -117,4 +121,9 @@ def apply_template(text: str, all_text: str = "", prefix: str = "", content: str
     text = text.replace('{content}', content)
     text = text.replace('{prefix}', prefix)
     text = text.replace('{all_text}', all_text)
+    if groups:
+        # 正则捕获组：仅支持 {N} 写法（{0} 为整段匹配，越界原样保留）
+        text = re.sub(r'\{(\d+)\}',
+                      lambda m: groups[int(m.group(1))] if int(m.group(1)) < len(groups) else m.group(0),
+                      text)
     return text

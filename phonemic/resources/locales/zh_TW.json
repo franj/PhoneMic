@@ -201,7 +201,8 @@
     "match_type": "比對類型",
     "match_exact": "完全比對",
     "match_prefix": "前置比對",
-    "match_type_help": "完全比對：文字必須完全相同；前置比對：文字以此模式開頭",
+    "match_regex": "正則比對",
+    "match_type_help": "完全比對：文字必須完全相同；前置比對：文字以此模式開頭；正則比對：用正則表達式在整句搜尋（不區分大小寫），可在動作參數裡用 {0}/{1} 引用捕獲組",
     "match_pattern": "比對模式",
     "match_pattern_placeholder": "例如：清空 或 請幫我記錄 ",
     "match_pattern_help": "觸發命令的文字（前置比對請注意結尾空格）",
@@ -216,7 +217,7 @@
     "enabled_help": "勾選後命令生效",
     "example_btn": "📋 範例",
     "example_title": "動作參數編寫範例",
-    "example_content": "【按鍵範例】\n- 單一按鍵：enter, tab, space, backspace, delete\n- 組合鍵：ctrl+c, shift+alt+a, ctrl+shift+esc\n- 序列（先全選後刪除）：ctrl+a, delete\n- 序列（複製後貼上）：ctrl+c, ctrl+v\n\n【文字範例】\n用雙引號或單引號包裹要輸入的文字：\n- 輸入並按Enter：\"你好\", enter\n- 輸入目前時間：\"現在：{time}\"\n- 輸入今天日期：\"日期：{date}\"\n\n如果要輸入引號本身，用另一種引號包裹即可：\n- 輸入兩個雙引號並左移游標：'\"\"', left\n- 輸入兩個單引號並左移游標：\"''\", left\n\n雙引號內需要雙引號時，用 \\\" 轉義：\n- \"a\\\"b\" → 輸入 a\"b\n- 也可以直接用單引號：'a\"b'\n\n【執行程式範例】\n- 一般程式：calc\n- 帶參數：python D:\\script.py {content}\n- 帶佔位符：echo \"使用者說了：{all_text}\" >> log.txt\n\n【自訂工作目錄】\n在命令列最前面加 {cwd:\"絕對路徑\"}：\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n【佔位符說明】\n{time} → 目前時分秒（如 14:30:25）\n{date} → 今天日期（如 2026-08-08）\n{content} → 前置比對的剩餘文字\n{prefix} → 比對模式本身\n{all_text} → 手機傳送的完整文字",
+    "example_content": "【按鍵範例】\n- 單一按鍵：enter, tab, space, backspace, delete\n- 組合鍵：ctrl+c, shift+alt+a, ctrl+shift+esc\n- 序列（先全選後刪除）：ctrl+a, delete\n- 序列（複製後貼上）：ctrl+c, ctrl+v\n\n【文字範例】\n用雙引號或單引號包裹要輸入的文字：\n- 輸入並按Enter：\"你好\", enter\n- 輸入目前時間：\"現在：{time}\"\n- 輸入今天日期：\"日期：{date}\"\n\n如果要輸入引號本身，用另一種引號包裹即可：\n- 輸入兩個雙引號並左移游標：'\"\"', left\n- 輸入兩個單引號並左移游標：\"''\", left\n\n雙引號內需要雙引號時，用 \\\" 轉義：\n- \"a\\\"b\" → 輸入 a\"b\n- 也可以直接用單引號：'a\"b'\n\n【執行程式範例】\n- 一般程式：calc\n- 帶參數：python D:\\script.py {content}\n- 帶佔位符：echo \"使用者說了：{all_text}\" >> log.txt\n\n【自訂工作目錄】\n在命令列最前面加 {cwd:\"絕對路徑\"}：\n  {cwd:\"D:\\my_work\"} python run.py\n  {cwd:\"~/Desktop\"} ./script.sh\n\n【佔位符說明】\n{time} → 目前時分秒（如 14:30:25）\n{date} → 今天日期（如 2026-08-08）\n{content} → 前置比對的剩餘文字\n{prefix} → 比對模式本身\n{all_text} → 手機傳送的完整文字\n\n【正則比對】\n比對類型選「正則比對」時，用正則表達式在整句搜尋（不區分大小寫）：\n- 參數裡 {0} 表示整段比對，{1}/{2} 表示第 1/2 個括號捕獲的內容（反斜槓加數字的寫法也同樣支援）\n- 例：模式為 ([0-9]+) 元，參數寫 echo 金額是 {1} 元\n- 沒有或越界的分組號會原樣保留",
     "column_enabled": "啟用",
     "column_name": "名稱",
     "column_match_type": "比對類型",
@@ -241,6 +242,7 @@
     "confirm_delete_msg": "確定要刪除這條命令嗎？",
     "error_name_empty": "名稱不可為空白",
     "error_pattern_empty": "比對模式不可為空白",
+    "error_regex_invalid": "正則表達式無效：{}",
     "error_param_empty": "動作參數不可為空白"
   },
   "error": {

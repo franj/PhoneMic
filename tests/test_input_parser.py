@@ -248,3 +248,23 @@ class TestApplyTemplate:
         assert "内容：测试" in result
         assert "时间：" in result
         assert "{time}" not in result
+
+    def test_groups_brace_placeholder(self):
+        """{0}/{1} 被正则捕获组替换"""
+        result = apply_template("a={0} b={1}", groups=["whole", "g1"])
+        assert result == "a=whole b=g1"
+
+    def test_groups_backslash_placeholder_kept(self):
+        """\\1/\\2 反斜杠写法不再支持，按原样保留"""
+        result = apply_template(r"x=\1 y=\2", groups=["whole", "g1", "g2"])
+        assert result == r"x=\1 y=\2"
+
+    def test_groups_out_of_range_kept(self):
+        """越界组号原样保留，不报错"""
+        result = apply_template("a={1} b={5}", groups=["whole", "g1"])
+        assert result == "a=g1 b={5}"
+
+    def test_groups_none_no_change(self):
+        """groups 为 None（非正则命令）时 {1} 原样保留"""
+        result = apply_template("a={1}", content="c")
+        assert result == "a={1}"
