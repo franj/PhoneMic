@@ -140,10 +140,6 @@
     "panel_btn_drag": "Drag",
     "panel_btn_wheel_up": "Wheel↑",
     "panel_btn_wheel_down": "Wheel↓",
-    "panel_kb_edit": "Edit",
-    "panel_kb_nav": "Navigate",
-    "panel_kb_sys": "System",
-    "panel_btn_clear_all": "Clear",
     "panel_file_image": "Image",
     "panel_file_image_hint": "Copy to PC clipboard",
 

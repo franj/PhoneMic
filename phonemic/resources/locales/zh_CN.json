@@ -141,10 +141,6 @@
     "panel_btn_drag": "拖拽",
     "panel_btn_wheel_up": "滚↑",
     "panel_btn_wheel_down": "滚↓",
-    "panel_kb_edit": "编辑",
-    "panel_kb_nav": "导航",
-    "panel_kb_sys": "系统",
-    "panel_btn_clear_all": "清空",
     "panel_file_image": "图片",
     "panel_file_image_hint": "复制到电脑剪贴板",
 
