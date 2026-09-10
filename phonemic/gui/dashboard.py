@@ -73,6 +73,8 @@ class Dashboard(QMainWindow):
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
+        # 上屏方式可能被偏好设置 / 托盘菜单改动，同步本菜单勾选状态
+        self.sm.connect_changed("text_input_mode", self._on_input_mode_setting_changed)
 
     def set_restart_network_callback(self, callback):
         """设置切换网络的回调函数"""
@@ -228,6 +230,22 @@ class Dashboard(QMainWindow):
         self.update_connection_status(self.connected)
         self._sync_menu_checks()
 
+    def _on_input_mode_clicked(self, mode: str) -> None:
+        """点击上屏方式菜单项（"paste" 剪贴板 / "type" 模拟键盘），立即持久化生效。"""
+        if mode != self.sm.get("text_input_mode", "paste"):
+            self.sm.set("text_input_mode", mode)
+        self._sync_input_checks()
+
+    def _on_input_mode_setting_changed(self, _mode) -> None:
+        """配置变更回调：偏好设置 / 托盘菜单改动后同步勾选状态。"""
+        self._sync_input_checks()
+
+    def _sync_input_checks(self) -> None:
+        """根据当前配置同步上屏方式菜单的勾选状态。"""
+        mode = self.sm.get("text_input_mode", "paste")
+        self.act_input_paste.setChecked(mode == "paste")
+        self.act_input_type.setChecked(mode == "type")
+
     def on_switch_completed(self) -> None:
         """模式切换完成（成功或失败），恢复菜单可用状态。"""
         self._switching = False
@@ -279,6 +297,7 @@ class Dashboard(QMainWindow):
 
         program_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_program"))
         network_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_network"))
+        input_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_input_mode"))
         help_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_help"))
 
         # 偏好设置
@@ -346,8 +365,26 @@ class Dashboard(QMainWindow):
         self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
         network_menu.addAction(self.switch_network_action)
 
+        # 上屏方式菜单 - 与偏好设置面板中的「上屏方式」等价，作为快速配置入口。
+        # 与「网络」菜单保持一致：用互斥组，Qt 会画成单选圆点。
+        input_group = QActionGroup(self)
+        input_group.setExclusive(True)
+
+        self.act_input_paste = QAction(self.i18n.tr("dashboard.input_clipboard"), self)
+        self.act_input_paste.setCheckable(True)
+        self.act_input_paste.triggered.connect(lambda: self._on_input_mode_clicked("paste"))
+        input_group.addAction(self.act_input_paste)
+        input_menu.addAction(self.act_input_paste)
+
+        self.act_input_type = QAction(self.i18n.tr("dashboard.input_type"), self)
+        self.act_input_type.setCheckable(True)
+        self.act_input_type.triggered.connect(lambda: self._on_input_mode_clicked("type"))
+        input_group.addAction(self.act_input_type)
+        input_menu.addAction(self.act_input_type)
+
         # 初始化勾选状态（包括 CF 模式下 none 强制变为加密的显示）
         self._sync_menu_checks()
+        self._sync_input_checks()
 
         # 帮助菜单
         help_action = QAction(self.i18n.tr("dashboard.menu_help_guide"), self)

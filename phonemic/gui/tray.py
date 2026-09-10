@@ -2,12 +2,13 @@ import logging
 import os
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QActionGroup
 from PySide6.QtCore import QObject, Slot, Qt
 from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.utils.i18n import I18n
+from phonemic.utils.settings_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,12 @@ class SystemTray(QObject):
         self.connected = False
         self.tray_icon = None
         self.i18n = I18n.instance()
+        self.sm = SettingsManager.instance()
         # 最近一次收到的文件所在目录（点击"收到文件"通知时打开）
         self._last_file_dir = None
         self._create_tray()
+        # 上屏方式可能被主界面菜单 / 偏好设置改动，同步托盘菜单勾选状态
+        self.sm.connect_changed("text_input_mode", self._on_input_mode_setting_changed)
 
     def _create_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -129,15 +133,56 @@ class SystemTray(QObject):
         dlg = CommandsDialog(self)
         dlg.exec_()
 
+    def _set_input_mode(self, mode: str) -> None:
+        """托盘菜单切换上屏方式，立即持久化生效。"""
+        if mode != self.sm.get("text_input_mode", "paste"):
+            self.sm.set("text_input_mode", mode)
+        self._sync_input_checks()
+
+    def _on_input_mode_setting_changed(self, _mode) -> None:
+        """配置变更回调：主界面菜单 / 偏好设置改动后同步托盘勾选状态。"""
+        self._sync_input_checks()
+
+    def _sync_input_checks(self) -> None:
+        """根据当前配置同步上屏方式菜单的勾选状态。"""
+        if not hasattr(self, "_act_input_paste"):
+            return
+        mode = self.sm.get("text_input_mode", "paste")
+        self._act_input_paste.setChecked(mode == "paste")
+        self._act_input_type.setChecked(mode == "type")
+
     def _create_tray_menu(self):
         menu = QMenu()
+        # 持有引用：QSystemTrayIcon.setContextMenu 不接管菜单所有权，
+        # 若菜单被子回收，托盘菜单会变成悬空指针。
+        self._menu = menu
         menu.addAction(self.i18n.tr("tray.menu_show")).triggered.connect(self.show_main_window)
         menu.addSeparator()
         menu.addAction(self.i18n.tr("tray.menu_settings")).triggered.connect(self._open_settings)
         menu.addAction(self.i18n.tr("dashboard.menu_command")).triggered.connect(self._open_commands_dialog)
         menu.addSeparator()
+
+        # 上屏方式（二选一），与主界面菜单 / 偏好设置保持一致。
+        # 与主界面「网络」菜单一致：用互斥组，Qt 会画成单选圆点。
+        self._input_group = QActionGroup(menu)
+        self._input_group.setExclusive(True)
+
+        self._act_input_paste = QAction(self.i18n.tr("dashboard.input_clipboard"), menu)
+        self._act_input_paste.setCheckable(True)
+        self._act_input_paste.triggered.connect(lambda: self._set_input_mode("paste"))
+        self._input_group.addAction(self._act_input_paste)
+        menu.addAction(self._act_input_paste)
+
+        self._act_input_type = QAction(self.i18n.tr("dashboard.input_type"), menu)
+        self._act_input_type.setCheckable(True)
+        self._act_input_type.triggered.connect(lambda: self._set_input_mode("type"))
+        self._input_group.addAction(self._act_input_type)
+        menu.addAction(self._act_input_type)
+
+        menu.addSeparator()
         menu.addAction(self.i18n.tr("tray.menu_about")).triggered.connect(self.dashboard.show_about)
         menu.addAction(self.i18n.tr("tray.menu_quit")).triggered.connect(self.dashboard._quit_app)
+        self._sync_input_checks()
         return menu
 
     def show_message(self, title: str, message: str, icon=QSystemTrayIcon.Information, timeout: int = 1000,

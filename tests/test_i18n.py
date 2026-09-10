@@ -23,6 +23,35 @@ def qapp():
     # 注意：不要 quit，因为其他测试可能需要
 
 
+@pytest.fixture(autouse=True)
+def isolate_singletons(tmp_path, monkeypatch):
+    """
+    单例隔离。
+
+    本模块大量直接改写 I18n / SettingsManager 单例，并用 mock_open 伪造翻译文件。
+    这两个单例是**全进程共享**的，测试结束后不重置的话，mock 出来的翻译
+    （往往只有 dashboard.title 一个键）会泄漏给同一 pytest 会话中后续的测试文件，
+    表现为「单独跑通过、按某种文件顺序跑就失败」，例如
+    test_dashboard_mode.py::TestEncryptionToggle 查不到 dashboard.algo_xchacha20。
+
+    配置目录同时指向 tmp_path，避免重置单例后重新读取/写入真实用户配置。
+    """
+    from phonemic.utils.i18n import I18n
+    from phonemic.utils.settings_manager import SettingsManager
+
+    monkeypatch.setattr(
+        "phonemic.utils.settings_manager.get_config_dir", lambda: tmp_path
+    )
+
+    def _reset():
+        I18n._instance = None
+        SettingsManager._instance = None
+
+    _reset()
+    yield
+    _reset()
+
+
 # ------------------------------------------------------------
 # 测试目标：phonemic.utils.system_lang.detect_system_language
 # ------------------------------------------------------------

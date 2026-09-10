@@ -97,6 +97,62 @@ class TestSwitchNetworkAction:
         assert dashboard.switch_network_action.isEnabled() is True
 
 
+class TestInputModeMenu:
+    """「上屏方式」菜单：剪贴板 / 模拟键盘 二选一，与偏好设置面板等价。"""
+
+    def test_default_is_paste(self, dashboard):
+        assert dashboard.act_input_paste.isChecked() is True
+        assert dashboard.act_input_type.isChecked() is False
+
+    def test_menu_title_present(self, dashboard):
+        titles = [a.text() for a in dashboard.menuBar().actions()]
+        assert dashboard.i18n.tr("dashboard.menu_input_mode") in titles
+
+    def test_menu_order_right_after_network(self, dashboard):
+        titles = [a.text() for a in dashboard.menuBar().actions()]
+        assert titles.index(dashboard.i18n.tr("dashboard.menu_input_mode")) == \
+            titles.index(dashboard.i18n.tr("dashboard.menu_network")) + 1
+
+    def test_clicking_type_persists_config(self, dashboard):
+        dashboard._on_input_mode_clicked("type")
+        assert dashboard.sm.get("text_input_mode") == "type"
+        assert dashboard.act_input_type.isChecked() is True
+        assert dashboard.act_input_paste.isChecked() is False
+
+    def test_clicking_paste_back(self, dashboard):
+        dashboard._on_input_mode_clicked("type")
+        dashboard._on_input_mode_clicked("paste")
+        assert dashboard.sm.get("text_input_mode") == "paste"
+        assert dashboard.act_input_paste.isChecked() is True
+        assert dashboard.act_input_type.isChecked() is False
+
+    def test_triggering_action_switches(self, dashboard):
+        """直接触发菜单项（等价于用户点击）也能切到模拟键盘。"""
+        dashboard.act_input_type.trigger()
+        assert dashboard.sm.get("text_input_mode") == "type"
+        assert dashboard.act_input_type.isChecked() is True
+
+    def test_external_change_syncs_checks(self, dashboard):
+        """偏好设置 / 托盘菜单改动配置后，主界面菜单勾选应同步。"""
+        dashboard.sm.set("text_input_mode", "type")
+        assert dashboard.act_input_type.isChecked() is True
+        assert dashboard.act_input_paste.isChecked() is False
+
+    def test_uses_exclusive_group_like_network_menu(self, dashboard):
+        """与「网络」菜单外观统一：用互斥组（Qt 画成单选圆点）。"""
+        group = dashboard.act_input_paste.actionGroup()
+        assert group is not None
+        assert group.isExclusive() is True
+        assert dashboard.act_input_type.actionGroup() is group
+        assert len(group.actions()) == 2
+
+    def test_reclicking_selected_item_keeps_checked(self, dashboard):
+        """互斥组：重复点击已选中项不会被取消勾选。"""
+        dashboard.act_input_paste.trigger()
+        assert dashboard.act_input_paste.isChecked() is True
+        assert dashboard.act_input_type.isChecked() is False
+
+
 class TestTunnelUrlUpdate:
     def test_update_tunnel_url_updates_qr(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
