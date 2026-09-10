@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
-from phonemic.utils.paths import get_app_root, get_build_info
+from phonemic.utils.paths import get_app_root, get_build_info, is_frozen
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
 
@@ -310,10 +310,11 @@ class Dashboard(QMainWindow):
         commands_action.triggered.connect(self._open_commands_dialog)
         program_menu.addAction(commands_action)
 
-        # 鼠标曲线调试（临时工具，验证帧率与位移是否抖动）
-        debug_action = QAction("鼠标曲线调试", self)
-        debug_action.triggered.connect(self._open_mouse_debug)
-        program_menu.addAction(debug_action)
+        if not is_frozen():
+            # 鼠标曲线调试（临时工具，验证帧率与位移是否抖动）
+            debug_action = QAction("鼠标曲线调试", self)
+            debug_action.triggered.connect(self._open_mouse_debug)
+            program_menu.addAction(debug_action)
 
         # 分隔线 + 退出
         program_menu.addSeparator()

@@ -28,7 +28,7 @@ from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
-from phonemic.utils.paths import get_res_path
+from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.i18n import I18n
 from phonemic.utils.command_processor import CommandInterceptor
 from phonemic.utils.settings_manager import SettingsManager
@@ -184,10 +184,11 @@ def main():
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     dashboard.tray = tray
 
-    # 鼠标帧调试窗口（临时工具）：独立弹出、默认隐藏，从 Dashboard「程序」菜单打开
-    mouse_debug_win = MouseDebugWindow()
-    set_stats_hook(mouse_debug_win.widget.push)
-    dashboard.set_mouse_debug_window(mouse_debug_win)
+    if not is_frozen():
+        # 鼠标帧调试窗口（临时工具）：独立弹出、默认隐藏，从 Dashboard「程序」菜单打开
+        mouse_debug_win = MouseDebugWindow()
+        set_stats_hook(mouse_debug_win.widget.push)
+        dashboard.set_mouse_debug_window(mouse_debug_win)
 
     if args.silent:
         dashboard.hide()
