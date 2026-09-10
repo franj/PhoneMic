@@ -432,22 +432,22 @@
         <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
         <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
         <div id="panel-tabs" class="hidden">
-            <button type="button" class="tab active" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
-            <button type="button" class="tab" data-panel="mouse" aria-label="鼠标"><span class="ico">🕹️</span></button>
-            <button type="button" class="tab" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
+            <button type="button" class="tab active" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
             <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
+            <button type="button" class="tab" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
+            <button type="button" class="tab" data-panel="mouse" aria-label="鼠标"><span class="ico">🕹️</span></button>
         </div>
     </div>
     <div id="accessory-panel">
         <div id="panel-views">
-            <!-- 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板（默认面板） -->
-            <section id="view-touchpad" class="panel-view active"></section>
-            <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
-            <section id="view-mouse" class="panel-view"></section>
             <!-- 键盘子面板：组合快捷键（编辑/导航/系统 三分类），由 KeyboardPanel 动态生成 -->
-            <section id="view-keys" class="panel-view"></section>
+            <section id="view-keys" class="panel-view active"></section>
             <!-- 文件子面板：发送文件到 PC，由 FilePanel 动态生成 -->
             <section id="view-file" class="panel-view"></section>
+            <!-- 触控板子面板：单指移动 / 轻点 / 双指滚动，自带按钮；与鼠标并列的独立面板（默认面板） -->
+            <section id="view-touchpad" class="panel-view"></section>
+            <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
+            <section id="view-mouse" class="panel-view"></section>
         </div>
     </div>
 </div>
@@ -1847,11 +1847,16 @@
         /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
         .mouse-joystick .pv-grid button[data-id="left"],
         .mouse-joystick .pv-grid button[data-id="double"],
-        .mouse-joystick .pv-grid button[data-id="enter"],
         .mouse-joystick .pv-grid button[data-id="shiftenter"] {
             background: rgba(7, 193, 96, 0.12);
             border-color: rgba(7, 193, 96, 0.45);
             color: #05944d;
+        }
+        /* Enter 发送：深绿实心主键 */
+        .mouse-joystick .pv-grid button[data-id="enter"] {
+            background: #047857;
+            border-color: #047857;
+            color: #ffffff;
         }
         .mouse-joystick .pv-grid button[data-id="right"] {
             background: rgba(239, 68, 68, 0.12);
@@ -2347,11 +2352,16 @@
         /* 按钮配色：柔和彩色，按功能分组（保持尺寸/圆角不变） */
         .touchpad-panel .tp-btn-col button[data-act="left"],
         .touchpad-panel .tp-btn-col button[data-act="double"],
-        .touchpad-panel .tp-btn-col-right button[data-act="enter"],
         .touchpad-panel .tp-btn-col-right button[data-act="shiftenter"] {
             background: rgba(7, 193, 96, 0.12);
             border-color: rgba(7, 193, 96, 0.45);
             color: #05944d;
+        }
+        /* Enter 发送：深绿实心主键 */
+        .touchpad-panel .tp-btn-col-right button[data-act="enter"] {
+            background: #047857;
+            border-color: #047857;
+            color: #ffffff;
         }
         .touchpad-panel .tp-btn-col button[data-act="right"] {
             background: rgba(239, 68, 68, 0.12);
@@ -2864,9 +2874,9 @@
         static get ACTIONS() {
             return [
                 // R1 发送 / 输入（中性行，Enter 为实心主键）
-                { id: 'shiftenter', text: '⇧Enter',  row: 1, frame: { type: 'key', keys: 'shift+enter' } },
-                { id: 'selectall',  text: 'Ctrl+A',  row: 1, frame: { type: 'key', keys: 'ctrl+a' } },
+                { id: 'esc',        text: 'Esc',     row: 1, frame: { type: 'key', keys: 'esc' } },
                 { id: 'space',      text: 'Space',   row: 1, frame: { type: 'key', keys: 'space' } },
+                { id: 'shiftenter', text: '⇧Enter',  row: 1, frame: { type: 'key', keys: 'shift+enter' } },
                 { id: 'enter',      text: 'Enter',   row: 1, frame: { type: 'key', keys: 'enter' } },
                 // R2 纠错（绿，Del / ⌫ 红色特例）
                 { id: 'undo',       text: 'Ctrl+Z',  row: 2, frame: { type: 'key', keys: 'ctrl+z' } },
@@ -2874,7 +2884,7 @@
                 { id: 'delete',     text: 'Del',     row: 2, frame: { type: 'key', keys: 'delete' } },
                 { id: 'backspace',  text: '⌫',       row: 2, frame: { type: 'key', keys: 'backspace' } },
                 // R3 界面救急（琥珀）
-                { id: 'esc',        text: 'Esc',     row: 3, frame: { type: 'key', keys: 'esc' } },
+                { id: 'selectall',  text: 'Ctrl+A',  row: 3, frame: { type: 'key', keys: 'ctrl+a' } },
                 { id: 'tab',        text: 'Tab',     row: 3, frame: { type: 'key', keys: 'tab' } },
                 { id: 'shifttab',   text: '⇧Tab',   row: 3, frame: { type: 'key', keys: 'shift+tab' } },
                 { id: 'alttab',     text: 'Alt+Tab', row: 3, frame: { type: 'key', keys: 'alt+tab' } },

@@ -73,11 +73,18 @@ cd PhoneMic
 
 # 安装依赖
 uv venv --python 3.13.14
-uv sync
+uv sync --no-dev
 
 # 运行程序
 uvw run app
 ```
+
+创建从源码运行的桌面快捷方式（可选）：依赖同步（uv sync）完成后，运行仓库自带的 `make_windows_lnk.ps1`，即可在桌面生成名为 **PhoneMic Dev** 的快捷方式，之后双击图标就能启动，无需每次开命令行，也不用下载安装包：
+```powershell
+powershell -ExecutionPolicy Bypass -File .\make_windows_lnk.ps1
+```
+
+make_windows_lnk脚本会以当前仓库为工作目录，用源码目录下 `.venv` 里的 `pythonw.exe` 启动程序，并套用 `phonemic/resources/favicon.ico` 作为图标。若项目移动位置，需重新运行一次make_windows_lnk。
 
 > 从源码运行时，如需使用 Cloudflare 隧道模式，需自行安装 `cloudflared`，详见下文[前置条件](#前置条件)。
 
