@@ -2353,7 +2353,7 @@
             return [
                 { id: 'left',       i18n: 'panel_btn_left',       frame: { type: 'mouse', a: 'click', btn: 'left' } },
                 { id: 'right',      i18n: 'panel_btn_right',      frame: { type: 'mouse', a: 'click', btn: 'right' } },
-                { id: 'del',        text: '⌫',                   frame: { type: 'key', keys: 'backspace' } },
+                { id: 'del',        text: '⌫',     repeat: true, frame: { type: 'key', keys: 'backspace' } },
                 { id: 'enter',      text: 'Enter', cls: 'pv-enter', frame: { type: 'key', keys: 'enter' } },
                 { id: 'double',     i18n: 'panel_btn_double',     frame: { type: 'mouse', a: 'double', btn: 'left' } },
                 { id: 'drag',       i18n: 'panel_btn_drag', toggle: true },
@@ -2834,11 +2834,11 @@
             });
         }
 
-        // 滚轮长按连发：首次立即发，延迟 350ms 后每 140ms 一格
+        // 滚轮长按连发：首次立即发，延迟 350ms 后每 50ms 一格
         _startRepeat(frame) {
             this._stopRepeat();
             this._wheelDelay = setTimeout(() => {
-                this._wheelTimer = setInterval(() => this._emitAction(frame), 140);
+                this._wheelTimer = setInterval(() => this._emitAction(frame), 50);
             }, 350);
         }
 
@@ -3525,14 +3525,14 @@
             return [
                 // R1 发送 / 输入（中性行，Enter 为实心主键）
                 { id: 'esc',        text: 'Esc',     row: 1, frame: { type: 'key', keys: 'esc' } },
-                { id: 'space',      text: 'Space',   row: 1, frame: { type: 'key', keys: 'space' } },
-                { id: 'shiftenter', text: '⇧Enter',  row: 1, frame: { type: 'key', keys: 'shift+enter' } },
+                { id: 'space',      text: 'Space',   row: 1, repeat: true, frame: { type: 'key', keys: 'space' } },
+                { id: 'shiftenter', text: '⇧Enter', row: 1, frame: { type: 'key', keys: 'shift+enter' } },
                 { id: 'enter',      text: 'Enter',   row: 1, frame: { type: 'key', keys: 'enter' } },
                 // R2 纠错（绿，Del / ⌫ 红色特例）
                 { id: 'undo',       text: 'Ctrl+Z',  row: 2, frame: { type: 'key', keys: 'ctrl+z' } },
                 { id: 'redo',       text: 'Ctrl+Y',  row: 2, frame: { type: 'key', keys: 'ctrl+y' } },
-                { id: 'delete',     text: 'Del',     row: 2, frame: { type: 'key', keys: 'delete' } },
-                { id: 'backspace',  text: '⌫',       row: 2, frame: { type: 'key', keys: 'backspace' } },
+                { id: 'delete',     text: 'Del',     row: 2, repeat: true, frame: { type: 'key', keys: 'delete' } },
+                { id: 'backspace',  text: '⌫',      row: 2, repeat: true, frame: { type: 'key', keys: 'backspace' } },
                 // R3 界面救急（琥珀）
                 { id: 'selectall',  text: 'Ctrl+A',  row: 3, frame: { type: 'key', keys: 'ctrl+a' } },
                 { id: 'tab',        text: 'Tab',     row: 3, frame: { type: 'key', keys: 'tab' } },
@@ -3711,11 +3711,11 @@
             });
         }
 
-        // 按住连发：pointerdown 已立即发一帧，延迟 350ms 后每 140ms 一发（与摇杆面板一致）
+        // 按住连发：pointerdown 已立即发一帧，延迟 350ms 后每 50ms 一发（与摇杆面板一致）
         _startRepeat(frame) {
             this._stopRepeat();
             this._repDelay = setTimeout(() => {
-                this._repTimer = setInterval(() => this.onCommand(frame), 140);
+                this._repTimer = setInterval(() => this.onCommand(frame), 50);
             }, 350);
         }
 

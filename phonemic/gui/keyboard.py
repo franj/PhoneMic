@@ -161,7 +161,7 @@ def send_keys(keys_sequence: str) -> None:
     例如: "ctrl+a, delete" -> 先 Ctrl+A 全选，再 Delete 删除。
           "ctrl+c, enter" -> 复制后回车。
     每个组合内部使用 '+' 连接键名（如 "ctrl+shift+esc"）。
-    组合之间会插入 0.05 秒的短暂延迟。
+    组合之间会插入 0.05 秒的短暂延迟；最后一个组合后面不再停顿。
     """
     if not keys_sequence or not keys_sequence.strip():
         logger.error("按键序列为空，不做任何操作")
@@ -175,16 +175,21 @@ def send_keys(keys_sequence: str) -> None:
 
     # 分割序列
     combos = [c.strip() for c in keys_sequence.split(',')]
-    for combo in combos:
+    for i, combo in enumerate(combos):
         parts = combo.lower().split('+')
         try:
-            pyautogui.hotkey(*parts)
+            # _pause=False：pyautogui 默认每次调用后 sleep(PAUSE=0.1s)。手机端「按住连发」
+            # 是 50ms 一个按键帧，这 0.1s 会让 PC 端消费不过来、事件越积越多，表现成
+            # 「按住删得慢、松手后还在删」。鼠标路径（gui/mouse.py）早就关掉了它。
+            pyautogui.hotkey(*parts, _pause=False)
             logger.debug(f"执行组合: {combo}")
-            time.sleep(0.05)  # 组合之间的短暂延迟
         except Exception as e:
             logger.exception(f"模拟按键失败，组合: {combo} - {e}")
             # 发生错误时停止后续执行，避免状态混乱
             break
+        # 只在组合之间停顿，给上一个组合留点落地时间；单个组合（连发场景）不必等
+        if i < len(combos) - 1:
+            time.sleep(0.05)
 
 # ---------- 备用粘贴方案（保留原样） ----------
 import win32con

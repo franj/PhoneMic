@@ -159,8 +159,10 @@ def test_validate_case_insensitive():
 @patch("phonemic.gui.keyboard.time.sleep")
 def test_send_keys_valid(mock_sleep, mock_hotkey):
     send_keys("ctrl+c")
-    mock_hotkey.assert_called_once_with("ctrl", "c")
-    mock_sleep.assert_called_once_with(0.05)
+    # _pause=False：每次调用都不许带 pyautogui 的 0.1s 停顿
+    mock_hotkey.assert_called_once_with("ctrl", "c", _pause=False)
+    # 单个组合后面不再停顿（连发时这就是白等）
+    mock_sleep.assert_not_called()
 
 
 @patch("phonemic.gui.keyboard.pyautogui.hotkey")
@@ -248,8 +250,9 @@ def test_send_keys_sequence_multiple_combos(mock_sleep, mock_hotkey):
     for i, call in enumerate(mock_hotkey.call_args_list):
         # call[0] 是位置参数元组，例如 ('ctrl', 'a')
         assert call[0] == expected_calls[i]
-    # 每次组合后应调用 time.sleep(0.05)，共3次
-    assert mock_sleep.call_count == 3
+        assert call[1] == {"_pause": False}
+    # 停顿只在组合之间：3 个组合 → 2 次
+    assert mock_sleep.call_count == 2
     mock_sleep.assert_called_with(0.05)
 
 @patch("phonemic.gui.keyboard.pyautogui.hotkey")
@@ -273,8 +276,24 @@ def test_send_keys_sequence_stops_on_error(mock_sleep, mock_hotkey):
 def test_send_keys_sequence_single_combo(mock_sleep, mock_hotkey):
     """向后兼容：单个组合（不带逗号）仍然正常工作"""
     send_keys("ctrl+c")
-    mock_hotkey.assert_called_once_with("ctrl", "c")
-    mock_sleep.assert_called_once_with(0.05)
+    mock_hotkey.assert_called_once_with("ctrl", "c", _pause=False)
+    mock_sleep.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.pyautogui.hotkey")
+@patch("phonemic.gui.keyboard.time.sleep")
+def test_send_keys_repeat_carries_no_artificial_delay(mock_sleep, mock_hotkey):
+    """按住连发（手机端 50ms 一帧）不得有任何人为停顿。
+
+    有停顿就会出现「PC 消费速度 < 手机发送速度」→ 事件积压 → 按住删得慢、
+    松手后还在继续删。注意 stop 之后 time.sleep(0.05) 也不该被调到。
+    """
+    for _ in range(20):
+        send_keys("backspace")
+
+    assert mock_hotkey.call_count == 20
+    assert all(call[1] == {"_pause": False} for call in mock_hotkey.call_args_list)
+    mock_sleep.assert_not_called()
 
 @patch("phonemic.gui.keyboard.pyautogui.hotkey")
 def test_send_keys_invalid_sequence_logs_error(mock_hotkey, caplog):
