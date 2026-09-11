@@ -280,7 +280,7 @@ def main():
         elif event_type == "send":
             if not command_interceptor.process_send_text(payload):
                 flash_insert(payload)
-            hud.hide()
+            hud.on_preview_text("")
         elif event_type == "key":
             # 面板快捷键按钮：keys 为 "ctrl+z" / "ctrl+a, delete" 形式
             send_keys(payload)
