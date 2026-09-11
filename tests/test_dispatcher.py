@@ -4,7 +4,7 @@ dispatcher 统一入口路由测试。
 验证加密/明文模式的路径校验：
 - 加密模式：根路由 404，仅 /{secret} 前缀放行（含尾斜杠归一化），防扫描
 - 明文模式：仅白名单根路径放行，未知路径 404
-- POST 等非 GET 方法由路由层返回 405
+- POST 等非 GET 方法一律 405（唯一写入口是手机端日志回传 /api/client-log）
 - 运行中替换 SecureChannel（算法切换）→ 新 secret 即时生效，无需重启
 """
 
@@ -135,9 +135,12 @@ class TestEncryptedPathGuard:
 
     def test_post_method_405(self, enc_server):
         host, port, sc, _ = enc_server
-        # add_get 注册：POST 在路由层直接 405，不进入 dispatcher
+        # 写方法只有 /api/client-log 一个入口，其余 POST（含非法路径）一律 405，
+        # 在路径校验之前判定，避免从状态码差异里漏出「路径对不对」
         assert _post(host, port, f"/{sc.secret_path}/") == 405
         assert _post(host, port, "/") == 405
+        assert _post(host, port, "/wrongsecret/") == 405
+        assert _post(host, port, "/some/random/path") == 405
 
 
 class TestPlainPathGuard:

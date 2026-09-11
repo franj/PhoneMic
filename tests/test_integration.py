@@ -127,12 +127,13 @@ def _prepare_html(channel, offered, force_none_algo=False):
         1,
     )
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
-    html = re.sub(
-        r"<head[^>]*>",
-        lambda m: m.group(0) + "<script>" + MOCK_WS_SCRIPT + "</script>",
-        html,
-        count=1,
+    # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
+    # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    boot = (
+        "<script>window.__PHONEMIC_DEV__=true;</script>"
+        "<script>" + MOCK_WS_SCRIPT + "</script>"
     )
+    html = re.sub(r"<head[^>]*>", lambda m: m.group(0) + boot, html, count=1)
     # patch _parseUrlFragment：注入 PC 公钥/token 和 a= 算法列表
     pc_pubkey_b64 = channel.get_public_key_b64()
     offered_js = ",".join(f"'{a}'" for a in offered)
@@ -470,14 +471,26 @@ class TestAlgorithmNegotiation:
 
 # ---------- 断线处理 ----------
 
+def _disconnect_without_recovery(page, timeout=2000):
+    """断开连接、掐掉重连，等界面如实上报断线。
+
+    非选择器路径的断连（这里是普通前台断连）不做静默，立刻显示状态栏。静默窗口只留给
+    「唤起文件选择器造成的断连」，由 test_mobile.py::TestDisconnectRecovery 覆盖。
+    """
+    page.evaluate("() => { window.__wsClient.connect = () => {}; }")
+    page.evaluate("() => window.__mockWS.triggerClose()")
+    page.wait_for_function(
+        "() => document.getElementById('status-bar').style.display === 'block'", timeout=timeout
+    )
+
+
 class TestDisconnect:
     def test_disconnect_updates_ui(self, secure_pair):
-        """认证后断开连接，UI 显示断线状态。"""
+        """认证后断开（非选择器路径）：UI 立刻显示断线状态。"""
         page, channel, algo = secure_pair
         assert page.locator("#input-box").is_enabled()
 
-        page.evaluate("() => window.__mockWS.triggerClose()")
-        page.wait_for_timeout(100)
+        _disconnect_without_recovery(page)
 
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
@@ -560,12 +573,11 @@ class TestNoneLAN:
         assert send_msgs[-1]["text"] == "lan roundtrip"
 
     def test_disconnect_updates_ui(self, none_lan_pair):
-        """none+LAN: 断线后 UI 显示断线状态。"""
+        """none+LAN: 断开后 UI 立刻显示断线状态。"""
         page, channel = none_lan_pair
         assert page.locator("#input-box").is_enabled()
 
-        page.evaluate("() => window.__mockWS.triggerClose()")
-        page.wait_for_timeout(100)
+        _disconnect_without_recovery(page)
 
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()

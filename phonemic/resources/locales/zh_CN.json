@@ -189,7 +189,17 @@
     "dbg_ready_plain": "连接就绪({ms}ms，明文模式)",
     "dbg_error": "连接错误({ms}ms)，即将关闭...",
     "dbg_closed": "连接关闭，{ms}ms 后重连...",
-    "dbg_timeout": "连接超时({ms}ms)，重试中..."
+    "dbg_timeout": "连接超时({ms}ms)，重试中...",
+    "dbg_log_title": "手机端日志",
+    "dbg_log_level": "级别",
+    "dbg_log_clear": "清空",
+    "dbg_log_copy": "复制",
+    "dbg_log_forward_on": "转发:开",
+    "dbg_log_forward_off": "转发:关",
+    "dbg_log_close": "关闭",
+    "dbg_log_empty": "(暂无日志)",
+    "dbg_log_copied": "已复制全部日志",
+    "dbg_log_copy_failed": "复制失败，请长按选择文本"
   },
   "commands": {
     "title": "命令管理",

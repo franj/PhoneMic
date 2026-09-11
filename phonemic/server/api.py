@@ -403,19 +403,35 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
 
 
 async def _serve_messages(websocket, session) -> None:
-    """S1：循环接收并处理消息，直到连接关闭或出错。"""
+    """S1：循环接收并处理消息，直到连接关闭或出错。
+
+    关闭码（close code）是判断「谁断的、为什么断」的唯一可靠线索，必须留痕：
+      1000 = 正常关闭（本端主动 close 或对端带码关闭）
+      1005 = 对端未带状态码（浏览器 close() 无参）
+      1006 = 连接异常中断，没收到关闭帧（网络层掉线，也可能是本端心跳掐断）
+      1011 = 本端内部错误，典型是 keepalive ping 超时
+      1012 = 服务端重启
+    仅凭 1006 无法区分「对端掉线」与「本端心跳超时」，需配合本端是否有
+    keepalive 相关日志、以及对端 onclose 的 code/reason 一起看。
+    """
     while True:
         try:
             message = await websocket.receive()
-        except WebSocketDisconnect:
-            logger.info("WebSocket closed by client")
+        except WebSocketDisconnect as e:
+            logger.info(
+                "WebSocket closed by client: code=%s reason=%s",
+                getattr(e, "code", None), getattr(e, "reason", "") or "-",
+            )
             break
         except Exception as e:
             logger.error(f"WebSocket receive error: {e}")
             break
 
         if message["type"] == "websocket.disconnect":
-            logger.info("WebSocket disconnected")
+            logger.info(
+                "WebSocket disconnected: code=%s reason=%s",
+                message.get("code"), message.get("reason") or "-",
+            )
             break
 
         text = message.get("bytes")
@@ -430,15 +446,27 @@ async def _serve_messages(websocket, session) -> None:
 
 # ---------- HTTP 资源处理 ----------
 
+# 手机端「开发模式」标记的注入点（对应 mobile.html 的 <head>）。
+# 打包版整个日志通道都不启动——不接管 console、不缓冲、不转发、不建入口按钮，
+# 所以这个标记必须在**页面返回时**就定下来；等 WebSocket 的 config 帧就太晚了，
+# 那时页面脚本早已执行完。占位符缺失时客户端按 false 降级（安全的一侧）。
+_DEV_MODE_MARK = "<!--PHONEMIC_DEV_MODE-->"
+
+
 def _serve_mobile() -> Response:
     """返回手机端聊天页面（mobile.html）。
 
     页面不含任何翻译文本，语言包由手机端自行请求 /api/lang.json 获取。
+    返回前注入开发模式标记，供页面决定是否启动日志模块。
     """
     html_path = get_res_path("mobile.html")
     try:
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
+        dev = "true" if not is_frozen() else "false"
+        html = html.replace(
+            _DEV_MODE_MARK, f"<script>window.__PHONEMIC_DEV__ = {dev};</script>"
+        )
         return HTMLResponse(content=html)
     except Exception as e:
         logger.error(f"Failed to load mobile.html: {e}")
@@ -469,6 +497,63 @@ def _serve_lang_json() -> Response:
     except Exception as e:
         logger.error(f"Failed to get language data: {e}")
         return JSONResponse(content={}, status_code=500)
+
+
+# 手机端日志回传的体积上限：入口挂在 HTTP 上，必须限制单次体积，
+# 避免被滥用（或客户端 bug）打爆服务端日志。
+_CLIENT_LOG_MAX_BODY = 256 * 1024
+_CLIENT_LOG_MAX_ENTRIES = 200
+_CLIENT_LOG_MAX_TEXT = 400
+
+_last_client_ua: str = ""
+
+
+async def _receive_client_log(request: Request) -> Response:
+    """接收手机端转发的日志（POST /api/client-log），原样打到服务端日志。
+
+    手机上没有 devtools（尤其微信内置浏览器），alert 又会盖住状态栏，把日志
+    回传到 PC 的 cmd 是唯一能「实时 + 可对时间」看清手机端现场的办法。
+    只做展示：不落盘、不回帧、不参与加密会话——能拿到 secret_path 就已具备
+    访问资格，日志内容本身也不比同链路上的聊天内容更敏感。
+    """
+    global _last_client_ua
+
+    # 打包版不接收手机端日志：页面侧根本不会启动日志模块（见 _serve_mobile），
+    # 这里同时兜住旧缓存页面与伪造请求。返回 404，与「路径不存在」一致。
+    if is_frozen():
+        return Response(status_code=404)
+
+    raw = await request.body()
+    if len(raw) > _CLIENT_LOG_MAX_BODY:
+        return Response(status_code=413)
+    try:
+        data = json.loads(raw or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return Response(status_code=400)
+    # 顶层必须是对象：JSON 可以是任意类型，日志入口不能因形状不对而抛 500
+    if not isinstance(data, dict):
+        return Response(status_code=400)
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return Response(status_code=400)
+
+    ua = str(data.get("ua", ""))
+    if ua and ua != _last_client_ua:
+        _last_client_ua = ua
+        logger.info(f"手机端 UA: {ua}")
+
+    for item in entries[:_CLIENT_LOG_MAX_ENTRIES]:
+        # 线上格式 [毫秒时间戳, 级别, 文本]；脏数据直接跳过，日志入口不该抛错
+        try:
+            ms = int(item[0])
+            level = str(item[1]).upper()[:5]
+            text = str(item[2])[:_CLIENT_LOG_MAX_TEXT]
+        except (TypeError, ValueError, IndexError):
+            continue
+        stamp = time.strftime("%H:%M:%S", time.localtime(ms / 1000)) + f".{ms % 1000:03d}"
+        logger.info(f"[手机 {stamp}] {level:<5} {text}")
+
+    return Response(status_code=204)
 
 
 def _serve_test() -> Response:
@@ -531,6 +616,8 @@ _PUBLIC_PATHS = {
     "/msgpack.min.js",
     "/ws",
     "/api/lang.json",
+    # 手机端日志回传（POST）：与 lang.json 同级，仅诊断用途，无敏感信息
+    "/api/client-log",
 }
 
 
@@ -560,6 +647,16 @@ def _normalize_path(path: str) -> Optional[str]:
 async def _dispatch_http(request: Request, path: str) -> Response:
     """HTTP 统一入口：校验路径合法性后分发到具体资源。"""
     normalized = _normalize_path(path)
+
+    # 写方法只有手机端日志回传一个入口，其余 POST 一律 405。
+    # 判定必须放在路径校验之前：路径非法时也返回 405 而不是 404，否则
+    # 「路径对不对」会从状态码差异里漏出去。这也与 POST 由路由层直接
+    # 返回 405 时的既有行为保持一致（见 tests/test_dispatcher.py）。
+    if request.method == "POST":
+        if normalized == "/api/client-log":
+            return await _receive_client_log(request)
+        return Response(status_code=405)
+
     if normalized is None:
         return Response(status_code=404)
 
@@ -596,8 +693,10 @@ async def http_catchall(request: Request) -> Response:
     return await _dispatch_http(request, "/" + full_path)
 
 
-app.add_route("/", root, methods=["GET", "HEAD"])
-app.add_route("/{full_path:path}", http_catchall, methods=["GET", "HEAD"])
+# 允许 POST：手机端日志回传走同一套路由（加密模式下路径带 secret 前缀，
+# 无法单独注册一条固定路径，只能在分发处按方法分流）
+app.add_route("/", root, methods=["GET", "HEAD", "POST"])
+app.add_route("/{full_path:path}", http_catchall, methods=["GET", "HEAD", "POST"])
 
 
 async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
@@ -691,6 +790,23 @@ LOGGING_CONFIG = {
 }
 
 
+def _resolve_log_level() -> str:
+    """把环境变量解析成日志档位：info（默认）/ debug / trace。
+
+    - debug：把 phonemic.* 降到 DEBUG，看得到收到的 mouse/key/send 明细
+    - trace：再叠加 uvicorn 与 websockets 协议层（WS 帧 hex、keepalive ping/pong）
+      用于区分「心跳超时」与「对端掉线」——两者的关闭码都是 1006。
+
+    旧开关 PHONEMIC_WS_DEBUG=1 等价于 trace，保留以兼容既有用法。
+    """
+    level = os.environ.get("PHONEMIC_LOG", "").strip().lower()
+    if level not in ("debug", "trace"):
+        level = "info"
+    if os.environ.get("PHONEMIC_WS_DEBUG") == "1":
+        level = "trace"
+    return level
+
+
 def start_server(host: str, port: int, bridge: EventBridge) -> None:
     """在后台线程中启动 Starlette 服务（非阻塞）。"""
     global _server_thread, _event_loop, _server
@@ -706,12 +822,20 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
 
         is_packaged = is_frozen()
         log_config = LOGGING_CONFIG if is_packaged else None
+        # 日志档位（PHONEMIC_LOG=debug|trace，默认 info）。
+        # phonemic.* 的级别必须显式设置：root 已被 PhoneMic.py 的 basicConfig(INFO)
+        # 定死，而 uvicorn 的 log_level 只管 uvicorn.* 那三个 logger——不设置的话
+        # phonemic.* 里的 logger.debug 永远不输出，等于死代码。
+        log_level = _resolve_log_level()
+        if log_level != "info":
+            logging.getLogger("phonemic").setLevel(logging.DEBUG)
+            logger.info(f"PHONEMIC_LOG={log_level}：应用日志已切到 DEBUG")
         config = uvicorn.Config(
             app,
             host=host,
             port=port,
             log_config=log_config,
-            log_level="info",
+            log_level="debug" if log_level == "trace" else "info",
             loop="asyncio",
             # WebSocket 心跳：15 秒 ping，30 秒无响应判定断开
             ws_ping_interval=15.0,

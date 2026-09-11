@@ -2,6 +2,12 @@
 <html lang="zh-CN" data-page-node-id="OdDZ0JrbLdGfTGAOHmoYSu">
 <head data-page-node-id="q1cVDYXEhzxDo1WXSci2gi">
     <meta charset="UTF-8" data-page-node-id="Fln4GtuE48PfyKHh6NZGki">
+    <!-- 开发模式标记：服务端返回页面时把下面这行替换成
+         <script>window.__PHONEMIC_DEV__ = true|false;</script>（见
+         phonemic/server/api.py 的 _serve_mobile，依据 is_frozen()）。
+         打包版为 false，脚本块 0 的日志模块据此完全不启动。
+         直接打开本文件（不经服务端）时标记保持原样，页面按非开发模式降级。 -->
+    <!--PHONEMIC_DEV_MODE-->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" data-page-node-id="K4prVEkhpn7pbiFcp4F54P">
     <title>📱🎙️PhoneMic💬💻</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico" data-page-node-id="qBgFHmT0lBATGS2YtEW321">
@@ -413,6 +419,122 @@
             font-size: 13px;
             margin-top: 12px;
         }
+        /* ---------- 手机端日志浮层（诊断用，见脚本块 0） ---------- */
+        #phone-log-btn {
+            position: fixed;
+            left: 8px;
+            top: 8px;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: rgba(255, 243, 176, .88);
+            color: #8a6d00;
+            border: 1px solid #e0c86a;
+            font-size: 15px;
+            line-height: 1;
+            padding: 0;
+            z-index: 9998;
+            display: none;            /* 由 JS 在诊断模式下打开 */
+            align-items: center;
+            justify-content: center;
+        }
+        #phone-log-btn.visible { display: flex; }
+        #phone-log-panel {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: #fffdf3;
+            color: #333;
+            display: none;
+            flex-direction: column;
+        }
+        #phone-log-panel.visible { display: flex; }
+        #phone-log-head {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 8px 10px;
+            background: #fff3b0;
+            color: #8a6d00;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        #phone-log-head .pl-title {
+            margin-right: auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* 标题 + 5 个按钮要在窄屏一行内放下，故收紧字号与内边距 */
+        #phone-log-head button {
+            flex: 0 0 auto;
+            min-width: 42px;
+            height: 30px;
+            padding: 0 7px;
+            font-size: 12px;
+            border: 1px solid #e0c86a;
+            border-radius: 6px;
+            background: #fff;
+            color: #8a6d00;
+        }
+        #phone-log-body {
+            flex: 1;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;   /* 保证 iOS 滚动顺畅 */
+            overscroll-behavior: contain;        /* 阻止滚动链穿透 */
+            padding: 8px 10px 20px;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-all;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        #phone-log-body .pl-error { color: #cc0000; }
+        #phone-log-body .pl-warn  { color: #8a6d00; }
+        #phone-log-body .pl-info  { color: #333333; }
+        /* log 与 debug 同属最细一档（默认过滤掉，切到 debug 才出现） */
+        #phone-log-body .pl-debug,
+        #phone-log-body .pl-log   { color: #888888; }
+        /* 非阻塞提示浮层：替代 alert()。
+           alert() 是阻塞式的，会冻住 JS 主线程，把已到期的重连/超时定时器全部压到
+           「点确定」之后才执行 —— 一次 1 秒的断线抖动会被放大成十几秒假死。 */
+        #toast-host {
+            position: fixed;
+            left: 12px;
+            right: 12px;
+            bottom: 24px;
+            z-index: 9998;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            pointer-events: none;
+        }
+        #toast-host .toast {
+            pointer-events: auto;          /* 浮层本身不吃点击，单条可点掉 */
+            background: rgba(32, 32, 32, 0.92);
+            color: #ffffff;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 14px;
+            line-height: 1.5;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+            white-space: pre-wrap;
+            word-break: break-all;
+            animation: toast-in 160ms ease-out;
+        }
+        #toast-host .toast .toast-diag {
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            font-size: 11px;
+            opacity: 0.75;
+            margin-top: 6px;
+        }
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body data-page-node-id="ozgAGjuilWqVKDdnG8ntQq">
@@ -451,6 +573,284 @@
         </div>
     </div>
 </div>
+
+<script>
+    // ========== 手机端日志（仅开发模式） ==========
+    // 手机上（尤其微信内置浏览器）打不开 devtools，所以开发时自备查看入口：
+    // 屏幕上可直接看/复制，另可转发到 PC 的 cmd。
+    // 只有从源码运行才启动——标记由服务端返回页面时注入（见 <head> 里的
+    // PHONEMIC_DEV_MODE 与 api.py 的 _serve_mobile）；打包版为 false，
+    // 于是不接管 console、不缓冲、不转发、不创建入口按钮。
+    window.WS_DIAG = window.__PHONEMIC_DEV__ === true;
+
+    window.PhoneLog = (function () {
+        // 非开发模式：只留空壳接口，保证调用方（FilePanel 的 PhoneLog.snap()）
+        // 不报错；其余一概不做——不接管 console、不缓冲、不转发、不建面板。
+        if (!window.WS_DIAG) {
+            return { push: () => {}, open: () => {}, text: () => '', snap: () => '' };
+        }
+
+        const MAX = 300;         // 环形缓冲条数（面板与转发共用同一份）
+        const MAX_LEN = 300;     // 单条截断长度，避免日志本身把回传请求撑爆
+        const FLUSH_MS = 2000;   // 转发节流间隔
+        // 级别门槛：低于它的记录既不进面板也不转发。
+        // log 与 debug 归为最细一档——[SEC]/[Config]/[NET] 那类每次连接都重复、
+        // 内容恒定的记录都在这一档，默认不显示；需要时在面板里切到 debug。
+        const LEVELS = { log: 10, debug: 10, info: 20, warn: 30, error: 40 };
+        let minLevel = LEVELS.info;
+        const lines = [];        // {ts, lvl, text}：本地面板的数据源
+        let queue = [];          // [ts, lvl, text]：待转发，失败会塞回队首重试
+        let forward = false;     // 转发默认关闭：要排查时在面板里手动打开
+        let opened = false;
+        let el = {};             // DOM 引用，首次打开时构建
+
+        const pad = (n, w = 2) => String(n).padStart(w, '0');
+
+        function clock(ts) {
+            const d = new Date(ts);
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+        }
+
+        /** 单个参数压成有界字符串：二进制只报类型和长度，不做逐字节序列化 */
+        function one(a) {
+            let s;
+            if (a instanceof Error) s = `${a.name}: ${a.message}`;
+            else if (typeof a === 'string') s = a;
+            else if (a instanceof ArrayBuffer || ArrayBuffer.isView(a)) {
+                s = `<${a.constructor && a.constructor.name || 'binary'} ${a.byteLength}>`;
+            } else {
+                try { s = JSON.stringify(a); } catch (e) { s = String(a); }
+            }
+            if (s === undefined) s = String(a);
+            return s.length > MAX_LEN ? s.slice(0, MAX_LEN) + '…' : s;
+        }
+
+        const fmt = (args) => args.map(one).join(' ').replace(/\s+/g, ' ').trim();
+
+        /** 当前级别下可见的记录。
+         * 缓冲始终全量保留、只在展示与转发时过滤——否则「出了问题才打开面板」
+         * 的排查流程里，切到 debug 也回看不到连接当时发生了什么。 */
+        const visible = () => lines.filter((l) => (LEVELS[l.lvl] || LEVELS.info) >= minLevel);
+
+        /** 记一条：入环形缓冲 + 排入转发队列 + 刷新面板（若已打开） */
+        function push(lvl, args) {
+            const ts = Date.now();
+            const text = fmt(args);
+            if (!text) return;
+            lines.push({ ts, lvl, text });
+            while (lines.length > MAX) lines.shift();
+            // 转发按门槛过滤：不够级别的直接不排队，省掉一趟无用的网络请求
+            if (forward && (LEVELS[lvl] || LEVELS.info) >= minLevel) {
+                queue.push([ts, lvl, text]);
+                if (queue.length > MAX) queue.shift();
+            }
+            if (opened) render();
+        }
+
+        // 接管 console：既有日志（i18n / WS / SEC / FILE / NET）自动进缓冲，
+        // 仍然调用原方法，接远程调试时行为不变
+        ['log', 'info', 'warn', 'error', 'debug'].forEach((name) => {
+            const orig = console[name].bind(console);
+            console[name] = (...args) => { orig(...args); push(name, args); };
+        });
+        // 未捕获异常与未处理的 Promise 拒绝也要留痕：手机上这些平时完全不可见
+        window.addEventListener('error', (e) => {
+            push('error', ['[JS] ' + (e.message || 'error'), `${e.filename || ''}:${e.lineno || 0}`]);
+        });
+        window.addEventListener('unhandledrejection', (e) => {
+            push('error', ['[JS] unhandledrejection', e.reason]);
+        });
+
+        // 网络与页面生命周期快照。
+        // Android WebView（尤其 MIUI 一类厂商 ROM）会在切后台、熄屏、唤起文件选择器时
+        // 把 WebSocket 掐掉，两端都收不到关闭帧，只剩一个 1006。
+        // 断连现场只有这几条能区分「网络真的断了」与「页面被冻住/被回收」，必须留痕。
+        // 注意：页面恢复时浏览器会把后台积压的事件一次性补发，事件时间戳 ≠ 真实发生时刻。
+        const netSnap = () => {
+            const c = navigator.connection || {};
+            const extra = c.effectiveType ? ` eff=${c.effectiveType}` : (c.type ? ` net=${c.type}` : '');
+            return `online=${navigator.onLine} vis=${document.visibilityState}${extra}`;
+        };
+        window.addEventListener('online', () => push('info', ['[LIFE] online', netSnap()]));
+        window.addEventListener('offline', () => push('warn', ['[LIFE] offline', netSnap()]));
+        // pagehide 要排在下面 sendBeacon 那条之前注册，否则这一行进不了最后一批
+        ['visibilitychange', 'pageshow', 'pagehide'].forEach((name) => {
+            document.addEventListener(name, () => push('info', [`[LIFE] ${name}`, netSnap()]));
+        });
+        ['freeze', 'resume'].forEach((name) => {
+            document.addEventListener(name, () => push('warn', [`[LIFE] ${name}`, netSnap()]));
+        });
+
+        /** 转发一批到 PC 的 cmd；失败塞回队首，下轮再试，不丢日志 */
+        async function flush() {
+            if (!forward || queue.length === 0) return;
+            const batch = queue.splice(0, 50);
+            try {
+                const res = await fetch('api/client-log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ua: navigator.userAgent, entries: batch }),
+                });
+                // 4xx 是「这个地址根本不存在」——典型是旧会话的页面（secret_path 已经换了）。
+                // 重试永远不会成功，直接丢弃；否则这个僵尸页面会一直往后端打无效请求。
+                if (res.status >= 400 && res.status < 500) return;
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+            } catch (e) {
+                queue = batch.concat(queue).slice(-MAX);
+            }
+        }
+        setInterval(flush, FLUSH_MS);
+        // 页面被隐藏/关闭时尽力送出最后一批：sendBeacon 不受页面生命周期限制
+        window.addEventListener('pagehide', () => {
+            if (!forward || queue.length === 0) return;
+            try {
+                const body = JSON.stringify({ ua: navigator.userAgent, entries: queue });
+                navigator.sendBeacon('api/client-log', new Blob([body], { type: 'application/json' }));
+                queue = [];
+            } catch (e) { /* 发不出去就算了，日志在本地面板里还在 */ }
+        });
+
+        const text = () => visible().map((l) => `${clock(l.ts)} ${l.lvl.toUpperCase()} ${l.text}`).join('\n');
+
+        // ---------- 面板 UI（首次打开才创建，避免干扰正常使用的布局） ----------
+
+        function render() {
+            if (!el.body) return;
+            const vis = visible();
+            el.title.textContent = `${t('dbg_log_title')} ${vis.length}`;
+            el.level.textContent = `${t('dbg_log_level')}:${minLevel === LEVELS.info ? 'info' : 'debug'}`;
+            el.clear.textContent = t('dbg_log_clear');
+            el.copy.textContent = t('dbg_log_copy');
+            el.fwd.textContent = forward ? t('dbg_log_forward_on') : t('dbg_log_forward_off');
+            el.close.textContent = t('dbg_log_close');
+            // 只在已经贴底时才自动滚到底，翻看历史不被新日志打断
+            const atBottom = el.body.scrollHeight - el.body.scrollTop - el.body.clientHeight < 40;
+            el.body.textContent = '';
+            if (vis.length === 0) {
+                el.body.textContent = t('dbg_log_empty');
+            } else {
+                const frag = document.createDocumentFragment();
+                vis.forEach((l) => {
+                    const row = document.createElement('div');
+                    row.className = 'pl-' + l.lvl;
+                    row.textContent = `${clock(l.ts)} ${l.text}`;
+                    frag.appendChild(row);
+                });
+                el.body.appendChild(frag);
+            }
+            if (atBottom) el.body.scrollTop = el.body.scrollHeight;
+        }
+
+        async function copyAll() {
+            const data = text();
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(data);
+                } else {
+                    // 非安全上下文（http:// 局域网直连）没有 clipboard API，退回选中 + 复制
+                    const ta = document.createElement('textarea');
+                    ta.value = data;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    ta.setSelectionRange(0, data.length);
+                    const ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    if (!ok) throw new Error('execCommand copy failed');
+                }
+                push('info', [t('dbg_log_copied')]);
+            } catch (e) {
+                push('warn', [t('dbg_log_copy_failed')]);
+            }
+        }
+
+        function setOpen(v) {
+            if (!el.panel) return;
+            opened = v;
+            el.panel.classList.toggle('visible', v);
+            // 不再重复记 env()：build() 时已记过一次，重复记只会在每次打开面板时
+            // 白刷 4 条；之后网络/可见性的变化由 [LIFE] 事件覆盖
+            if (v) render();
+        }
+
+        function build() {
+            const btn = document.createElement('button');
+            btn.id = 'phone-log-btn';
+            btn.textContent = '🐞';
+            btn.addEventListener('click', () => setOpen(true));
+            document.body.appendChild(btn);
+
+            const panel = document.createElement('div');
+            panel.id = 'phone-log-panel';
+            // 静态骨架，无任何外部数据，可安全用 innerHTML
+            panel.innerHTML =
+                '<div id="phone-log-head">' +
+                '<span class="pl-title"></span>' +
+                '<button data-act="level"></button>' +
+                '<button data-act="clear"></button>' +
+                '<button data-act="copy"></button>' +
+                '<button data-act="forward"></button>' +
+                '<button data-act="close"></button>' +
+                '</div><div id="phone-log-body"></div>';
+            document.body.appendChild(panel);
+
+            el = {
+                btn,
+                panel,
+                title: panel.querySelector('.pl-title'),
+                body: panel.querySelector('#phone-log-body'),
+                level: panel.querySelector('[data-act="level"]'),
+                clear: panel.querySelector('[data-act="clear"]'),
+                copy: panel.querySelector('[data-act="copy"]'),
+                fwd: panel.querySelector('[data-act="forward"]'),
+                close: panel.querySelector('[data-act="close"]'),
+            };
+            el.close.addEventListener('click', () => setOpen(false));
+            el.clear.addEventListener('click', () => { lines.length = 0; queue = []; render(); });
+            el.copy.addEventListener('click', copyAll);
+            el.fwd.addEventListener('click', () => { forward = !forward; if (forward) flush(); render(); });
+            // 级别两档切换：info（默认，只留状态机与动作轨迹）/ debug（连常量噪音一起看）
+            el.level.addEventListener('click', () => {
+                minLevel = minLevel === LEVELS.info ? LEVELS.debug : LEVELS.info;
+                render();
+            });
+            // 走到这里必然是开发模式（非开发模式已在 IIFE 开头提前返回）
+            btn.classList.add('visible');
+            // 状态栏是最自然的「出问题了」指示器，点它即可展开日志
+            const bar = document.getElementById('status-bar');
+            if (bar) bar.addEventListener('click', () => setOpen(true));
+            env();
+        }
+
+        /** 环境摘要：排查时先看这几行。刻意不打印完整 URL —— hash 里是 E2EE 密钥 */
+        function env() {
+            push('info', ['[ENV] origin=' + location.origin]);
+            push('info', [`[ENV] win=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio}`]);
+            push('info', [`[ENV] online=${navigator.onLine} vis=${document.visibilityState} hash=${location.hash ? 'yes' : 'no'}`]);
+            push('info', ['[ENV] ua=' + navigator.userAgent]);
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', build);
+        } else {
+            build();
+        }
+
+        return {
+            push: (lvl, ...args) => push(lvl, args),
+            open: () => setOpen(true),
+            text,
+            snap: netSnap,
+            // 级别：接受 'info'/'debug'/'warn' 或数值；同时供面板按钮与测试使用
+            setLevel: (lv) => {
+                minLevel = (typeof lv === 'string' ? LEVELS[lv] : lv) || LEVELS.info;
+                render();
+            },
+            getLevel: () => (minLevel === LEVELS.info ? 'info' : 'debug'),
+        };
+    })();
+</script>
 
 <script>
     // ========== 0. 国际化：语言包由 PC 端通过 /api/lang.json 提供 ==========
@@ -1119,7 +1519,7 @@
             this._createProvider();
             if (this._provider.initKeypair) this._provider.initKeypair();
             if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
-            console.log('[SEC] sodium ready, algorithm:', this._selectedAlgo);
+            console.debug('[SEC] sodium ready, algorithm:', this._selectedAlgo);
         }
 
         _parseUrlFragment() {
@@ -1179,7 +1579,7 @@
                 // 加密模式：先走统一解密路径（seq=0 校验并推进 _rxSeq）
                 if (this._provider.handleAuthAck(rawBytes)) {
                     this._authenticated = true;
-                    console.log('[SEC] Authenticated by server');
+                    console.debug('[SEC] Authenticated by server');
                     return true;
                 }
                 // 解密失败 → 明文 rejected 帧；无法识别同样按失败处理
@@ -1201,7 +1601,7 @@
                         return false;
                     }
                     this._authenticated = true;
-                    console.log('[SEC] Authenticated by server');
+                    console.debug('[SEC] Authenticated by server');
                     return true;
                 }
             } catch (e) { /* 非 msgpack，按无法识别处理 */ }
@@ -1226,6 +1626,13 @@
         }
     }
 
+    // 诊断总开关定义在脚本块 0（window.WS_DIAG）：同时控制日志浮层与
+    // 「关闭码随弹窗/状态栏显示」两件事。此处只取本地引用，收尾时改那一处即可。
+    const WS_DIAG = window.WS_DIAG !== false;
+    // 「文件选择器在飞」标记的有效期（ms）：只兜「页面再没回过前台」这种极端情况，
+    // 避免标记永久挂住、把之后再发生的真断连也一起静默掉。
+    const PICKER_CTX_MS = 300000;
+
     class WSClient {
         constructor(url, configManager) {
             this.url = url;
@@ -1234,16 +1641,25 @@
             this.isConnected = false;
             this.reconnectInterval = 1000;
             this.connectTimeout = 3000;
+            // 断连后的「静默宽限窗口」（ms）：见 _startGrace
+            this.connectionGraceMs = 3000;
             this.reconnectTimer = null;
             this._connectTimer = null;
+            this._graceTimer = null;
+            this._graceSilent = false;   // true = 窗口内，界面必须保持原样
+            this._pickerAt = 0;          // 唤起文件选择器的时刻（0 = 无），见 beginPickerContext
             this._skipNextDelay = false;
             this.authRejected = false;
+            this._lastClose = null;   // 最近一次 onclose 的现场（code/reason/clean/stale）
             this.messageHandlers = new Map();
             this.secure = new SecureClient();
         }
         on(type, handler) { this.messageHandlers.set(type, handler); }
 
         _setDebugStatus(text) {
+            // 静默宽限期内界面必须保持原样：重连过程的「正在发起连接…」这类中间态
+            // 同样属于用户不该看到的异常（见 _startGrace）
+            if (this._graceSilent) return;
             const statusBar = document.getElementById('status-bar');
             if (statusBar) {
                 statusBar.style.display = 'block';
@@ -1258,6 +1674,76 @@
                 clearTimeout(this._connectTimer);
                 this._connectTimer = null;
             }
+        }
+
+        /**
+         * 进入「静默宽限窗口」：断连时先闭嘴一段时间，期间只后台重连、不碰任何界面。
+         *
+         * 只给「文件选择器把页面顶到后台」这一条路径用（见 beginPickerContext）：
+         * Android WebView 唤起选择器时页面被判为不可见，系统常顺手掐掉 socket，
+         * 两端都只收到 1006；这类断连回前台后往往 1s 内就恢复，且用户根本没做过
+         * 任何「断开」的操作，此时弹「已断开连接」纯属打扰。窗口内连上了，用户全程无感。
+         *
+         * 其它一切断连（首连失败、前台掉线）都不进这个窗口，直接 _surfaceDisconnected()
+         * 如实上报——把界面蒙在「已连接」的样子里，用户的操作会静默失败，比看到提示更糟。
+         *
+         * 只有窗口结束仍未连上，才第一次把断开告诉界面（状态栏 + 禁用输入框）。
+         * 窗口**从第一次断连起算、不随重试重置**——否则连续快速失败会把界面永远静默下去。
+         */
+        _startGrace() {
+            if (this._graceTimer) return;   // 已在窗口内：不重置计时
+            this._graceSilent = true;
+            this._graceTimer = setTimeout(() => {
+                this._graceTimer = null;
+                this._graceSilent = false;
+                if (this.isConnected) return;   // 窗口内已恢复：界面从头到尾没动过
+                this._surfaceDisconnected();
+            }, this.connectionGraceMs);
+        }
+        _stopGrace() {
+            if (this._graceTimer) {
+                clearTimeout(this._graceTimer);
+                this._graceTimer = null;
+            }
+            this._graceSilent = false;
+        }
+
+        /** 如实上报「已断开」：状态栏 + 禁用输入。宽限窗口超时、以及一切非选择器断连都走这里。 */
+        _surfaceDisconnected() {
+            const diag = WS_DIAG ? this.diagText() : '';
+            this._notifyStatusChange(
+                false, diag ? `${t('status_disconnected_text')} ${diag}` : undefined
+            );
+        }
+
+        /**
+         * 标记「文件选择器已唤起，接下来的断连可能就是它造成的」。
+         * 只有这条路径上的断连才进静默宽限窗口（见 _startGrace），其它断连一律照常上报。
+         */
+        beginPickerContext() {
+            this._pickerAt = Date.now();
+        }
+        /**
+         * 选择器有了结果（选中了文件）：标记作废。
+         * 窗口若已开着就继续跑完——发送前那段等待同样不该被断开提示打断。
+         */
+        endPickerContext() {
+            this._pickerAt = 0;
+        }
+        /**
+         * 选择器被取消：照常处理，不进静默窗口。
+         *
+         * 取消之后用户马上就可能打字、点按钮，界面必须立刻回到「已断开」并禁用操作；
+         * 若还停在「已连接」的样子，这些操作会静默失败——比看到一个断线提示糟糕得多。
+         */
+        cancelPickerContext() {
+            this._pickerAt = 0;
+            this._stopGrace();
+            if (!this.isConnected) this._surfaceDisconnected();
+        }
+        /** 是否处于「文件选择器在飞」的窗口内。超时自愈，避免标记永久挂住把真断连也静默掉。 */
+        _inPickerContext() {
+            return !!this._pickerAt && (Date.now() - this._pickerAt) < PICKER_CTX_MS;
         }
 
         async connect() {
@@ -1295,14 +1781,14 @@
                 this.ws.onopen = () => {
                     this._clearConnectTimer();
                     const t1 = Date.now();
-                    console.log(t('log_ws_connected'), `(${t1 - t0}ms)`);
+                    console.info(t('log_ws_connected'), `(${t1 - t0}ms)`);
                     this._setDebugStatus(t('dbg_handshake_ok', {ms: t1 - t0}));
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     if (this.secure.needsAuth) {
                         const authMsg = this.secure.makeAuth();
                         this.ws.send(MessagePack.encode(authMsg));
                         // algo 在密封 blob 内，线上不可见；此处仅记录本地协商结果
-                        console.log('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
+                        console.debug('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
                     } else {
                         this.isConnected = true;
                         const t2 = Date.now();
@@ -1348,21 +1834,44 @@
                         else console.warn(t('log_ws_unknown_type'), inner.type);
                     } catch (err) { console.error(t('log_ws_parse_error'), err); }
                 };
-                this.ws.onclose = () => {
+                this.ws.onclose = (ev) => {
                     this._clearConnectTimer();
                     const t3 = Date.now();
-                    console.log(t('log_ws_disconnected'), `(${t3 - t0}ms)`);
+                    // 关闭码是判断「谁断的、为什么断」的唯一可靠线索，必须留痕：
+                    //   1000 = 服务端主动 close（如加密模式解密/seq 失步、配置变更）
+                    //   1006 = 网络层断开，没收到关闭帧（Wi-Fi/蜂窝切换、代理掐断）
+                    //   1011 = 服务端心跳(ping)超时（15s 发一次，30s 收不到 pong 就掐）
+                    // stale=true 表示这是「旧 socket 的迟到事件」，它会污染新连接的状态
+                    const code = ev && ev.code;
+                    const reason = (ev && ev.reason) || '';
+                    const stale = !!(ev && ev.target && this.ws !== ev.target);
+                    // 断连当下的网络/可见性现场：1006 只能说明「没收到关闭帧」，
+                    // 到底是网络断了还是页面被冻住/被回收，全靠这两个字段区分
+                    const life = (window.PhoneLog && PhoneLog.snap) ? PhoneLog.snap() : '';
+                    console.warn('[WS] closed', `code=${code}`, `reason=${reason || '-'}`,
+                                 `clean=${ev && ev.wasClean}`, `lifetime=${t3 - t0}ms`, `stale=${stale}`,
+                                 life);
+                    console.info(t('log_ws_disconnected'), `(${t3 - t0}ms)`);
+                    // 关闭现场留档：弹窗会盖住状态栏，只有记下来才能事后带出去
+                    this._lastClose = {
+                        code, reason, clean: !!(ev && ev.wasClean),
+                        lifetime: t3 - t0, stale, at: t3, life,
+                    };
                     this.isConnected = false;
                     this.secure._authenticated = false;
                     if (this.authRejected) return; // 保持认证失败提示，不再自动重连
-                    this._setDebugStatus(t('dbg_closed', {ms: this.reconnectInterval}));
-                    this._notifyStatusChange(false);
+                    // 只有「唤起文件选择器」这条路径的断连才进静默窗口（见 _startGrace）；
+                    // 窗口内（_graceSilent）后续的断连也继续静默，别让重试抖动露到界面上。
+                    // 其余一切断连照常上报——界面该禁用就禁用，免得用户的操作静默失败。
+                    if (this._inPickerContext() || this._graceSilent) this._startGrace();
+                    else this._surfaceDisconnected();
                     this._scheduleReconnect();
                 };
                 this.ws.onerror = (err) => {
                     const t4 = Date.now();
                     console.error('WS error at', t4 - t0, 'ms:', err);
-                    this._setDebugStatus(t('dbg_error', {ms: t4 - t0}));
+                    // 界面表现统一交给随后必然触发的 onclose（它决定静默还是如实上报），
+                    // 这里再写状态栏只会让「连接错误」抢在前面露出来
                     this.ws.close();
                 };
             } catch (err) {
@@ -1380,7 +1889,66 @@
                 this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectInterval);
             }
         }
+        /**
+         * 等待连接就绪（含加密认证完成），最多 timeoutMs。
+         *
+         * 「刚回前台」「刚选完文件」这两种时刻，连接多半正处在 1s 重连窗口里断着，
+         * 但马上就会好。直接拿 getConnected() 判定会误报「未连接到电脑」，
+         * 所以先等一会儿再下结论。
+         * @param {number} timeoutMs
+         * @returns {Promise<boolean>}
+         */
+        whenReady(timeoutMs = 6000) {
+            if (this.getConnected()) return Promise.resolve(true);
+            // 断着且没有重连计划（定时器已错过或从未排上）：立刻催一次，别干等
+            if (!this.reconnectTimer) this.reconnectNow('whenReady');
+            return new Promise((resolve) => {
+                let done = false;
+                function finish(ok) {
+                    if (done) return;
+                    done = true;
+                    clearTimeout(timer);
+                    document.removeEventListener('ws-status', onStatus);
+                    resolve(ok);
+                }
+                function onStatus(e) {
+                    if (e.detail && e.detail.connected) finish(true);
+                }
+                const timer = setTimeout(() => finish(this.getConnected()), timeoutMs);
+                document.addEventListener('ws-status', onStatus);
+                if (this.getConnected()) finish(true);   // 事件可能在注册前刚发过
+            });
+        }
+        /**
+         * 立即重连，跳过 1s 退避。
+         *
+         * 断线恢复的两条快路径（网络恢复 online、页面回前台 visibilitychange）都走这里：
+         * Android WebView 切后台（唤起文件选择器、熄屏、被别的 Activity 顶掉）期间
+         * 系统常顺手掐掉 socket，两端都收不到关闭帧、只剩 1006。回前台时若还等退避，
+         * 用户「选完文件回来」就会正好撞上未连接窗口。
+         */
+        reconnectNow(reason) {
+            if (this.authRejected) return;
+            if (this.getConnected()) return;
+            if (this.reconnectTimer) {
+                clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = null;
+            }
+            if (this.ws) {
+                if (this.ws.readyState === WebSocket.CONNECTING) {
+                    // 卡在握手里的旧连接：关掉它，让 onclose 走「跳过延迟」快路径重连
+                    this._skipNextDelay = true;
+                    try { this.ws.close(); } catch (e) {}
+                    return;
+                }
+                if (this.ws.readyState === WebSocket.OPEN) return;  // 已连上，只差认证收尾
+            }
+            console.debug(`[WS] reconnectNow (${reason})`);
+            this.connect();
+        }
         _notifyStatusChange(connected, message) {
+            // 连上了：宽限窗口立即作废。若窗口此前已超时，这次通知同时把界面恢复正常。
+            if (connected) this._stopGrace();
             document.dispatchEvent(new CustomEvent('ws-status', { detail: { connected, message } }));
         }
         _showAuthRejected(hasKey) {
@@ -1409,6 +1977,23 @@
             return this.sendFrame({ type, text });
         }
         getConnected() { return this.isConnected; }
+
+        /**
+         * 最近一次断连的单行摘要。
+         * 手机端没有 console，而弹窗又会盖住状态栏，偶发断连想把关闭码带出来
+         * 只能靠它随弹窗一起显示。
+         */
+        diagText() {
+            const c = this._lastClose;
+            if (!c) return this.isConnected ? '' : '(no close event)';
+            const clock = new Date(c.at).toTimeString().slice(0, 8);   // 与 PC 端日志对时间用
+            const parts = [`code=${c.code}`, `clean=${c.clean}`, `${(c.lifetime / 1000).toFixed(1)}s`,
+                           `at=${clock}`];
+            if (c.reason) parts.push(`reason=${c.reason}`);
+            if (c.stale) parts.push('stale');
+            if (c.life) parts.push(c.life);
+            return '(' + parts.join(', ') + ')';
+        }
     }
 
     // ========== 5. 消息交互管理器 ==========
@@ -3151,6 +3736,47 @@
     // ========== 6.5 文件子面板：发送文件到 PC（wire-protocol.md §9 / §9.2） ==========
     // 套路与 KeyboardPanel 等一致：static STYLES 注入、section 内独立根容器、
     // 出口统一 onCommand(frame)；下行 ack/error 通过 ws.on(type, handler) 订阅。
+
+    /**
+     * 非阻塞提示浮层（替代 alert）。
+     *
+     * 不能用 alert 的原因：它是阻塞式的，会冻住 JS 主线程 —— 所有已到期的定时器和
+     * 事件回调都排队等到「点确定」之后才跑。而断线恢复路径全是定时器
+     * （1s 重连退避、3s 握手超时），于是「1 秒就能自愈的抖动」被放大成十几秒假死，
+     * 用户看到的是「未连接到电脑」，实际是提示框自己把重连卡住了。
+     *
+     * @param {string} title 主文案
+     * @param {string} [diag] 诊断摘要（等宽小字，仅调试期传入）
+     * @param {number} [ms] 自动消失时间
+     */
+    function showToast(title, diag, ms = 6000) {
+        let host = document.getElementById('toast-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'toast-host';
+            document.body.appendChild(host);
+        }
+        const box = document.createElement('div');
+        box.className = 'toast';
+        box.appendChild(document.createTextNode(title));
+        if (diag) {
+            const d = document.createElement('div');
+            d.className = 'toast-diag';
+            d.textContent = diag;
+            box.appendChild(d);
+        }
+        let closed = false;
+        const close = () => {
+            if (closed) return;
+            closed = true;
+            if (box.parentNode) box.parentNode.removeChild(box);
+        };
+        box.addEventListener('click', close);   // 点一下即消，不必等定时
+        host.appendChild(box);
+        setTimeout(close, ms);
+        return close;
+    }
+
     class FilePanel {
         // 分块策略（wire-protocol.md §9）：按文件体积动态选块，块数收敛到 ~12 块。
         // 上限由服务端 config.max_frame_size 下发；未下发时走保守默认。
@@ -3162,6 +3788,8 @@
         static get HIGH_WATER() { return 4 * 1024 * 1024; }    // 发送缓冲高水位：超过则暂停等排空
         static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
         static get END_ACK_TIMEOUT() { return 15000; }         // 等 PC 端落盘确认的超时（ms）
+        static get RECONNECT_WAIT() { return 6000; }           // 未连接时先等重连的时间（ms），1s 退避足够重试数轮
+        static get PICKER_CANCEL_GRACE() { return 250; }       // 判「取消」的宽限（ms）：留给 change 追上来的余量
 
         /** 服务端下发的单帧上限（config.max_frame_size），0 = 未下发 */
         static get serverMaxFrame() { return FilePanel._serverMaxFrame || 0; }
@@ -3181,8 +3809,6 @@
             const aligned = Math.ceil(ideal / FilePanel.CHUNK_MIN) * FilePanel.CHUNK_MIN;
             return Math.min(max, Math.max(FilePanel.CHUNK_MIN, aligned));
         }
-        static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
-        static get END_ACK_TIMEOUT() { return 15000; }         // 等 PC 端落盘确认的超时（ms）
 
         static get STYLES() {
             return `
@@ -3323,6 +3949,8 @@
             this._kind = 'file';     // 当前传输类型：'file' 落盘 | 'photo' 到剪贴板
             this._file = null;       // 发送中的 File（取消/出错时留作重发）
             this._cancelRequested = false;
+            this._pendingKind = null;  // 选择器在飞时的传输类型：非 null 表示「等结果」
+            this._cancelTimer = null;  // 「取消」判定计时器（见 _bind）
 
             this._injectStyles();
             this._buildDOM();
@@ -3389,6 +4017,11 @@
                 if (this._state !== 'idle') return;
                 this._pendingKind = kind;
                 this.fileInput.accept = kind === 'photo' ? 'image/*' : '';
+                // 唤起选择器会把 WebView 送回后台（Android 可能顺手掐掉 WebSocket）。
+                // 记下这一刻，断连时才能和 [LIFE] 事件对上到底是哪一步掉的线；
+                // 同时告诉 wsClient：接下来这段断连属于「选择器造成的」，才配走静默窗口。
+                console.info(`[FILE] 打开选择器 kind=${kind}`, PhoneLog.snap());
+                this.ws.beginPickerContext();
                 this.fileInput.click();
             };
             this.pickRow.querySelector('[data-fp="image"]').addEventListener('click', () => pickKind('photo'));
@@ -3396,13 +4029,34 @@
             this.fileInput.addEventListener('change', () => {
                 const f = this.fileInput.files && this.fileInput.files[0];
                 this.fileInput.value = '';   // 允许下次选同一个文件仍触发 change
+                const kind = this._pendingKind || 'file';
+                this._pendingKind = null;    // 有 change 就是「有结果了」，取消检测到此为止
                 if (f) {
-                    const kind = this._pendingKind || 'file';
-                    this._pendingKind = null;
+                    this.ws.endPickerContext();
+                    console.info(`[FILE] 已选择 ${f.name} size=${f.size}`, PhoneLog.snap());
                     this._start(f, kind);
+                } else {
+                    // 少数浏览器「取消」也会发 change（files 为空）：按取消处理
+                    console.info('[FILE] 选择器取消');
+                    this.ws.cancelPickerContext();
                 }
             });
             this.root.querySelector('.fp-cancel').addEventListener('click', () => this._cancel());
+
+            // 「取消」不保证有事件可依赖（多数 Android WebView 干脆一个都不发），所以靠
+            // 「回到前台后短时间内等不到 change」来判定：等到了 = 点了确定，等不到 = 取消。
+            // 取消要照常上报断开，见 wsClient.cancelPickerContext。
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden || !this._pendingKind) return;
+                clearTimeout(this._cancelTimer);
+                this._cancelTimer = setTimeout(() => {
+                    this._cancelTimer = null;
+                    if (!this._pendingKind) return;   // 期间 change 到了 = 点了确定
+                    this._pendingKind = null;
+                    console.info('[FILE] 选择器取消（回前台后无 change）');
+                    this.ws.cancelPickerContext();
+                }, FilePanel.PICKER_CANCEL_GRACE);
+            });
         }
 
         /** 外部重发入口（消息气泡点击）：重新发送同一文件（仅 file 可重发） */
@@ -3416,10 +4070,23 @@
         }
 
         async _start(file, kind = 'file') {
-            if (this._state === 'sending') return;
+            if (this._state !== 'idle') return;   // sending / waiting 期间不接受新的发送请求
+            // 「未连接」多数是个瞬时态：断线后 1s 内就会重连好，而唤起文件选择器本身
+            // 会把 WebView 送回后台、Android 常顺手掐掉 socket（两端只剩一个 1006），
+            // 选完文件回到前台时连接正处在这个重连窗口里。
+            // 所以先等一会儿（而不是立刻报未连接），等到了就直接发。
             if (!this.ws.getConnected()) {
-                alert(t('panel_file_disconnected'));
-                return;
+                this._state = 'waiting';
+                console.info('[FILE] 连接未就绪，先等重连…', PhoneLog.snap());
+                const ok = await this.ws.whenReady(FilePanel.RECONNECT_WAIT);
+                this._state = 'idle';
+                if (!ok) {
+                    // 顺手把关闭现场带出来：否则手机上只能看到「未连接」，无从定位
+                    showToast(t('panel_file_disconnected'),
+                              WS_DIAG ? this.ws.diagText() : '', 8000);
+                    return;
+                }
+                console.info('[FILE] 重连成功，继续发送');
             }
 
             this._id += 1;
@@ -3628,37 +4295,27 @@
 
         new MessageInteractionManager(chatContainer, uiController, wsClient);
 
-        // 网络恢复时立即重连，跳过等待定时器
+        // 断线恢复的两条快路径：都跳过 1s 退避直接重连（把重连窗口从「1s 起」压到「立即」）
+        //   ① network online —— Wi-Fi/蜂窝切回来
+        //   ② 页面回前台 —— Android WebView 切后台（唤起文件选择器、熄屏、被别的 Activity
+        //      顶掉）期间系统常顺手掐掉 socket，两端都收不到关闭帧、只剩一个 1006
         window.addEventListener('online', () => {
-            console.log('[NET] Network online, triggering immediate reconnect');
-            if (wsClient.authRejected) return;
-            if (wsClient.getConnected()) return;
-
-            // 清除等待中的重连定时器
-            if (wsClient.reconnectTimer) {
-                clearTimeout(wsClient.reconnectTimer);
-                wsClient.reconnectTimer = null;
-            }
-
-            // 如果当前有卡在 CONNECTING 的连接，强制关闭它，
-            // 并标记让 onclose 触发的下一次重连跳过等待
-            if (wsClient.ws && wsClient.ws.readyState === WebSocket.CONNECTING) {
-                wsClient._skipNextDelay = true;
-                try { wsClient.ws.close(); } catch(e) {}
-            } else {
-                wsClient.connect();
-            }
+            console.debug('[NET] Network online, triggering immediate reconnect');
+            wsClient.reconnectNow('online');
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) wsClient.reconnectNow('visible');
         });
 
         wsClient.on('config', (data) => {
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
-                console.log(t('log_config_updated') + data.mobile_max_records);
+                console.debug(t('log_config_updated') + data.mobile_max_records);
             }
             // 服务端单帧上限 → 决定文件分块大小（未下发则走 CHUNK_FALLBACK 保守值）
             if (data.max_frame_size !== undefined) FilePanel.setServerMaxFrame(data.max_frame_size);
         });
-        wsClient.on('send', (data) => console.log("[WS] 收到 send 回声:", data));
+        wsClient.on('send', (data) => console.debug("[WS] 收到 send 回声:", data));
         // PC 端配置变更（如切换加密开关）：URL 已变化，停止自动重连并提示重新扫码
         wsClient.on('reconnect', (data) => {
             if (data && data.reason === 'config_changed') {

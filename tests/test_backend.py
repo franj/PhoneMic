@@ -4,9 +4,12 @@ PhoneMic 后端服务单元测试
 所有 WebSocket 测试均通过 SecureChannel 认证后发送加密消息。
 """
 
+import asyncio
 import base64
 import json
+import logging
 import multiprocessing
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -18,6 +21,7 @@ from nacl.public import PrivateKey, PublicKey, SealedBox
 from hashlib import blake2b
 
 from phonemic.bridge_queue import QueueEventBridge
+from phonemic.server import api as api_mod
 from phonemic.server.api import (
     set_bridge, start_server, stop_server, restart_server,
     push_config, send_to_phone, set_secure_channel, request_client_rescan,
@@ -619,6 +623,70 @@ def test_sodium_js_gzip_route(server_no_sc):
     assert len(body) > 100000, f"sodium.js.gz too small: {len(body)} bytes"
 
 
+# ---------- 测试手机端日志回传（POST /{secret}/api/client-log）----------
+def _post(url, payload: bytes):
+    """POST 原始字节并返回响应（异常由调用方断言状态码）。"""
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    return urllib.request.urlopen(req, timeout=2)
+
+
+def test_client_log_route(server_no_sc, caplog):
+    """手机端日志应原样打进服务端日志，并返回 204（不回帧、不落盘）"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/api/client-log")
+    now = int(time.time() * 1000)
+    entries = [
+        [now, "warn", "[WS] closed code=1006 clean=false"],
+        [now + 1, "error", "auth_ack decrypt failed"],
+    ]
+    body = json.dumps({"ua": "pytest-mobile-ua", "entries": entries}).encode("utf-8")
+
+    caplog.set_level(logging.INFO)
+    resp = _post(url, body)
+    assert resp.status == 204
+
+    # 手机端原样回传的现场必须能在服务端日志里看到（含时间戳与级别）
+    assert "[WS] closed code=1006 clean=false" in caplog.text
+    assert "auth_ack decrypt failed" in caplog.text
+    assert "pytest-mobile-ua" in caplog.text
+
+
+def test_client_log_rejects_bad_payload(server_no_sc):
+    """非法 JSON 或缺 entries 一律 400：日志入口不能变成异常源"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/api/client-log")
+
+    for payload in (b"{not json", json.dumps({"ua": "x"}).encode("utf-8"),
+                    json.dumps([1, 2, 3]).encode("utf-8")):
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            _post(url, payload)
+        assert ei.value.code == 400
+
+
+def test_client_log_rejects_oversize(server_no_sc):
+    """超过体积上限直接 413，避免日志入口被滥用打爆服务端日志"""
+    host, port, _, sc = server_no_sc
+    url = http_url(host, port, sc, "/api/client-log")
+    entry = [int(time.time() * 1000), "info", "x" * 500]
+    payload = json.dumps({"ua": "x", "entries": [entry] * 600}).encode("utf-8")
+    assert len(payload) > 256 * 1024
+
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _post(url, payload)
+    assert ei.value.code == 413
+
+
+def test_post_to_readonly_path_is_405(server_no_sc):
+    """只读资源不接受 POST：分发处按方法分流，其余路径一律 405"""
+    host, port, _, sc = server_no_sc
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        _post(http_url(host, port, sc, "/api/lang.json"), b"{}")
+    assert ei.value.code == 405
+
+
 # ---------- 集成测试 ----------
 def test_real_server_with_websocket_client():
     """启动真实服务，使用同步 WebSocket 客户端测试多种加密消息"""
@@ -878,3 +946,68 @@ class TestConnectionPreemption:
 
             with pytest.raises(Exception):
                 ws_a.recv(timeout=2)
+# ---------- 日志级别与开发模式标记 ----------
+
+
+class TestLogLevelResolution:
+    """PHONEMIC_LOG 的三档解析：info 默认 / debug / trace，旧开关等价 trace。"""
+
+    @pytest.mark.parametrize("env,expected", [
+        ({}, "info"),
+        ({"PHONEMIC_LOG": "debug"}, "debug"),
+        ({"PHONEMIC_LOG": "trace"}, "trace"),
+        ({"PHONEMIC_LOG": "DEBUG"}, "debug"),
+        ({"PHONEMIC_LOG": "nonsense"}, "info"),
+        ({"PHONEMIC_WS_DEBUG": "1"}, "trace"),
+        ({"PHONEMIC_WS_DEBUG": "0"}, "info"),
+        ({"PHONEMIC_LOG": "debug", "PHONEMIC_WS_DEBUG": "1"}, "trace"),
+    ])
+    def test_resolve(self, monkeypatch, env, expected):
+        monkeypatch.delenv("PHONEMIC_LOG", raising=False)
+        monkeypatch.delenv("PHONEMIC_WS_DEBUG", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert api_mod._resolve_log_level() == expected
+
+
+class TestDevModeMarkInjection:
+    """注入给手机页面的开发模式标记：源码运行为 true，打包版为 false。"""
+
+    def _body(self, monkeypatch, frozen):
+        monkeypatch.setattr(api_mod, "is_frozen", lambda: frozen)
+        return api_mod._serve_mobile().body.decode("utf-8")
+
+    def test_source_run_injects_true(self, monkeypatch):
+        body = self._body(monkeypatch, False)
+        assert "window.__PHONEMIC_DEV__ = true" in body
+        # 占位符必须被替换掉，否则客户端拿不到标记
+        assert api_mod._DEV_MODE_MARK not in body
+
+    def test_packaged_injects_false(self, monkeypatch):
+        body = self._body(monkeypatch, True)
+        assert "window.__PHONEMIC_DEV__ = false" in body
+        assert api_mod._DEV_MODE_MARK not in body
+
+
+class TestClientLogEndpoint:
+    """手机端日志回传入口：打包版整个关掉（手机端也不会发）。"""
+
+    def test_404_when_packaged(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
+
+        class _FakeRequest:
+            async def body(self):
+                return b'{"entries": [[0, "info", "x"]]}'
+
+        # 必须在独立线程里跑：pytest-playwright 会让当前线程处于 running
+        # event loop 中，直接 asyncio.run() 会抛 RuntimeError，协程永不被 await
+        box = {}
+
+        def worker():
+            box["resp"] = asyncio.run(api_mod._receive_client_log(_FakeRequest()))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+
+        assert box["resp"].status_code == 404

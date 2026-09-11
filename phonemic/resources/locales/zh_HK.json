@@ -189,7 +189,17 @@
     "dbg_ready_plain": "連線就緒({ms}ms，明文模式)",
     "dbg_error": "連線錯誤({ms}ms)，即將關閉...",
     "dbg_closed": "連線關閉，{ms}ms 後重連...",
-    "dbg_timeout": "連線逾時({ms}ms)，重試中..."
+    "dbg_timeout": "連線逾時({ms}ms)，重試中...",
+    "dbg_log_title": "手機端日誌",
+    "dbg_log_level": "級別",
+    "dbg_log_clear": "清空",
+    "dbg_log_copy": "複製",
+    "dbg_log_forward_on": "轉發:開",
+    "dbg_log_forward_off": "轉發:關",
+    "dbg_log_close": "關閉",
+    "dbg_log_empty": "(暫無日誌)",
+    "dbg_log_copied": "已複製全部日誌",
+    "dbg_log_copy_failed": "複製失敗，請長按選取文字"
   },
   "commands": {
     "title": "命令管理",

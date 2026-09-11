@@ -116,14 +116,14 @@ def mobile_page(page):
         "window.i18n = " + json.dumps(MOBILE_I18N, ensure_ascii=False) + ";",
         1,
     )
-    html = html.replace("<head>", "<head><script>" + MOCK_WS_SCRIPT + "</script>", 1)
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
-    html = re.sub(
-        r"<head[^>]*>",
-        lambda m: m.group(0) + "<script>" + MOCK_WS_SCRIPT + "</script>",
-        html,
-        count=1,
+    # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
+    # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    boot = (
+        "<script>window.__PHONEMIC_DEV__=true;</script>"
+        "<script>" + MOCK_WS_SCRIPT + "</script>"
     )
+    html = re.sub(r"<head[^>]*>", lambda m: m.group(0) + boot, html, count=1)
     # 暴露 wsClient 供 mock 检查 isEncrypted
     html = html.replace(
         "wsClient.connect();",
@@ -249,15 +249,40 @@ class TestConfigSync:
 
 
 class TestDisconnect:
+    """非选择器路径的断连（首连失败、前台掉线）的界面表现：立刻显示 + 输入禁用。
+
+    这类断连不做静默——界面若还停在「已连接」的样子，用户的操作会静默失败。
+    「文件选择器造成的断连」走静默窗口，由 TestDisconnectRecovery 覆盖。
+    """
+
+    def _close_and_fail(self, page):
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")   # 掐掉重连，模拟真的断着
+        page.evaluate("() => window.__mockWS.triggerClose()")
+        page.wait_for_function(
+            "() => document.getElementById('status-bar').style.display === 'block'", timeout=2000
+        )
+
     def test_disconnect_shows_status_bar(self, mobile_page):
-        mobile_page.evaluate("() => window.__mockWS.triggerClose()")
+        self._close_and_fail(mobile_page)
         assert mobile_page.locator("#status-bar").is_visible()
         assert mobile_page.locator("#input-box").is_disabled()
 
     def test_disconnect_disables_buttons(self, mobile_page):
-        mobile_page.evaluate("() => window.__mockWS.triggerClose()")
+        self._close_and_fail(mobile_page)
         assert mobile_page.locator("#btn-send").is_disabled()
         assert mobile_page.locator("#btn-clear").is_disabled()
+
+    def test_foreground_disconnect_never_waits_grace_window(self, mobile_page):
+        """没唤起过选择器：断连立刻上报，不白等那 3 秒静默窗口。"""
+        page = mobile_page
+        assert page.evaluate("() => window.__wsClient.connectionGraceMs") == 3000
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")
+        page.evaluate("window.__mockWS.triggerClose()")
+        # 3 秒窗口的十分之一内就该出来：等到了才说明压根没进窗口
+        page.wait_for_function(
+            "() => document.getElementById('status-bar').style.display === 'block'", timeout=300
+        )
+        assert page.locator("#input-box").is_disabled()
 
 
 class TestChatList:
@@ -394,3 +419,270 @@ def test_config_message_sets_max_frame_size(mobile_page):
     page.evaluate("() => window.__mockWS.triggerMessage({type:'config', max_frame_size: 'abc'})")
     page.wait_for_timeout(100)
     assert page.evaluate("() => window._filePanel.constructor.serverMaxFrame") == 0
+
+
+class TestDisconnectRecovery:
+    """断线恢复路径：Android WebView 在切后台/唤起文件选择器时会把 socket 掐掉（两端只剩 1006）。
+
+    这三条锁定的都是「用户不该感知到这次抖动」：
+    未连接时先等重连而不是立刻报错、回前台立即重连、连接正常时不折腾。
+    """
+
+    FAKE_FILE = (
+        "{name: 'f.bin', size: 1024,"
+        " slice: (a, b) => new Blob([new Uint8Array(b - a)])}"
+    )
+
+    def test_start_waits_for_reconnect_instead_of_reporting_disconnected(self, mobile_page):
+        """断连瞬间发起发送：应等 1s 自动重连成功后照常发出，而不是报「未连接到电脑」。"""
+        page = mobile_page
+        page.evaluate("window.__mockWS.triggerClose()")
+        assert page.evaluate("() => window.__wsClient.getConnected()") is False
+
+        sent = page.evaluate(
+            "async () => {"
+            "  const panel = window._filePanel;"
+            "  panel._waitEndAck = () => Promise.resolve(true);"
+            f"  await panel._start({self.FAKE_FILE}, 'file');"
+            "  return window.__mockWS.sentMessages.map(m => m.a);"
+            "}"
+        )
+        assert "start" in sent, sent
+        assert "end" in sent, sent
+        assert page.evaluate("() => window.__wsClient.getConnected()") is True
+
+    def test_start_toast_is_non_blocking(self, mobile_page):
+        """真的连不上时给非阻塞浮层（不是 alert —— 它会冻住主线程把重连也一起卡死）。"""
+        page = mobile_page
+        dialogs = []
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.evaluate("() => { window.__wsClient.authRejected = true; }")   # 阻止自动重连
+        page.evaluate(
+            "() => Object.defineProperty(window._filePanel.constructor,"
+            " 'RECONNECT_WAIT', { value: 400 })"
+        )
+        page.evaluate(
+            "async () => { await window._filePanel._start("
+            f"{self.FAKE_FILE}, 'file'); }}"
+        )
+
+        assert dialogs == [], dialogs
+        assert page.evaluate("document.querySelectorAll('#toast-host .toast').length") == 1
+        assert MOBILE_I18N["panel_file_disconnected"] in page.inner_text("#toast-host .toast")
+        assert page.evaluate("() => window._filePanel._state") == "idle"
+        # 点一下即消
+        page.locator("#toast-host .toast").click()
+        assert page.evaluate("document.querySelectorAll('#toast-host .toast').length") == 0
+
+    def test_visible_reconnects_immediately_without_backoff(self, mobile_page):
+        """回前台立即重连：不等 1s 退避，否则「选完文件回来」正好落在未连接窗口里。"""
+        page = mobile_page
+        page.evaluate("window.__mockWS.triggerClose()")
+        n_before = page.evaluate("window.__mockWS.instances.length")
+
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        # 退避是 1000ms：800ms 内连上才说明走的是快路径
+        page.wait_for_function("() => window.__wsClient.isConnected", timeout=800)
+        assert page.evaluate("window.__mockWS.instances.length") == n_before + 1
+
+    def test_reconnect_now_is_noop_while_connected(self, mobile_page):
+        """连接正常时回前台不得重连（否则每次切前台都要抖一次）。"""
+        page = mobile_page
+        n_before = page.evaluate("window.__mockWS.instances.length")
+        page.evaluate(
+            "() => { window.__wsClient.reconnectNow('visible');"
+            "  document.dispatchEvent(new Event('visibilitychange')); }"
+        )
+        page.wait_for_timeout(150)
+        assert page.evaluate("window.__mockWS.instances.length") == n_before
+
+    def test_disconnect_stays_silent_inside_grace_window(self, mobile_page):
+        """选择器路径的静默宽限窗口：断连后 3 秒内界面完全不动（不显示状态栏、不禁用输入框）。
+
+        唤起文件选择器会把页面判为不可见，Android 常顺手掐掉 socket；选中文件回到前台后
+        1s 内就能连回来。这类断连用户根本没做过「断开」的操作，出现任何提示都是打扰。
+        （「点取消」不算——取消要照常上报，见 test_picker_cancel_reports_immediately。）
+        """
+        page = mobile_page
+        assert page.evaluate("() => window.__wsClient.connectionGraceMs") == 3000
+        page.evaluate("() => window.__wsClient.beginPickerContext()")   # 唤起文件选择器
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.evaluate("() => window.__wsClient.endPickerContext()")     # 选中了文件
+        # 窗口内持续采样：状态栏一次都不许露出来
+        page.evaluate(
+            "() => { window.__sbSeen = 0;"
+            "  window.__sbTimer = setInterval(() => {"
+            "    if (document.getElementById('status-bar').style.display === 'block')"
+            "      window.__sbSeen++; }, 25); }"
+        )
+        page.wait_for_function("() => window.__wsClient.getConnected()", timeout=3000)
+        page.wait_for_timeout(100)
+
+        assert page.evaluate("window.__sbSeen") == 0, "窗口内重连成功，界面不该出现任何断开提示"
+        assert page.evaluate("() => document.getElementById('input-box').disabled") is False
+
+    def test_grace_expiry_only_then_shows_reconnecting(self, mobile_page):
+        """只有窗口超时仍未连上，才第一次把断开告诉界面。"""
+        page = mobile_page
+        page.evaluate(
+            "() => { window.__wsClient.connectionGraceMs = 300;"
+            "  window.__wsClient.connect = () => {}; }"   # 掐掉重连，模拟真的断着
+        )
+        page.evaluate("() => window.__wsClient.beginPickerContext()")
+        page.evaluate("window.__mockWS.triggerClose()")
+
+        page.wait_for_timeout(150)
+        assert page.evaluate("() => document.getElementById('status-bar').style.display") == "none"
+
+        page.wait_for_function(
+            "() => document.getElementById('status-bar').style.display === 'block'", timeout=2000
+        )
+        assert "正在重连" in page.inner_text("#status-bar")
+        assert page.evaluate("() => document.getElementById('input-box').disabled") is True
+
+    def test_grace_window_is_not_reset_by_repeated_closes(self, mobile_page):
+        """窗口从第一次断连起算、不随重试重置，否则连续快速失败会把界面永远静默下去。"""
+        page = mobile_page
+        page.evaluate(
+            "() => { window.__wsClient.connectionGraceMs = 500;"
+            "  window.__wsClient.connect = () => {}; }"
+        )
+        page.evaluate("() => window.__wsClient.beginPickerContext()")
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.wait_for_timeout(250)
+        page.evaluate("window.__mockWS.triggerClose()")   # 重连握手又失败，再断一次
+        page.wait_for_timeout(100)                        # 距首次断连 350ms < 500ms
+
+        assert page.evaluate("() => document.getElementById('status-bar').style.display") == "none"
+        page.wait_for_function(
+            "() => document.getElementById('status-bar').style.display === 'block'", timeout=2000
+        )
+
+    def test_picker_cancel_reports_immediately(self, mobile_page):
+        """点了取消：不进静默窗口，立刻恢复「已断开」并禁用操作。
+
+        取消之后用户马上可能打字、点按钮，界面若还停在「已连接」的样子，这些操作会静默
+        失败——比看到一个断线提示糟糕得多。
+        """
+        page = mobile_page
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")
+        page.evaluate(
+            "() => { window._filePanel._pendingKind = 'file';"
+            "  window.__wsClient.beginPickerContext(); }"
+        )
+        page.evaluate("window.__mockWS.triggerClose()")
+
+        page.wait_for_timeout(100)
+        assert page.evaluate("() => document.getElementById('status-bar').style.display") == "none"
+
+        # 回到前台、等不到 change → 判为取消（走真实入口的取消检测）
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_function(
+            "() => document.getElementById('status-bar').style.display === 'block'", timeout=1000
+        )
+        assert page.locator("#input-box").is_disabled()
+
+    def test_picker_cancel_while_connected_does_not_report(self, mobile_page):
+        """取消但连接完好：什么都不该发生（不能凭空弹出断线提示）。"""
+        page = mobile_page
+        assert page.evaluate("() => window.__wsClient.getConnected()") is True
+        page.evaluate(
+            "() => { window._filePanel._pendingKind = 'file';"
+            "  window.__wsClient.beginPickerContext(); }"
+        )
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_timeout(400)   # 越过 250ms 取消判定
+
+        assert page.evaluate("() => document.getElementById('status-bar').style.display") == "none"
+        assert page.locator("#input-box").is_enabled()
+
+
+class TestPhoneLog:
+    """手机端日志浮层：手机上没有 devtools，这是唯一能就地查看断连现场的地方。"""
+
+    def _open(self, page):
+        page.locator("#phone-log-btn").click()
+        assert page.locator("#phone-log-panel").is_visible()
+
+    def test_button_opens_panel_with_translated_labels(self, mobile_page):
+        assert mobile_page.locator("#phone-log-btn").is_visible()
+        assert not mobile_page.locator("#phone-log-panel").is_visible()
+
+        self._open(mobile_page)
+        # 文案走 i18n（夹具注入 zh_CN 的 mobile 段），不该回退成键名
+        assert mobile_page.locator('[data-act="clear"]').inner_text() == "清空"
+        assert mobile_page.locator('[data-act="close"]').inner_text() == "关闭"
+        # 打开时记录一次环境摘要：排查断连时先看这几行
+        assert "[ENV]" in mobile_page.locator("#phone-log-body").inner_text()
+
+    def test_console_and_uncaught_errors_are_captured(self, mobile_page):
+        mobile_page.evaluate("() => console.warn('[TEST] 主动记录一行')")
+        mobile_page.evaluate("() => { setTimeout(() => { throw new Error('boom-test'); }, 0); }")
+        mobile_page.wait_for_timeout(100)
+        self._open(mobile_page)
+
+        body = mobile_page.locator("#phone-log-body").inner_text()
+        assert "[TEST] 主动记录一行" in body
+        assert "boom-test" in body      # 未捕获异常平时完全不可见，必须留痕
+
+    def test_close_hides_panel(self, mobile_page):
+        self._open(mobile_page)
+        mobile_page.locator('[data-act="close"]').click()
+        assert not mobile_page.locator("#phone-log-panel").is_visible()
+
+    def test_reopen_does_not_duplicate_env_snapshot(self, mobile_page):
+        """重复开关面板不该重复记环境摘要（一次 4 条，纯刷屏）。"""
+        for _ in range(3):
+            self._open(mobile_page)
+            mobile_page.locator('[data-act="close"]').click()
+        self._open(mobile_page)
+        assert mobile_page.locator("#phone-log-body").inner_text().count("[ENV]") == 4
+
+    def test_clear_empties_panel(self, mobile_page):
+        self._open(mobile_page)
+        mobile_page.locator('[data-act="clear"]').click()
+        assert mobile_page.locator("#phone-log-body").inner_text() == "(暂无日志)"
+
+    def test_forward_toggle_switches_label(self, mobile_page):
+        self._open(mobile_page)
+        fwd = mobile_page.locator('[data-act="forward"]')
+        # 转发默认关闭：只有需要排查时才手动打开
+        assert fwd.inner_text() == "转发:关"
+        fwd.click()
+        assert fwd.inner_text() == "转发:开"
+
+    def test_level_toggle_filters_constant_noise(self, mobile_page):
+        """默认 info 档拦掉 log/debug 级的常量噪音，切到 debug 才看得见。"""
+        mobile_page.evaluate("() => console.log('[TEST] 每次连接都重复的常量')")
+        self._open(mobile_page)
+        body = mobile_page.locator("#phone-log-body")
+        lvl = mobile_page.locator('[data-act="level"]')
+        assert lvl.inner_text() == "级别:info"
+        assert "[TEST] 每次连接都重复的常量" not in body.inner_text()
+
+        lvl.click()
+        assert lvl.inner_text() == "级别:debug"
+        assert "[TEST] 每次连接都重复的常量" in body.inner_text()
+
+
+class TestPackagedMode:
+    """打包版（服务端注入 __PHONEMIC_DEV__ = false）：日志模块完全不启动。"""
+
+    def test_no_log_module_without_dev_mark(self, page):
+        html = MOBILE_HTML_PATH.read_text(encoding="utf-8")
+        # 模拟打包版：服务端把占位符替换成 false（见 api.py:_serve_mobile）
+        html = html.replace(
+            "<!--PHONEMIC_DEV_MODE-->",
+            "<script>window.__PHONEMIC_DEV__ = false;</script>",
+        )
+        page.set_content(html)
+
+        assert page.evaluate("() => window.WS_DIAG") is False
+        # 入口按钮不创建（打包版连按钮都不保留）
+        assert page.evaluate("() => document.getElementById('phone-log-btn')") is None
+        # 但空壳接口仍在，保证 FilePanel 调用 PhoneLog.snap() 不报错
+        assert page.evaluate("() => window.PhoneLog.snap()") == ""
+        # 未接管 console：记录一行也不会进缓冲
+        page.evaluate("() => console.log('[TEST] 打包版不应留痕')")
+        assert page.evaluate("() => window.PhoneLog.text()") == ""
