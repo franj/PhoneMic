@@ -89,6 +89,7 @@ INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 
+VK_BACK = 0x08
 VK_TAB = 0x09
 VK_RETURN = 0x0D
 VK_SHIFT = 0x10
@@ -196,6 +197,21 @@ def _send(events: List["INPUT"]) -> None:
         )
 
 
+def _send_groups(groups: List[List["INPUT"]]) -> None:
+    """分批注入事件组。非首批再失败即视为已部分上屏，避免调用方回退造成重复。"""
+    batches = _batch(groups)
+    for index, batch in enumerate(batches):
+        if index:
+            time.sleep(BATCH_INTERVAL_SEC)
+        try:
+            _send(batch)
+        except SendTextError as e:
+            # 第一批之后再失败，前面的字符已经上屏，回退粘贴会造成重复
+            if index and not e.partial:
+                raise SendTextError(str(e), partial=True) from e
+            raise
+
+
 def send_text(text: str) -> None:
     """
     以模拟键盘的方式逐字符输入文本，不使用剪贴板。
@@ -219,15 +235,24 @@ def send_text(text: str) -> None:
         logger.warning("send_text: 文本不含可输入字符，跳过")
         return
 
-    batches = _batch(groups)
-    for index, batch in enumerate(batches):
-        if index:
-            time.sleep(BATCH_INTERVAL_SEC)
-        try:
-            _send(batch)
-        except SendTextError as e:
-            # 第一批之后再失败，前面的字符已经上屏，回退粘贴会造成重复
-            if index and not e.partial:
-                raise SendTextError(str(e), partial=True) from e
-            raise
-    logger.debug(f"模拟输入完成: {len(normalized)} 字符 / {len(batches)} 批")
+    _send_groups(groups)
+    logger.debug(f"模拟输入完成: {len(normalized)} 字符")
+
+
+def send_backspace(count: int) -> None:
+    """
+    模拟按下 count 次退格键，删除光标前的内容。
+
+    直接输入模式用它撤回「识别过程中已打出、但被后续结果修正掉」的文字。
+    与 send_text 同样：失败抛 SendTextError，partial=False 表示一个键都没进去，
+    此时调用方可以安全地改用其它上屏方式，不会造成重复。
+    """
+    if not isinstance(count, int):
+        raise TypeError("count must be an int")
+    if count <= 0:
+        return
+    if not IS_WINDOWS:
+        raise SendTextError("模拟键盘输入仅在 Windows 上可用")
+
+    _send_groups([_vk_pair(VK_BACK) for _ in range(count)])
+    logger.debug(f"模拟退格完成: {count} 次")

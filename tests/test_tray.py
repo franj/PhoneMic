@@ -50,6 +50,7 @@ class TestTrayMenuStructure:
             None,
             i18n.tr("dashboard.input_clipboard"),
             i18n.tr("dashboard.input_type"),
+            i18n.tr("dashboard.input_direct"),
             None,
             i18n.tr("tray.menu_about"),
             i18n.tr("tray.menu_quit"),
@@ -61,6 +62,7 @@ class TestTrayInputModeMenu:
         tray._create_tray_menu()
         assert tray._act_input_paste.isChecked() is True
         assert tray._act_input_type.isChecked() is False
+        assert tray._act_input_direct.isChecked() is False
 
     def test_set_type_persists_and_checks(self, tray):
         tray._create_tray_menu()
@@ -98,7 +100,7 @@ class TestTrayInputModeMenu:
         assert group is not None
         assert group.isExclusive() is True
         assert tray._act_input_type.actionGroup() is group
-        assert len(group.actions()) == 2
+        assert len(group.actions()) == 3
 
     def test_reclicking_selected_item_keeps_checked(self, tray):
         """互斥组：重复点击已选中项不会被取消勾选。"""
@@ -110,3 +112,25 @@ class TestTrayInputModeMenu:
     def test_sync_without_menu_is_safe(self, tray):
         """托盘不可用、菜单未构建时同步不应抛异常。"""
         tray._sync_input_checks()  # 无 _act_input_paste，应安全返回
+
+
+class TestTrayDirectInputMenu:
+    def test_set_direct_persists_and_checks(self, tray):
+        tray._create_tray_menu()
+        tray._set_input_mode("direct")
+        assert tray.sm.get("text_input_mode") == "direct"
+        assert tray._act_input_direct.isChecked() is True
+        assert tray._act_input_paste.isChecked() is False
+        assert tray._act_input_type.isChecked() is False
+
+    def test_triggering_action_switches(self, tray):
+        tray._create_tray_menu()
+        tray._act_input_direct.trigger()
+        assert tray.sm.get("text_input_mode") == "direct"
+        assert tray._act_input_direct.isChecked() is True
+
+    def test_external_change_syncs_checks(self, tray):
+        tray._create_tray_menu()
+        tray.sm.set("text_input_mode", "direct")
+        assert tray._act_input_direct.isChecked() is True
+        assert tray._act_input_paste.isChecked() is False

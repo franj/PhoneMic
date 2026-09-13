@@ -18,7 +18,7 @@ from phonemic.bridge_queue import QueueEventBridge
 from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
-from phonemic.gui.keyboard import flash_insert, send_keys
+from phonemic.gui.keyboard import flash_insert, preview_text, send_keys
 from phonemic.gui.clipboard import copy_image
 from phonemic.gui.mouse import perform_mouse, set_stats_hook
 from phonemic.gui.mouse_debug import MouseDebugWindow
@@ -276,7 +276,9 @@ def main():
 
     def on_backend_event(event_type: str, payload: Any):
         if event_type == "preview":
-            hud.on_preview_text(payload)
+            # 直接输入模式下文字已打进目标输入框，此时不该同时弹悬浮窗预览
+            if not (isinstance(payload, str) and preview_text(payload)):
+                hud.on_preview_text(payload)
         elif event_type == "send":
             if not command_interceptor.process_send_text(payload):
                 flash_insert(payload)

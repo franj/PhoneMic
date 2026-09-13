@@ -102,6 +102,7 @@ class SettingsDialog(QDialog):
         self.input_mode_combo = QComboBox()
         self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_paste"), "paste")
         self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_type"), "type")
+        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_direct"), "direct")
         self.input_mode_combo.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
         layout.addRow(self.i18n.tr("settings.input_mode") + ":", self.input_mode_combo)
 

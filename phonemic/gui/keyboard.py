@@ -1,8 +1,10 @@
 """
-上屏逻辑：把文本送到当前光标位置，两种方式可选——
+上屏逻辑：把文本送到当前光标位置，三种方式可选——
 - 剪贴板粘贴：写剪贴板 + 模拟 Ctrl+V，随后恢复原剪贴板内容；
 - 模拟键盘输入：Win32 SendInput 逐字符注入，不碰剪贴板，
-  适用于终端 / SSH 客户端 / vim 等 Ctrl+V 不生效的场景。
+  适用于终端 / SSH 客户端 / vim 等 Ctrl+V 不生效的场景；
+- 模拟键盘（直接输入）：同样是 SendInput 逐字符注入，但识别过程中就把文字
+  打进输入框（preview 事件增量更新），send 时只做最后修正，全程不显示悬浮窗。
 
 同时提供按键序列执行功能（支持逗号分隔多个组合）。
 """
@@ -13,14 +15,15 @@ from typing import Optional, Tuple, List
 import pyautogui
 import pyperclip
 
-from phonemic.gui import text_input
+from phonemic.gui import direct_input, text_input
 
 logger = logging.getLogger(__name__)
 
 # 上屏方式取值
-INPUT_MODE_PASTE = "paste"   # 剪贴板 + Ctrl+V
-INPUT_MODE_TYPE = "type"     # 模拟键盘逐字符输入
-VALID_INPUT_MODES = (INPUT_MODE_PASTE, INPUT_MODE_TYPE)
+INPUT_MODE_PASTE = "paste"     # 剪贴板 + Ctrl+V
+INPUT_MODE_TYPE = "type"       # 模拟键盘逐字符输入（只在识别结束时上屏）
+INPUT_MODE_DIRECT = "direct"   # 模拟键盘 + 识别过程中直接输入（边说边出字）
+VALID_INPUT_MODES = (INPUT_MODE_PASTE, INPUT_MODE_TYPE, INPUT_MODE_DIRECT)
 DEFAULT_INPUT_MODE = INPUT_MODE_PASTE
 
 # 显式指定时优先于配置文件，供命令行/测试覆盖
@@ -52,7 +55,7 @@ def get_input_mode() -> str:
 # ---------- 上屏入口 ----------
 def flash_insert(text: str) -> None:
     """
-    将文本送到当前光标位置，具体方式由配置的上屏方式决定。
+    将文本送到当前光标位置（识别结束时的最终文本），具体方式由配置决定。
 
     模拟输入若一个字符都没能注入（例如目标窗口以管理员权限运行，SendInput 被
     UIPI 拦截），回退到剪贴板粘贴；若已注入了一部分则不回退，否则会重复上屏。
@@ -63,16 +66,50 @@ def flash_insert(text: str) -> None:
         logger.warning("flash_insert called with empty text, doing nothing")
         return
 
-    if get_input_mode() == INPUT_MODE_TYPE:
-        try:
-            text_input.send_text(text)
+    mode = get_input_mode()
+    if mode == INPUT_MODE_DIRECT:
+        # 直接输入：识别过程中文字已经打进输入框，这里只把已打的内容修正成最终结果。
+        # 返回 False 说明压根没有进行中的会话（客户端只发 send / 会话已放弃且
+        # 一个字都没上屏），此时退化为普通的模拟键盘输入。
+        if direct_input.commit(text):
             return
-        except text_input.SendTextError as e:
-            if e.partial:
-                logger.error(f"模拟键盘输入中断，已有部分文字上屏，不回退以免重复: {e}")
-                raise
-            logger.warning(f"模拟键盘输入失败，回退到剪贴板粘贴: {e}")
 
+    if mode in (INPUT_MODE_TYPE, INPUT_MODE_DIRECT):
+        _type_with_clipboard_fallback(text)
+        return
+
+    flash_insert_via_clipboard(text)
+
+
+def preview_text(text: str) -> bool:
+    """
+    识别过程中的中间结果（preview 事件）。
+
+    只有直接输入模式会真正打字。返回 True 表示文字已进目标输入框，调用方不必
+    再显示悬浮窗；返回 False 表示维持原逻辑（悬浮窗预览）。
+    """
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if get_input_mode() != INPUT_MODE_DIRECT:
+        return False
+    try:
+        return direct_input.update(text)
+    except text_input.SendTextError as e:
+        # 已经打了一部分时不能让后续再补发，这里只退回悬浮窗显示本次结果
+        logger.error(f"直接输入失败，本次退回悬浮窗显示: {e}")
+        return False
+
+
+def _type_with_clipboard_fallback(text: str) -> None:
+    """模拟键盘逐字符输入，一个字符都没注入时回退到剪贴板粘贴。"""
+    try:
+        text_input.send_text(text)
+        return
+    except text_input.SendTextError as e:
+        if e.partial:
+            logger.error(f"模拟键盘输入中断，已有部分文字上屏，不回退以免重复: {e}")
+            raise
+        logger.warning(f"模拟键盘输入失败，回退到剪贴板粘贴: {e}")
     flash_insert_via_clipboard(text)
 
 

@@ -277,5 +277,25 @@ def test_e2ee_algorithm_invalid_value_reset_to_default(mock_config_path, reset_s
     assert sm.get("e2ee_algorithm") == "none"
 
 
+def test_text_input_mode_direct_is_kept(mock_config_path, reset_singleton):
+    """上屏方式三种取值都能持久化（漏加白名单会被静默重置为 paste）"""
+    config_file = mock_config_path / "settings.json"
+    for mode in ("paste", "type", "direct"):
+        SettingsManager._instance = None
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"text_input_mode": mode}, f)
+        sm = SettingsManager.instance()
+        assert sm.get("text_input_mode") == mode
+
+
+def test_text_input_mode_invalid_value_reset_to_default(mock_config_path, reset_singleton):
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"text_input_mode": "bogus_mode"}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("text_input_mode") == "paste"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

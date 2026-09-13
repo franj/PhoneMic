@@ -98,11 +98,12 @@ class TestSwitchNetworkAction:
 
 
 class TestInputModeMenu:
-    """「上屏方式」菜单：剪贴板 / 模拟键盘 二选一，与偏好设置面板等价。"""
+    """「上屏方式」菜单：剪贴板 / 模拟键盘 / 直接输入 三选一，与偏好设置面板等价。"""
 
     def test_default_is_paste(self, dashboard):
         assert dashboard.act_input_paste.isChecked() is True
         assert dashboard.act_input_type.isChecked() is False
+        assert dashboard.act_input_direct.isChecked() is False
 
     def test_menu_title_present(self, dashboard):
         titles = [a.text() for a in dashboard.menuBar().actions()]
@@ -144,13 +145,47 @@ class TestInputModeMenu:
         assert group is not None
         assert group.isExclusive() is True
         assert dashboard.act_input_type.actionGroup() is group
-        assert len(group.actions()) == 2
+        assert len(group.actions()) == 3
 
     def test_reclicking_selected_item_keeps_checked(self, dashboard):
         """互斥组：重复点击已选中项不会被取消勾选。"""
         dashboard.act_input_paste.trigger()
         assert dashboard.act_input_paste.isChecked() is True
         assert dashboard.act_input_type.isChecked() is False
+
+
+class TestDirectInputMenu:
+    """第三项「模拟键盘（直接输入）」与其它两项互斥且同样即时生效。"""
+
+    def test_clicking_direct_persists_config(self, dashboard):
+        dashboard._on_input_mode_clicked("direct")
+        assert dashboard.sm.get("text_input_mode") == "direct"
+        assert dashboard.act_input_direct.isChecked() is True
+        assert dashboard.act_input_paste.isChecked() is False
+        assert dashboard.act_input_type.isChecked() is False
+
+    def test_triggering_action_switches(self, dashboard):
+        dashboard.act_input_direct.trigger()
+        assert dashboard.sm.get("text_input_mode") == "direct"
+        assert dashboard.act_input_direct.isChecked() is True
+
+    def test_switching_back_to_paste(self, dashboard):
+        dashboard._on_input_mode_clicked("direct")
+        dashboard._on_input_mode_clicked("paste")
+        assert dashboard.sm.get("text_input_mode") == "paste"
+        assert dashboard.act_input_paste.isChecked() is True
+        assert dashboard.act_input_direct.isChecked() is False
+
+    def test_external_change_syncs_checks(self, dashboard):
+        """偏好设置 / 托盘菜单改动配置后，主界面菜单勾选应同步。"""
+        dashboard.sm.set("text_input_mode", "direct")
+        assert dashboard.act_input_direct.isChecked() is True
+        assert dashboard.act_input_type.isChecked() is False
+        assert dashboard.act_input_paste.isChecked() is False
+
+    def test_in_same_exclusive_group(self, dashboard):
+        assert dashboard.act_input_direct.actionGroup() is \
+            dashboard.act_input_paste.actionGroup()
 
 
 class TestTunnelUrlUpdate:

@@ -306,7 +306,12 @@ def test_send_keys_invalid_sequence_logs_error(mock_hotkey, caplog):
 # 注意：原有的 validate_key_combination 仍然可正常工作，无需额外测试
 
 # ---------- 上屏方式分发 ----------
-from phonemic.gui.keyboard import get_input_mode, set_input_mode_override
+from phonemic.gui.keyboard import (
+    get_input_mode,
+    preview_text,
+    set_input_mode_override,
+    VALID_INPUT_MODES,
+)
 from phonemic.gui.text_input import SendTextError
 
 
@@ -321,7 +326,9 @@ def test_get_input_mode_override(restore_mode):
     assert get_input_mode() == "type"
     set_input_mode_override(None)
     # 取消覆盖后回落到配置/默认值，取值必须合法
-    assert get_input_mode() in ("paste", "type")
+    assert get_input_mode() in VALID_INPUT_MODES
+
+    assert VALID_INPUT_MODES == ("paste", "type", "direct")
 
 
 def test_auto_mode_no_longer_accepted(restore_mode):
@@ -387,3 +394,61 @@ def test_flash_insert_empty_text_no_dispatch(mock_clip, mock_send_text, restore_
     flash_insert("")
     mock_send_text.assert_not_called()
     mock_clip.assert_not_called()
+
+
+# ---------- 直接输入模式 ----------
+@patch("phonemic.gui.keyboard.direct_input.commit", return_value=True)
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_direct_mode_with_session_only_commits(mock_clip, mock_send_text,
+                                                            mock_commit, restore_mode):
+    """有进行中的会话：send 只把已打的文字修正成最终结果，不重打、不碰剪贴板"""
+    set_input_mode_override("direct")
+    flash_insert("你好")
+    mock_commit.assert_called_once_with("你好")
+    mock_send_text.assert_not_called()
+    mock_clip.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.direct_input.commit", return_value=False)
+@patch("phonemic.gui.keyboard.text_input.send_text")
+@patch("phonemic.gui.keyboard.flash_insert_via_clipboard")
+def test_flash_insert_direct_mode_without_session_types(mock_clip, mock_send_text,
+                                                        mock_commit, restore_mode):
+    """没有会话（客户端只发 send / 会话已放弃且没上屏）时退化为普通模拟键盘输入"""
+    set_input_mode_override("direct")
+    flash_insert("你好")
+    mock_commit.assert_called_once_with("你好")
+    mock_send_text.assert_called_once_with("你好")
+    mock_clip.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.direct_input.update", return_value=True)
+def test_preview_text_handled_in_direct_mode(mock_update, restore_mode):
+    """直接输入模式下 preview 会真正打字，返回 True 表示不必再显示悬浮窗"""
+    set_input_mode_override("direct")
+    assert preview_text("你好") is True
+    mock_update.assert_called_once_with("你好")
+
+
+@pytest.mark.parametrize("mode", ["paste", "type"])
+@patch("phonemic.gui.keyboard.direct_input.update", return_value=True)
+def test_preview_text_ignored_in_other_modes(mock_update, mode, restore_mode):
+    set_input_mode_override(mode)
+    assert preview_text("你好") is False
+    mock_update.assert_not_called()
+
+
+@patch("phonemic.gui.keyboard.direct_input.update",
+       side_effect=SendTextError("中途中断", partial=True))
+def test_preview_text_swallows_send_error(mock_update, caplog, restore_mode):
+    """注入失败不应把异常抛进 Qt 槽，退回悬浮窗显示即可"""
+    set_input_mode_override("direct")
+    with caplog.at_level("ERROR"):
+        assert preview_text("你好") is False
+    assert "直接输入失败" in caplog.text
+
+
+def test_preview_text_rejects_non_str(restore_mode):
+    with pytest.raises(TypeError):
+        preview_text(123)

@@ -255,3 +255,57 @@ def test_non_windows_raises(monkeypatch):
     monkeypatch.setattr(text_input, "IS_WINDOWS", False)
     with pytest.raises(text_input.SendTextError, match="仅在 Windows"):
         text_input.send_text("hello")
+
+
+# ---------- 退格（直接输入模式撤回差异文字用） ----------
+def test_send_backspace_emits_down_up_pairs(injected):
+    """每个退格 = VK_BACK 的按下 + 抬起"""
+    text_input.send_backspace(3)
+    events = flatten(injected)
+    assert len(events) == 6
+    for down, up in zip(events[0::2], events[1::2]):
+        assert down.union.ki.wVk == text_input.VK_BACK
+        assert not down.union.ki.dwFlags & text_input.KEYEVENTF_KEYUP
+        assert up.union.ki.wVk == text_input.VK_BACK
+        assert up.union.ki.dwFlags & text_input.KEYEVENTF_KEYUP
+
+
+def test_send_backspace_zero_or_negative_is_noop(injected):
+    text_input.send_backspace(0)
+    text_input.send_backspace(-5)
+    assert injected == []
+
+
+def test_send_backspace_rejects_non_int():
+    with pytest.raises(TypeError):
+        text_input.send_backspace("3")
+
+
+def test_send_backspace_batches_without_splitting_a_key(injected, monkeypatch):
+    """分批边界：一个退格的按下+抬起不会被拆到两批"""
+    monkeypatch.setattr(text_input, "MAX_INPUTS_PER_CALL", 5)
+    text_input.send_backspace(10)
+    assert len(injected) > 1
+    assert all(len(b) <= 5 for b in injected)
+    assert all(len(b) % 2 == 0 for b in injected)
+    assert len(flatten(injected)) == 20
+
+
+def test_send_backspace_first_batch_failure_not_partial(monkeypatch):
+    """首批就失败 -> partial=False，上层可以安全改用其它上屏方式"""
+    monkeypatch.setattr(text_input, "IS_WINDOWS", True)
+    monkeypatch.setattr(text_input, "INPUT", FakeInput)
+    monkeypatch.setattr(text_input, "BATCH_INTERVAL_SEC", 0)
+    monkeypatch.setattr(
+        text_input, "_send",
+        lambda events: (_ for _ in ()).throw(text_input.SendTextError("拦截", partial=False)))
+
+    with pytest.raises(text_input.SendTextError) as exc:
+        text_input.send_backspace(3)
+    assert exc.value.partial is False
+
+
+def test_send_backspace_non_windows_raises(monkeypatch):
+    monkeypatch.setattr(text_input, "IS_WINDOWS", False)
+    with pytest.raises(text_input.SendTextError, match="仅在 Windows"):
+        text_input.send_backspace(2)

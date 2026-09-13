@@ -150,6 +150,7 @@ class SystemTray(QObject):
         mode = self.sm.get("text_input_mode", "paste")
         self._act_input_paste.setChecked(mode == "paste")
         self._act_input_type.setChecked(mode == "type")
+        self._act_input_direct.setChecked(mode == "direct")
 
     def _create_tray_menu(self):
         menu = QMenu()
@@ -162,7 +163,7 @@ class SystemTray(QObject):
         menu.addAction(self.i18n.tr("dashboard.menu_command")).triggered.connect(self._open_commands_dialog)
         menu.addSeparator()
 
-        # 上屏方式（二选一），与主界面菜单 / 偏好设置保持一致。
+        # 上屏方式（三选一），与主界面菜单 / 偏好设置保持一致。
         # 与主界面「网络」菜单一致：用互斥组，Qt 会画成单选圆点。
         self._input_group = QActionGroup(menu)
         self._input_group.setExclusive(True)
@@ -178,6 +179,13 @@ class SystemTray(QObject):
         self._act_input_type.triggered.connect(lambda: self._set_input_mode("type"))
         self._input_group.addAction(self._act_input_type)
         menu.addAction(self._act_input_type)
+
+        self._act_input_direct = QAction(self.i18n.tr("dashboard.input_direct"), menu)
+        self._act_input_direct.setCheckable(True)
+        self._act_input_direct.triggered.connect(lambda: self._set_input_mode("direct"))
+        self._act_input_direct.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
+        self._input_group.addAction(self._act_input_direct)
+        menu.addAction(self._act_input_direct)
 
         menu.addSeparator()
         menu.addAction(self.i18n.tr("tray.menu_about")).triggered.connect(self.dashboard.show_about)

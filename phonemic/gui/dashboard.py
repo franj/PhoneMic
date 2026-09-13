@@ -231,7 +231,7 @@ class Dashboard(QMainWindow):
         self._sync_menu_checks()
 
     def _on_input_mode_clicked(self, mode: str) -> None:
-        """点击上屏方式菜单项（"paste" 剪贴板 / "type" 模拟键盘），立即持久化生效。"""
+        """点击上屏方式菜单项（paste 剪贴板 / type 模拟键盘 / direct 直接输入），立即持久化。"""
         if mode != self.sm.get("text_input_mode", "paste"):
             self.sm.set("text_input_mode", mode)
         self._sync_input_checks()
@@ -245,6 +245,7 @@ class Dashboard(QMainWindow):
         mode = self.sm.get("text_input_mode", "paste")
         self.act_input_paste.setChecked(mode == "paste")
         self.act_input_type.setChecked(mode == "type")
+        self.act_input_direct.setChecked(mode == "direct")
 
     def on_switch_completed(self) -> None:
         """模式切换完成（成功或失败），恢复菜单可用状态。"""
@@ -382,6 +383,13 @@ class Dashboard(QMainWindow):
         self.act_input_type.triggered.connect(lambda: self._on_input_mode_clicked("type"))
         input_group.addAction(self.act_input_type)
         input_menu.addAction(self.act_input_type)
+
+        self.act_input_direct = QAction(self.i18n.tr("dashboard.input_direct"), self)
+        self.act_input_direct.setCheckable(True)
+        self.act_input_direct.triggered.connect(lambda: self._on_input_mode_clicked("direct"))
+        self.act_input_direct.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
+        input_group.addAction(self.act_input_direct)
+        input_menu.addAction(self.act_input_direct)
 
         # 初始化勾选状态（包括 CF 模式下 none 强制变为加密的显示）
         self._sync_menu_checks()
