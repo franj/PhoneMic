@@ -125,8 +125,9 @@ IDLE → TYPING → (preview变化) → UPDATING → (send) → COMMITTING → I
 |---|---|
 | `phonemic/gui/direct_input.py` | 新增：会话状态机 + 公共前缀 diff + 焦点指纹 |
 | `phonemic/gui/text_input.py` | 新增 `send_backspace()`，抽出 `_send_groups()` |
-| `phonemic/gui/keyboard.py` | 三路分发 + `preview_text()`（preview 事件入口） |
+| `phonemic/gui/keyboard.py` | 三路分发 + `preview_text()`（preview 事件入口）+ `discard_preview()` |
 | `phonemic/PhoneMic.py` | preview 分支：直接输入已上屏时不再显示悬浮窗 |
+| `phonemic/utils/command_processor.py` | `process_send_text(before_execute=...)`：命中后、执行前的回调钩子 |
 | `phonemic/gui/{dashboard,tray,settings_dialog}.py` | 三处菜单各加一项 |
 | `phonemic/utils/settings_manager.py` | 白名单加 `direct`（漏改会被静默重置为 paste） |
 
@@ -138,6 +139,23 @@ IDLE → TYPING → (preview变化) → UPDATING → (send) → COMMITTING → I
    粒度：逐字敲入在部分程序里会被拆成多步撤销，不像一次粘贴那样原子。
 2. **焦点丢失后不补发。** 已往旧窗口打过字时，即使焦点换了也不在新窗口补一
    次，否则同一段话会出现两遍。一个字都还没上屏时才允许调用方退回普通上屏。
+3. **退格按 Unicode 码点计，emoji 不特殊处理。** 注入是 UTF-16 码元粒度
+   （emoji 拆成代理项对、两次 `KEYEVENTF_UNICODE`），但接收方会合成成一个字符，
+   一次 Backspace 就删掉它——实测一致，所以一个 emoji 对应一次退格。
+   唯一对不上的是 ZWJ 组合（👨‍👩‍👧 这类 5 个码点 = 1 个字形），大多程序按
+   字簇处理，可能多删；ASR 基本不会输出，暂不处理（Python 标准库也没有
+   grapheme 切分，引入第三方不值得）。
+
+### 命中语音命令时先撤销（2026-09-14 补）
+
+命令往往只是按个回车、发个快捷键，preview 阶段打出的「回车」这类字面文字必须
+**先删干净再执行**，否则会和命令效果一起留在目标程序里。流程是：
+
+preview（已上屏部分文字）→ 收 send → 匹配命令 → **命中则撤销 preview 文字**
+→ 执行命令；未命中才走 `flash_insert()`。
+
+撤销走 `direct_input.discard()`，两条硬约束：焦点已不在锚点时**绝不发退格**
+（那会删掉新窗口里用户自己的内容），撤销失败也不阻塞命令执行，只记日志。
 
 ## 结论
 

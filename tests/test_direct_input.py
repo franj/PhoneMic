@@ -255,6 +255,83 @@ class TestInjectionFailure:
         assert ctrl.commit("你好") is True   # 不许调用方补发
 
 
+# ---------- 撤销（命中语音命令时） ----------
+class TestDiscard:
+    def test_discard_without_session_is_noop(self, rec):
+        """没有会话（客户端只发了 send）时无需撤销"""
+        typed, deleted = rec
+        ctrl, _ = make_controller()
+        assert ctrl.discard() is True
+        assert typed == [] and deleted == []
+        assert ctrl.state == IDLE
+
+    def test_discard_deletes_what_was_typed(self, rec):
+        """命令执行前把 preview 打出的字面文字删干净"""
+        _, deleted = rec
+        ctrl, _ = make_controller()
+        ctrl.update("回车")
+        assert ctrl.discard() is True
+        assert deleted == [2]
+        assert ctrl.state == IDLE
+        assert ctrl.typed == ""
+
+    def test_discard_counts_code_points(self, rec):
+        """退格按码点计：emoji 一次退格，与注入粒度一致"""
+        _, deleted = rec
+        ctrl, _ = make_controller()
+        ctrl.update("😀好")
+        assert ctrl.discard() is True
+        assert deleted == [2]
+
+    def test_discard_without_any_text_is_safe(self, rec):
+        """会话开了但一个字都没打（首帧就失败了）时无需退格"""
+        _, deleted = rec
+        ctrl, _ = make_controller()
+        ctrl._begin()
+        assert ctrl.discard() is True
+        assert deleted == []
+
+    def test_discard_after_focus_change_sends_no_backspace(self, rec):
+        """焦点变了绝不能发退格——那会删掉新窗口里用户自己的内容"""
+        _, deleted = rec
+        ctrl, focus = make_controller()
+        ctrl.update("回车")
+        focus.sig = (2, 2)
+        assert ctrl.discard() is False
+        assert deleted == []
+        assert ctrl.state == IDLE
+
+    def test_discard_abandoned_session_sends_no_backspace(self, rec):
+        """已经放弃过的会话同理，只清理状态"""
+        _, deleted = rec
+        ctrl, focus = make_controller()
+        ctrl.update("回车")
+        focus.sig = (2, 2)
+        ctrl.update("回车啊")            # 触发放弃
+        assert ctrl.state == ABANDONED
+        assert ctrl.discard() is False
+        assert deleted == []
+
+    def test_discard_failure_returns_false_and_resets(self, rec):
+        """撤销失败（注入被拦截）时不阻塞命令执行，状态照常清理"""
+        _, deleted = rec
+        ctrl, _ = make_controller()
+        ctrl.update("回车")
+        with patch.object(direct_input.text_input, "send_backspace",
+                          side_effect=SendTextError("UIPI 拦截")):
+            assert ctrl.discard() is False
+        assert deleted == []
+        assert ctrl.state == IDLE
+
+    def test_module_discard_delegates(self, monkeypatch, rec):
+        _, deleted = rec
+        ctrl, _ = make_controller()
+        monkeypatch.setattr(direct_input, "_controller", ctrl)
+        ctrl.update("回车")
+        assert direct_input.discard() is True
+        assert deleted == [2]
+
+
 # ---------- 模块级单例 ----------
 class TestModuleSingleton:
     def test_module_api_delegates_to_controller(self, monkeypatch, rec):

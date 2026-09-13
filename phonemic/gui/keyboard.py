@@ -100,6 +100,17 @@ def preview_text(text: str) -> bool:
         return False
 
 
+def discard_preview() -> bool:
+    """
+    撤销直接输入模式在 preview 阶段已经打进输入框的文字。
+
+    命中语音命令时调用：命令往往只是按个回车、发个快捷键，preview 阶段打出的
+    「回车」这类字面文字必须先删掉，否则会和命令一起留在目标程序里。
+    其它上屏方式没有 preview 文字，这里是安全的空操作。
+    """
+    return direct_input.discard()
+
+
 def _type_with_clipboard_fallback(text: str) -> None:
     """模拟键盘逐字符输入，一个字符都没注入时回退到剪贴板粘贴。"""
     try:

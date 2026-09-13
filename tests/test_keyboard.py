@@ -309,6 +309,7 @@ def test_send_keys_invalid_sequence_logs_error(mock_hotkey, caplog):
 from phonemic.gui.keyboard import (
     get_input_mode,
     preview_text,
+    discard_preview,
     set_input_mode_override,
     VALID_INPUT_MODES,
 )
@@ -452,3 +453,16 @@ def test_preview_text_swallows_send_error(mock_update, caplog, restore_mode):
 def test_preview_text_rejects_non_str(restore_mode):
     with pytest.raises(TypeError):
         preview_text(123)
+
+
+@patch("phonemic.gui.keyboard.direct_input.discard", return_value=True)
+def test_discard_preview_delegates(mock_discard):
+    """命令命中时的撤销口子，直接转给 direct_input"""
+    assert discard_preview() is True
+    mock_discard.assert_called_once_with()
+
+
+@patch("phonemic.gui.keyboard.direct_input.discard", return_value=False)
+def test_discard_preview_passes_through_failure(mock_discard):
+    """撤销不了（焦点已变）时如实告诉调用方，由它决定怎么办"""
+    assert discard_preview() is False

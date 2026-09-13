@@ -181,6 +181,38 @@ class DirectInputController:
         self.reset()
         return True
 
+    def discard(self) -> bool:
+        """
+        撤销本次会话已经打进输入框的文字（命中语音命令时用）。
+
+        命令执行的往往只是一个回车或一组快捷键，preview 阶段打出的「回车」
+        这类字面文字必须先删干净，否则会和命令的效果一起留在目标程序里。
+
+        返回 True 表示已清理（或压根没打过字）；返回 False 表示没法安全删除——
+        **焦点已经不在锚点上了，此时绝不能发退格**，那会删掉新窗口里用户自己的内容。
+        """
+        if self._state == IDLE:
+            return True
+        if not self._dirty:
+            self.reset()
+            return True
+        if self._state == ABANDONED or not self._check_focus():
+            logger.warning("焦点已不在会话锚点，跳过撤销：已上屏的文字留在原处")
+            self.reset()
+            return False
+
+        count = len(self._typed)
+        try:
+            text_input.send_backspace(count)
+        except text_input.SendTextError as e:
+            self._abandon(f"撤销失败: {e}")
+            self.reset()
+            logger.error(f"撤销直接输入失败，剩余文字留在目标输入框: {e}")
+            return False
+        logger.debug(f"已撤销直接输入: {count} 字符")
+        self.reset()
+        return True
+
     def reset(self) -> None:
         """结束并清空会话状态（不会动已经上屏的文字）。"""
         self._state = IDLE
@@ -252,6 +284,11 @@ def update(text: str) -> bool:
 def commit(text: str) -> bool:
     """提交最终结果（send 事件）。语义见 DirectInputController.commit。"""
     return get_controller().commit(text)
+
+
+def discard() -> bool:
+    """撤销已上屏的 preview 文字（命令命中时）。语义见 DirectInputController.discard。"""
+    return get_controller().discard()
 
 
 def reset() -> None:

@@ -6,7 +6,7 @@ import os
 import logging
 
 # 导入实际代码中的类
-from phonemic.utils.command_processor import match_command, execute_command
+from phonemic.utils.command_processor import match_command, execute_command, CommandInterceptor
 from phonemic.utils.commands_manager import VoiceCommand
 
 # ---------- 测试数据 ----------
@@ -586,3 +586,45 @@ def test_execute_command_regex_backslash_kept(mock_popen):
     args, _ = mock_popen.call_args
     # 先按空白切 token、再逐 token 套模板，反斜杠写法原样保留
     assert args[0] == ["echo", "\\2", "来自", "\\1"]
+
+
+# ---------- 命令拦截器：撤销与执行的顺序 ----------
+class TestCommandInterceptor:
+    """直接输入模式下 preview 已把字面文字打进输入框，命令前必须先撤销"""
+
+    @staticmethod
+    def _interceptor(cmds):
+        # 绕过 CommandsManager 单例与信号连接，只测匹配/执行这层逻辑
+        obj = CommandInterceptor.__new__(CommandInterceptor)
+        obj._cached_commands = cmds
+        return obj
+
+    @pytest.fixture
+    def cmd(self):
+        return VoiceCommand(
+            id="1", name="", matchType="exact", matchPattern="回车",
+            actionType="key", actionParams="enter", enabled=True,
+        )
+
+    def test_before_execute_runs_before_command(self, cmd):
+        order = []
+        interceptor = self._interceptor([cmd])
+        with patch("phonemic.utils.command_processor.execute_command",
+                   side_effect=lambda *a, **k: order.append("execute")):
+            assert interceptor.process_send_text(
+                "回车", before_execute=lambda: order.append("discard")
+            ) is True
+        assert order == ["discard", "execute"]
+
+    def test_no_match_does_not_call_before_execute(self, cmd):
+        order = []
+        interceptor = self._interceptor([cmd])
+        assert interceptor.process_send_text(
+            "你好", before_execute=lambda: order.append("discard")
+        ) is False
+        assert order == []
+
+    def test_empty_cache_never_matches(self):
+        interceptor = self._interceptor([])
+        assert interceptor.find_match("回车") is None
+        assert interceptor.process_send_text("回车") is False

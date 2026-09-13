@@ -4,7 +4,7 @@ import re
 import os
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from phonemic.gui.keyboard import send_keys, flash_insert
 from phonemic.utils.paths import get_exec_workdir
@@ -168,16 +168,26 @@ class CommandInterceptor:
     def _on_commands_changed(self):
         self._reload_cache()
 
-    def process_send_text(self, text: str) -> bool:
-        """
-        处理发送文本，若匹配命令则执行并返回 True，否则返回 False
-        """
+    def find_match(self, text: str) -> Optional[Tuple[VoiceCommand, str, str, List[str]]]:
+        """在当前启用的命令里找匹配项，找不到返回 None（不做任何动作）。"""
         if not self._cached_commands:
-            return False
-        result = match_command(text, self._cached_commands)
+            return None
+        return match_command(text, self._cached_commands)
+
+    def process_send_text(self, text: str, before_execute: Optional[Callable[[], None]] = None) -> bool:
+        """
+        处理发送文本，若匹配命令则执行并返回 True，否则返回 False。
+
+        before_execute：命中之后、**执行之前**调用。直接输入模式下识别过程中
+        已经把字面文字打进输入框了，命令执行前要先把它撤销，否则「回车」这类
+        文字会和命令一起留在目标程序里。
+        """
+        result = self.find_match(text)
         if result is None:
             return False
         cmd, prefix, content, groups = result
-        logging.info(f"[CommandInterceptor] Match: id={cmd.id}, name={cmd.name}, text={text}")
+        logger.info(f"[CommandInterceptor] Match: id={cmd.id}, name={cmd.name}, text={text}")
+        if before_execute is not None:
+            before_execute()
         execute_command(cmd, text, prefix, content, groups)
         return True
