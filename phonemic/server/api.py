@@ -606,6 +606,44 @@ def _serve_msgpack() -> Response:
     return FileResponse(path, media_type="application/javascript")
 
 
+def _clean_nonce(raw: Optional[str]) -> Optional[str]:
+    """校验保活请求的防重放 nonce；不合法返回 None。
+
+    回显客户端的 t，是为了让保活器能证明「这个响应是为我这一次请求生成的」：
+    任何被 Cloudflare 边缘或中间层缓存/复用的响应都带着上一轮的 t，一比对就会
+    露馅——从而把「保活静默失效」变成「保活明确报错」。
+
+    回显的是请求方自带的字符串（反射型数据），因此必须限死格式：纯 ASCII 数字、
+    不超过 20 位。既杜绝注入面，也与保活器实际发送的毫秒时间戳一致。
+    """
+    if not raw or len(raw) > 20:
+        return None
+    if not (raw.isascii() and raw.isdigit()):
+        return None
+    return raw
+
+
+def _serve_keepalive(request: Request) -> Response:
+    """隧道保活探测端点（供本机保活器周期请求，见 phonemic/tunnel/keepalive.py）。
+
+    响应体只有 {"status": "ok", "t": <回显请求里的 t>}，不含版本/运行时长/连接数
+    等服务信息——它是一个公开路径，不提供任何可供扫描者利用的情报。
+
+    必须禁用缓存：一旦被 Cloudflare 边缘或中间层缓存命中，请求就不会穿透到
+    源站，隧道依然会因缺少真实流量被回收，而保活器却拿到 200 以为一切正常。
+    响应里的 t 正是为这种情况准备的——缓存复用的响应带着上一轮的 t，保活器比对
+    不上就会报错（见 tunnel/keepalive.py::_verify_body）。
+    """
+    return JSONResponse(
+        content={"status": "ok", "t": _clean_nonce(request.query_params.get("t"))},
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 # 明文模式放行的白名单（根路径入口）
 
 _PUBLIC_PATHS = {
@@ -616,6 +654,9 @@ _PUBLIC_PATHS = {
     "/msgpack.min.js",
     "/ws",
     "/api/lang.json",
+    # 隧道保活探测（GET）：仅返回 {"status":"ok"}，供本机保活器周期请求，
+    # 让快隧道持续有真实 HTTP 流量、不被 Cloudflare 判为空闲回收
+    "/api/keepalive",
     # 手机端日志回传（POST）：与 lang.json 同级，仅诊断用途，无敏感信息
     "/api/client-log",
 }
@@ -664,6 +705,8 @@ async def _dispatch_http(request: Request, path: str) -> Response:
         return _serve_mobile()
     if normalized == "/api/lang.json":
         return _serve_lang_json()
+    if normalized == "/api/keepalive":
+        return _serve_keepalive(request)
     if normalized == "/sodium.js":
         return _serve_sodium(request)
     if normalized == "/crypto_providers.js":

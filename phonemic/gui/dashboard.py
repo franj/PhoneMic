@@ -66,6 +66,7 @@ class Dashboard(QMainWindow):
         self._lan_port = port
         self._switching = False
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
+        self._restart_service_callback: Optional[Callable[[], None]] = None
         self._secure_channel = None  # SecureChannel 引用，由外部设置
         self._algorithm: str = self.sm.get("e2ee_algorithm", "none")
         self._negotiated_algo: Optional[str] = None  # 本次连接握手协商出的算法，由 connect 事件携带
@@ -83,6 +84,10 @@ class Dashboard(QMainWindow):
     def set_mode_switch_callback(self, callback: Callable[[TunnelMode], None]):
         """设置模式切换回调函数"""
         self._mode_switch_callback = callback
+
+    def set_restart_service_callback(self, callback: Callable[[], None]):
+        """设置「重启服务」回调函数"""
+        self._restart_service_callback = callback
 
     def set_secure_channel(self, sc):
         """设置安全通道引用，并刷新 QR 码以包含公钥。"""
@@ -196,6 +201,17 @@ class Dashboard(QMainWindow):
         self.act_algo_none.setChecked(eff == "none")
         self.act_algo_encrypted.setChecked(eff == "auto")
 
+    def _set_busy(self, busy: bool) -> None:
+        """进入/退出「切换中·重启中」状态：期间禁止再次触发网络菜单的操作。
+
+        切换模式与重启服务共用一个状态位——一次网络动作没结束前再点任何一个，
+        都只会让服务端白重启一次，必须挡住。
+        """
+        self._switching = busy
+        self.act_lan.setEnabled(not busy)
+        self.act_cf.setEnabled(not busy)
+        self.act_restart_service.setEnabled(not busy)
+
     def _on_mode_clicked(self, target_mode: TunnelMode) -> None:
         """点击模式切换菜单项。"""
         if target_mode == self._mode:
@@ -203,9 +219,7 @@ class Dashboard(QMainWindow):
         if self._switching:
             self._sync_menu_checks()
             return
-        self._switching = True
-        self.act_lan.setEnabled(False)
-        self.act_cf.setEnabled(False)
+        self._set_busy(True)
         self.ip_label.setText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         set_mode(target_mode)
@@ -248,10 +262,8 @@ class Dashboard(QMainWindow):
         self.act_input_direct.setChecked(mode == "direct")
 
     def on_switch_completed(self) -> None:
-        """模式切换完成（成功或失败），恢复菜单可用状态。"""
-        self._switching = False
-        self.act_lan.setEnabled(True)
-        self.act_cf.setEnabled(True)
+        """模式切换 / 重启服务结束（成功或失败），恢复菜单可用状态。"""
+        self._set_busy(False)
         self._sync_menu_checks()
         self._apply_mode_ui()
 
@@ -298,6 +310,9 @@ class Dashboard(QMainWindow):
 
         program_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_program"))
         network_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_network"))
+        # 保留引用：菜单项顺序是功能语义的一部分（重启服务固定在末尾），
+        # 单独存一下也避免只有局部引用时的生命周期问题
+        self.network_menu = network_menu
         input_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_input_mode"))
         help_menu = menubar.addMenu(self.i18n.tr("dashboard.menu_help"))
 
@@ -367,6 +382,16 @@ class Dashboard(QMainWindow):
         self.switch_network_action.setEnabled(self._mode == TunnelMode.LAN)
         network_menu.addAction(self.switch_network_action)
 
+        network_menu.addSeparator()
+
+        # 重启服务（两种模式都可用）：按当前模式把服务重来一遍——省掉用户
+        # 「先切到局域网、再切回 Cloudflare」那套操作（切到已选中的模式是空操作）。
+        # 加密模式下会换新身份（新的 secret 路径与密钥对 → 新二维码），手机端需
+        # 重新扫码；CF 模式还会换上新的临时域名，是隧道被回收后的自救路径。
+        self.act_restart_service = QAction(self.i18n.tr("dashboard.menu_restart_service"), self)
+        self.act_restart_service.triggered.connect(self._on_restart_service)
+        network_menu.addAction(self.act_restart_service)
+
         # 上屏方式菜单 - 与偏好设置面板中的「上屏方式」等价，作为快速配置入口。
         # 与「网络」菜单保持一致：用互斥组，Qt 会画成单选圆点。
         input_group = QActionGroup(self)
@@ -416,6 +441,22 @@ class Dashboard(QMainWindow):
         """触发切换网络回调"""
         if self._restart_network_callback:
             self._restart_network_callback()
+
+    def _on_restart_service(self) -> None:
+        """点击「重启服务」：按当前模式把服务重来一遍。
+
+        会换新身份（加密模式下 secret 路径与密钥对都变），手机端需重新扫码。
+        这里先清掉 `_tunnel_url` 并擦掉二维码：否则 CF 重启失败时，界面会把
+        已经作废的旧域名当成有效地址继续显示，用户扫了也连不上。
+        """
+        if self._switching:
+            return
+        self._set_busy(True)
+        self.ip_label.setText(self.i18n.tr("dashboard.restarting"))
+        self._tunnel_url = None
+        self._apply_mode_ui()  # _switching=True → 先清空二维码，避免扫到已作废的旧码
+        if self._restart_service_callback:
+            self._restart_service_callback()
 
     def update_network(self, ip: str, port: int):
         """更新主界面的 IP 和二维码显示"""

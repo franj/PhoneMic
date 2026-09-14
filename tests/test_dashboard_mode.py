@@ -347,3 +347,51 @@ class TestEncryptionToggle:
         """locale 缺失的算法名回退为原始算法名（未来新增算法无需先加 locale）。"""
         assert dashboard._algo_display_name("xchacha20") == "XChaCha20"
         assert dashboard._algo_display_name("aes-256-gcm") == "aes-256-gcm"
+
+
+class TestRestartServiceMenu:
+    """「网络」菜单底部的「重启服务」：两种模式都可用，与模式切换共用忙碌状态。"""
+
+    def test_is_last_item_in_network_menu(self, dashboard):
+        items = [a for a in dashboard.network_menu.actions() if not a.isSeparator()]
+        assert items[-1] is dashboard.act_restart_service
+
+    def test_enabled_in_lan_mode(self, dashboard):
+        assert dashboard.get_mode() == TunnelMode.LAN
+        assert dashboard.act_restart_service.isEnabled() is True
+
+    def test_enabled_in_cf_mode(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+        assert dashboard.act_restart_service.isEnabled() is True
+
+    def test_trigger_calls_callback(self, dashboard):
+        cb = MagicMock()
+        dashboard.set_restart_service_callback(cb)
+        dashboard.act_restart_service.trigger()
+        cb.assert_called_once()
+
+    def test_click_clears_stale_tunnel_url(self, dashboard):
+        """CF 重启会换域名：旧地址必须清掉，否则失败时界面还显示已作废的二维码。"""
+        dashboard._tunnel_url = "https://stale.trycloudflare.com"
+        dashboard._on_restart_service()
+        assert dashboard._tunnel_url is None
+        assert "stale.trycloudflare.com" not in dashboard.ip_label.text()
+        assert dashboard.ip_label.text() == dashboard.i18n.tr("dashboard.restarting")
+
+    def test_busy_while_switching_then_re_enabled(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        assert dashboard.act_restart_service.isEnabled() is False
+        assert dashboard.act_lan.isEnabled() is False
+        assert dashboard.act_cf.isEnabled() is False
+
+        dashboard.on_switch_completed()
+        assert dashboard.act_restart_service.isEnabled() is True
+
+    def test_second_click_while_busy_is_ignored(self, dashboard):
+        """忙碌中再点一次只会让服务端白重启，必须挡住。"""
+        cb = MagicMock()
+        dashboard.set_restart_service_callback(cb)
+        dashboard._on_restart_service()
+        dashboard._on_restart_service()
+        cb.assert_called_once()

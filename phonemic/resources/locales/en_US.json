@@ -15,6 +15,7 @@
     "menu_command": "Commands",
     "menu_exit": "Exit",
     "menu_switch_network": "Switch Network",
+    "menu_restart_service": "Restart Service",
     "menu_help": "Help",
     "menu_help_guide": "User Guide",
     "menu_about": "About PhoneMic",
@@ -33,6 +34,7 @@
     "pairing_expired": "Pairing code expired, please regenerate",
     "cf_connecting": "Cloudflare tunnel connecting...",
     "switching": "Switching...",
+    "restarting": "Restarting...",
     "cf_info": "Secure HTTPS connection via Cloudflare tunnel, accessible over internet",
     "btn_e2ee": "End-to-End Encryption"
   },
@@ -67,6 +69,10 @@
     "photo_copied_msg": "{name} copied to the clipboard, ready to paste",
     "photo_failed_title": "Image copy failed",
     "photo_failed_msg": "Could not put {name} on the clipboard",
+    "tunnel_lost_title": "Tunnel lost, restart needed",
+    "tunnel_lost_msg": "In the Network menu, click Restart Service, then scan the QR code again",
+    "tunnel_recovered_title": "Tunnel recovered",
+    "tunnel_recovered_msg": "The public address is reachable again",
 
     "minimized_message": "Program minimized to system tray. Click the tray icon to restore."
   },

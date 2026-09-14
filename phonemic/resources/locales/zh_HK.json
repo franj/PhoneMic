@@ -14,6 +14,7 @@
     "menu_action": "偏好設定",
     "menu_command": "命令設定",
     "menu_switch_network": "切換網絡地址",
+    "menu_restart_service": "重啟服務",
     "menu_exit": "結束",
     "menu_help": "說明",
     "menu_help_guide": "使用指南",
@@ -33,6 +34,7 @@
     "pairing_expired": "配對碼已過期，請重新產生",
     "cf_connecting": "Cloudflare 隧道連接中...",
     "switching": "切換中...",
+    "restarting": "重啟中...",
     "cf_info": "透過 Cloudflare 隧道提供 HTTPS 安全連接，支援互聯網存取",
     "btn_e2ee": "端對端加密"
   },
@@ -67,6 +69,10 @@
     "photo_copied_msg": "{name} 已複製到剪貼簿，可直接貼上",
     "photo_failed_title": "圖片複製失敗",
     "photo_failed_msg": "無法把 {name} 寫入剪貼簿",
+    "tunnel_lost_title": "隧道已失效，需要重啟",
+    "tunnel_lost_msg": "在「網絡」選單中點擊「重啟服務」，然後重新掃碼",
+    "tunnel_recovered_title": "隧道已恢復",
+    "tunnel_recovered_msg": "公網地址已可正常訪問",
 
     "minimized_message": "程式已最小化到系統托盤，按一下托盤圖示可恢復"
   },

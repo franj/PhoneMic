@@ -8,6 +8,7 @@ dispatcher 统一入口路由测试。
 - 运行中替换 SecureChannel（算法切换）→ 新 secret 即时生效，无需重启
 """
 
+import json
 import multiprocessing
 import time
 import urllib.request
@@ -20,6 +21,7 @@ from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import set_bridge, start_server, stop_server, set_secure_channel, get_secret_path
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import decode as frame_decode, encode as frame_encode
+from phonemic.tunnel.keepalive import TunnelKeepalive
 
 from conftest import get_test_port
 
@@ -47,6 +49,12 @@ def _get(host, port, path):
         return resp.status, resp.headers
     except urllib.error.HTTPError as e:
         return e.code, e.headers
+
+
+def _get_full(host, port, path):
+    """GET 请求，额外返回响应正文（用于校验保活端点的 JSON 内容）。"""
+    with urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=2) as resp:
+        return resp.status, resp.headers, resp.read(200)
 
 
 def _post(host, port, path):
@@ -142,6 +150,21 @@ class TestEncryptedPathGuard:
         assert _post(host, port, "/wrongsecret/") == 405
         assert _post(host, port, "/some/random/path") == 405
 
+    def test_secret_keepalive_200_uncached(self, enc_server):
+        """隧道保活端点：加密模式下受 secret 前缀保护，禁缓存，且回显 nonce。"""
+        host, port, sc, _ = enc_server
+        status, headers, body = _get_full(
+            host, port, f"/{sc.secret_path}/api/keepalive?t=1726300000000"
+        )
+        assert status == 200
+        assert json.loads(body) == {"status": "ok", "t": "1726300000000"}
+        assert "no-store" in headers.get("cache-control", "")
+
+    def test_keepalive_without_secret_404(self, enc_server):
+        host, port, sc, _ = enc_server
+        status, _ = _get(host, port, "/api/keepalive")
+        assert status == 404
+
 
 class TestPlainPathGuard:
     """明文模式：根路由可用，未知路径 404。"""
@@ -162,6 +185,43 @@ class TestPlainPathGuard:
         host, port, sc, _ = plain_server
         status, _ = _get(host, port, "/some/random/path")
         assert status == 404
+
+    def test_keepalive_200_uncached(self, plain_server):
+        """明文模式下保活端点走白名单放行；禁缓存且回显 nonce。"""
+        host, port, sc, _ = plain_server
+        status, headers, body = _get_full(host, port, "/api/keepalive?t=1726300000000")
+        assert status == 200
+        assert json.loads(body) == {"status": "ok", "t": "1726300000000"}
+        assert "no-store" in headers.get("cache-control", "")
+
+    @pytest.mark.parametrize(
+        "nonce",
+        ["", "abc", "%3Cscript%3E", "123456789012345678901", "-1", "1.5"],
+    )
+    def test_keepalive_rejects_bad_nonce(self, plain_server, nonce):
+        """t 是反射型数据，非「纯数字且 ≤20 位」一律不回显（返回 null）。"""
+        host, port, sc, _ = plain_server
+        status, _, body = _get_full(host, port, f"/api/keepalive?t={nonce}")
+        assert status == 200
+        assert json.loads(body) == {"status": "ok", "t": None}
+
+    def test_keepalive_roundtrip_against_real_server(self, plain_server):
+        """真实服务端 + 真实保活器：nonce 必须对得上。
+
+        这是客户端与服务端之间的隐式约定（服务端回显 t，客户端比对 t），一旦
+        任一侧改动而另一侧没跟上，保活会静默失效——只有真跑一遍才拦得住。
+        """
+        host, port, sc, _ = plain_server
+        states = []
+        ka = TunnelKeepalive(
+            on_state_change=states.append, interval=0.05, timeout=2.0, fail_threshold=1
+        )
+        ka.start(f"http://{host}:{port}")
+        try:
+            time.sleep(1.0)
+            assert states == [], "nonce 能对上就不该判不可达"
+        finally:
+            ka.stop()
 
     def test_ws_root_handshake_ok(self, plain_server):
         host, port, sc, bridge = plain_server

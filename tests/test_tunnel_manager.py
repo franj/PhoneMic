@@ -79,15 +79,21 @@ class TestSwitchMode:
 
 class TestCallbacks:
     @patch("phonemic.tunnel.manager.restart_server")
-    def test_on_url_callback(self, mock_restart, manager):
+    @patch("phonemic.tunnel.manager.get_secret_path", return_value="s3cret")
+    def test_on_url_callback(self, mock_secret, mock_restart, manager):
         on_url = MagicMock()
         manager.set_callbacks(on_url=on_url)
         manager._mode = TunnelMode.CLOUDFLARE
+        manager._keepalive = MagicMock()
 
         manager._on_tunnel_url("https://test.trycloudflare.com")
 
         on_url.assert_called_once_with("https://test.trycloudflare.com")
         assert manager._url_obtained is True
+        # 拿到地址即启动保活，并带上加密模式的 secret 前缀
+        manager._keepalive.start.assert_called_once_with(
+            "https://test.trycloudflare.com", "s3cret"
+        )
 
     @patch("phonemic.tunnel.manager.restart_server")
     def test_on_error_callback(self, mock_restart, manager):
@@ -138,4 +144,122 @@ class TestAutoFallback:
 
         assert manager.mode == TunnelMode.CLOUDFLARE
         on_error.assert_called_once()
+
+
+class TestKeepaliveWiring:
+    """保活的启停接线与状态上报。"""
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_switch_to_lan_stops_keepalive(self, mock_restart, manager, sync_switch):
+        manager._mode = TunnelMode.CLOUDFLARE
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager.switch_mode(TunnelMode.LAN)
+
+        manager._keepalive.stop.assert_called_once()
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_stop_stops_keepalive_and_tunnel(self, mock_restart, manager):
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager.stop()
+
+        manager._keepalive.stop.assert_called_once()
+        manager._tunnel.stop.assert_called_once()
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_tunnel_stopped_stops_keepalive(self, mock_restart, manager):
+        """cloudflared 进程结束后继续探测只会刷无效告警，必须先停保活。"""
+        manager._mode = TunnelMode.CLOUDFLARE
+        manager._url_obtained = True
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager._on_tunnel_stopped()
+
+        manager._keepalive.stop.assert_called_once()
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_reachability_forwarded(self, mock_restart, manager):
+        on_reachability = MagicMock()
+        manager.set_callbacks(on_reachability=on_reachability)
+
+        manager._on_keepalive_state(False)
+        manager._on_keepalive_state(True)
+
+        assert on_reachability.call_args_list == [call(False), call(True)]
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_reachability_callback_optional(self, mock_restart, manager):
+        """未注册回调时状态变化不应抛异常。"""
+        manager._on_keepalive_state(False)
+        manager._on_keepalive_state(True)
+
+
+class TestRestartService:
+    """网络菜单「重启服务」：模式不变也能重启，两种模式都作废旧身份。
+
+    与 switch_mode 的关键差别是「模式相同也要执行」——CF 下换新域名、LAN 下换
+    新 secret 路径与密钥对，手机端都必须重新扫码。
+    """
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_lan_restart_restarts_server_and_renews_identity(
+        self, mock_restart, manager, sync_switch
+    ):
+        on_mode = MagicMock()
+        manager.set_callbacks(on_mode_changed=on_mode)
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager.restart_service()
+
+        mock_restart.assert_called_once_with("192.168.1.100", 12000, manager._bridge)
+        manager._tunnel.stop.assert_called_once()
+        manager._keepalive.stop.assert_called_once()
+        # 借 mode_changed 通道发布「身份已更新」，上层据此重建 SecureChannel
+        on_mode.assert_called_once_with(TunnelMode.LAN)
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_lan_restart_not_blocked_by_same_mode(self, mock_restart, manager, sync_switch):
+        """switch_mode 对「已是当前模式」直接返回；重启服务必须仍然执行。"""
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager.switch_mode(TunnelMode.LAN)
+        mock_restart.assert_not_called()
+
+        manager.restart_service()
+        mock_restart.assert_called_once()
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_cf_restart_relaunches_tunnel(self, mock_restart, manager, sync_switch):
+        on_mode = MagicMock()
+        manager.set_callbacks(on_mode_changed=on_mode)
+        manager._mode = TunnelMode.CLOUDFLARE
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+
+        manager.restart_service()
+
+        # 必须先停掉 cloudflared：start() 见到进程还活着会直接返回，拿不到新域名
+        manager._tunnel.stop.assert_called_once()
+        manager._keepalive.stop.assert_called_once()
+        mock_restart.assert_called_once_with("127.0.0.1", 12000, manager._bridge)
+        manager._tunnel.start.assert_called_once_with(12000)
+        on_mode.assert_called_once_with(TunnelMode.CLOUDFLARE)
+
+    @patch("phonemic.tunnel.manager.restart_server")
+    def test_restart_error_reported(self, mock_restart, manager, sync_switch):
+        on_error = MagicMock()
+        manager.set_callbacks(on_error=on_error)
+        manager._tunnel = MagicMock()
+        manager._keepalive = MagicMock()
+        manager._tunnel.stop.side_effect = RuntimeError("boom")
+
+        manager.restart_service()
+
+        on_error.assert_called_once_with("boom")
 

@@ -239,12 +239,19 @@ def main():
     def _on_mode_changed(mode: TunnelMode):
         bridge.emit("tunnel_mode_changed", mode.value)
 
+    def _on_tunnel_reachability(reachable: bool):
+        bridge.emit("tunnel_reachability", reachable)
+
     tunnel_mgr.set_callbacks(
         on_url=_on_tunnel_url,
         on_error=_on_tunnel_error,
         on_mode_changed=_on_mode_changed,
+        on_reachability=_on_tunnel_reachability,
     )
     dashboard.set_mode_switch_callback(lambda mode: tunnel_mgr.switch_mode(mode))
+    # 「重启服务」：模式不变也能执行（CF 换新域名，LAN 换新身份，都要重新扫码）。
+    # manager 内部自己起后台线程，这里直接接上即可。
+    dashboard.set_restart_service_callback(tunnel_mgr.restart_service)
 
     # 安全通道
     dashboard.set_secure_channel(secure_channel)
@@ -265,9 +272,7 @@ def main():
 
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
-        dashboard._switching = True
-        dashboard.act_lan.setEnabled(False)
-        dashboard.act_cf.setEnabled(False)
+        dashboard._set_busy(True)
         dashboard.ip_label.setText(i18n.tr("dashboard.cf_connecting"))
         QTimer.singleShot(500, lambda: tunnel_mgr.switch_mode(TunnelMode.CLOUDFLARE))
 
@@ -318,6 +323,10 @@ def main():
         elif event_type == "tunnel_error":
             QMessageBox.warning(dashboard, i18n.tr("tunnel.error_title"), str(payload))
             dashboard.on_switch_completed()
+        elif event_type == "tunnel_reachability":
+            # 保活探测结果：公网入口失效 / 恢复。用托盘通知而非模态框，
+            # 避免周期性探测打扰用户（同一状态只在翻转时上报一次）。
+            tray.notify_tunnel_reachability(bool(payload))
         elif event_type == "tunnel_mode_changed":
             mode = TunnelMode(payload)
             dashboard._mode = mode
