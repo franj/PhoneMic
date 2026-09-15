@@ -395,3 +395,72 @@ class TestRestartServiceMenu:
         dashboard._on_restart_service()
         dashboard._on_restart_service()
         cb.assert_called_once()
+
+
+class TestTunnelReachabilityStatus:
+    """隧道失效提示挂在状态栏末尾，不弹托盘通知。
+
+    保活每 60s 探测一次，偶发抖动若走通知会变成打扰；状态栏常驻、不抢焦点。
+    """
+
+    def _to_cf(self, dashboard):
+        dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        dashboard.on_switch_completed()
+
+    def test_lost_appends_suffix_in_cf_mode(self, dashboard):
+        self._to_cf(dashboard)
+        dashboard.set_tunnel_reachability(False)
+        text = dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_disconnected") in text
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") in text
+
+    def test_recovered_removes_suffix(self, dashboard):
+        self._to_cf(dashboard)
+        dashboard.set_tunnel_reachability(False)
+        dashboard.set_tunnel_reachability(True)
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") not in dashboard.status_label.text()
+
+    def test_suffix_keeps_connection_and_encryption_segments(self, dashboard):
+        """失效段追加在最后，不吞掉前面已连接/加密方式的信息。"""
+        self._to_cf(dashboard)
+        dashboard.update_connection_status(True, algorithm="xchacha20")
+        dashboard.set_tunnel_reachability(False)
+        text = dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_connected") in text
+        assert "XChaCha20" in text
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") in text
+
+    def test_lan_mode_never_shows_suffix(self, dashboard):
+        """保活只在 CF 模式运行，局域网模式不应受这个状态影响。"""
+        assert dashboard.get_mode() == TunnelMode.LAN
+        dashboard.set_tunnel_reachability(False)
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") not in dashboard.status_label.text()
+
+    def test_new_tunnel_url_clears_flag(self, dashboard, monkeypatch):
+        """拿到新域名＝隧道刚重建，旧的失效标记必须作废。"""
+        self._to_cf(dashboard)
+        dashboard.set_tunnel_reachability(False)
+        monkeypatch.setattr(dashboard, "_refresh_qr", lambda: None)  # 不依赖 QR 生成
+        dashboard.update_tunnel_url("https://brand-new.trycloudflare.com")
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") not in dashboard.status_label.text()
+
+    def test_mode_switch_clears_flag(self, dashboard):
+        self._to_cf(dashboard)
+        dashboard.set_tunnel_reachability(False)
+        dashboard._on_mode_clicked(TunnelMode.LAN)
+        dashboard.on_switch_completed()
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") not in dashboard.status_label.text()
+
+    def test_restart_service_clears_flag(self, dashboard):
+        """重启服务正是失效时的自救动作，先摘掉失效标记。"""
+        self._to_cf(dashboard)
+        dashboard.set_tunnel_reachability(False)
+        dashboard._on_restart_service()
+        assert dashboard.i18n.tr("dashboard.tunnel_lost") not in dashboard.status_label.text()
+
+    def test_repeated_same_state_does_not_redraw(self, dashboard):
+        """只有翻转才重绘：避免 60s 一轮的探测反复刷同一行。"""
+        self._to_cf(dashboard)
+        dashboard.status_label.setText("SENTINEL")
+        dashboard.set_tunnel_reachability(True)  # 与初值相同，应直接返回
+        assert dashboard.status_label.text() == "SENTINEL"

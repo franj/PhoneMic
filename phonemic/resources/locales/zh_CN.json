@@ -7,6 +7,7 @@
     "status_disconnected": "未连接",
     "status_encrypted": "加密",
     "status_plaintext": "明文",
+    "tunnel_lost": "隧道失效，请重启服务",
     "status_encrypted_algo": "加密（{algo}）",
     "menu_program": "程序",
     "menu_network": "网络",
@@ -69,10 +70,6 @@
     "photo_copied_msg": "{name} 已复制到剪贴板，可直接粘贴",
     "photo_failed_title": "图片复制失败",
     "photo_failed_msg": "无法把 {name} 写入剪贴板",
-    "tunnel_lost_title": "隧道已失效，需要重启",
-    "tunnel_lost_msg": "在「网络」菜单中点击「重启服务」，然后重新扫码",
-    "tunnel_recovered_title": "隧道已恢复",
-    "tunnel_recovered_msg": "公网地址已可以正常访问",
 
     "minimized_message": "程序已最小化到系统托盘，点击托盘图标可恢复"
   },

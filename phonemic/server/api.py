@@ -16,6 +16,7 @@ from typing import Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.datastructures import MutableHeaders
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -722,7 +723,41 @@ async def _dispatch_http(request: Request, path: str) -> Response:
 
 # ---------- Starlette 应用与路由 ----------
 
+
+class SecurityHeadersMiddleware:
+    """给所有 HTTP 响应统一补安全响应头。
+
+    纯 ASGI 实现：只改 ``http.response.start`` 那一帧，不包装 Request/Response、
+    不碰响应正文，因此不会干扰文件上传的 ``request.stream()`` 与静态资源响应；
+    websocket 作用域直接放行，不参与握手。
+
+    目前只补一个头 —— ``Referrer-Policy: no-referrer``。加密模式下入口路径里带着
+    secret_path，而 URL 一旦作为 Referer 发往别的源，等于把入口地址送出去。现在
+    mobile.html 不含任何第三方资源，这条属性靠「不引外部资源」维持着，太脆弱：
+    哪天加个 CDN 或统计脚本就悄悄破了。（现代浏览器默认
+    strict-origin-when-cross-origin，跨源只发 origin 不含路径，但那是浏览器的
+    默认行为，不是我们能保证的东西。）
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        async def send_with_security_headers(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Referrer-Policy"] = "no-referrer"
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
 app = Starlette()
+# 加密模式下入口路径含 secret_path，禁止它随 Referer 外流。
+# 必须在应用启动前注册（Starlette 启动后再 add_middleware 会抛 RuntimeError）。
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 async def root(request: Request) -> Response:

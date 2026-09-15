@@ -324,9 +324,11 @@ def main():
             QMessageBox.warning(dashboard, i18n.tr("tunnel.error_title"), str(payload))
             dashboard.on_switch_completed()
         elif event_type == "tunnel_reachability":
-            # 保活探测结果：公网入口失效 / 恢复。用托盘通知而非模态框，
-            # 避免周期性探测打扰用户（同一状态只在翻转时上报一次）。
-            tray.notify_tunnel_reachability(bool(payload))
+            # 保活探测结果：公网入口失效 / 恢复。只更新主界面状态栏，不弹托盘通知。
+            # 失效只会发生在用户离开电脑时（人在用时保活流量不断，隧道不会被回收），
+            # 而托盘通知只显示几秒必然错过；状态栏常驻，用户回来一眼就能看到。
+            # 同一状态只在翻转时上报一次，避免 60s 一轮刷屏。
+            dashboard.set_tunnel_reachability(bool(payload))
         elif event_type == "tunnel_mode_changed":
             mode = TunnelMode(payload)
             dashboard._mode = mode

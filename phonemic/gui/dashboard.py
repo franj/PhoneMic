@@ -71,6 +71,12 @@ class Dashboard(QMainWindow):
         self._algorithm: str = self.sm.get("e2ee_algorithm", "none")
         self._negotiated_algo: Optional[str] = None  # 本次连接握手协商出的算法，由 connect 事件携带
         self._algorithm_change_callback: Optional[Callable[[str], None]] = None
+        # connection 状态栏的两个入参：connected 此前只在 update_connection_status()
+        # 里赋值（构造函数没给初值），任何在首次调用前读取 self.connected 的路径
+        # 都会 AttributeError；这里补上 false，让重绘入口可以无条件自刷新。
+        self.connected = False
+        # 隧道公网入口可达性（保活探测结果，见 TunnelKeepalive）。True＝可达/未知。
+        self._tunnel_reachable: bool = True
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
@@ -222,6 +228,8 @@ class Dashboard(QMainWindow):
         self._set_busy(True)
         self.ip_label.setText(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
+        # 换模式＝旧的保活结论作废（保活只在 Cloudflare 模式运行）
+        self._reset_tunnel_reachability()
         set_mode(target_mode)
         self._apply_mode_ui()
         if self._mode_switch_callback:
@@ -293,6 +301,8 @@ class Dashboard(QMainWindow):
         self._tunnel_url = url
         if self._mode == TunnelMode.CLOUDFLARE:
             if url:
+                # 新域名到手＝隧道刚重建，之前的「失效」标记随之作废
+                self._reset_tunnel_reachability()
                 if self._switching:
                     self.on_switch_completed()
                 else:
@@ -454,6 +464,8 @@ class Dashboard(QMainWindow):
         self._set_busy(True)
         self.ip_label.setText(self.i18n.tr("dashboard.restarting"))
         self._tunnel_url = None
+        # 重启正是失效时的自救动作，清掉失效标记（拿到新 URL 后会再次刷新）
+        self._reset_tunnel_reachability()
         self._apply_mode_ui()  # _switching=True → 先清空二维码，避免扫到已作废的旧码
         if self._restart_service_callback:
             self._restart_service_callback()
@@ -507,9 +519,42 @@ class Dashboard(QMainWindow):
             else:
                 # 尚未收到协商结果（如模式切换后状态刷新）时退化为通用文案
                 text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
-            self.status_label.setText(text)
         else:
-            self.status_label.setText('<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected"))
+            text = '<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected")
+
+        # 末段：隧道失效（保活探测连续失败）——只有 Cloudflare 模式才有保活，
+        # 局域网模式不受 Ready 影响
+        if self._mode == TunnelMode.CLOUDFLARE and not self._tunnel_reachable:
+            text += ' <span style="color:#c62828;">| ' + self.i18n.tr("dashboard.tunnel_lost") + '</span>'
+        self.status_label.setText(text)
+
+    def set_tunnel_reachability(self, reachable: bool) -> None:
+        """隧道公网入口可达性翻转（TunnelKeepalive 探测结果）。
+
+        用状态栏而不是托盘通知——理由是**可见性**，不是「打扰」：失效只会在用户
+        不在电脑前时发生，因为人正常使用时保活流量是持续不断的，隧道闲不到被回收
+        的条件。而托盘通知只停留几秒，用户不在场等于必然错过，回来时屏幕上没有
+        任何痕迹，根本不知道要重扫码。状态栏是常驻的，用户回来一眼就能看到
+        「隧道失效，请重启服务」——这才是闭环成立的前提。
+        顺带的好处是不抢焦点（60s 一轮，偶发抖动走通知会变成打扰）。
+        （发布版没有任何日志出口，这里是唯一可视的落点。）
+        """
+        if reachable == self._tunnel_reachable:
+            return
+        self._tunnel_reachable = reachable
+        # 复用现有入口重绘整行，避免与加密状态段各自拼一半
+        self.update_connection_status(self.connected)
+
+    def _reset_tunnel_reachability(self) -> None:
+        """清掉失效标记并重绘状态栏（新域名到手 / 切换模式 / 重启服务时）。
+
+        必须显式重绘：状态栏是自拼的字符串，只改内部状态不会自动刷新，用户会
+        继续看到已经过期的「隧道失效」提示——刚做完重启就还挂着这句话最误导人。
+        """
+        if self._tunnel_reachable:
+            return
+        self._tunnel_reachable = True
+        self.update_connection_status(self.connected)
 
     def show_hide_on_tray_message(self):
         if getattr(self, '_already_show_hide_on_tray_message', False):

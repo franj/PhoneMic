@@ -166,6 +166,28 @@ class TestEncryptedPathGuard:
         assert status == 404
 
 
+class TestSecurityHeaders:
+    """安全响应头：所有 HTTP 响应都带 Referrer-Policy: no-referrer。
+
+    入口路径（加密模式下即 secret_path）不能随 Referer 发往别的源，
+    因此这条头必须覆盖到每一个响应，包括路由层直接给出的 404。
+    """
+
+    def test_plain_responses_carry_referrer_policy(self, plain_server):
+        """200 与 404 都要带 —— 404 最容易漏（不经过分发函数）。"""
+        host, port, sc, _ = plain_server
+        for path in ("/", "/some/random/path"):
+            status, headers = _get(host, port, path)
+            assert headers.get("referrer-policy") == "no-referrer", f"{path} 缺 Referrer-Policy"
+
+    def test_secret_path_response_carries_referrer_policy(self, enc_server):
+        """加密模式下入口地址就是 secret path，这条头正是为它准备的。"""
+        host, port, sc, _ = enc_server
+        status, headers = _get(host, port, f"/{sc.secret_path}/")
+        assert status == 200
+        assert headers.get("referrer-policy") == "no-referrer"
+
+
 class TestPlainPathGuard:
     """明文模式：根路由可用，未知路径 404。"""
 

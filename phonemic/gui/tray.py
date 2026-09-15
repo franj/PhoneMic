@@ -233,31 +233,6 @@ class SystemTray(QObject):
             timeout=5000,
         )
 
-    def notify_tunnel_reachability(self, reachable: bool) -> None:
-        """隧道公网入口可达性翻转（保活探测结果，仅在状态变化时调用一次）。
-
-        失效时无法自动修复——域名被 Cloudflare 回收后只能重启隧道换新域名。
-        重启入口是「网络菜单 → 重启服务」（两种模式都可用，见 TunnelManager.
-        restart_service），因此文案要把这条路径和「重新扫码」都写全——发布版
-        没有任何日志出口，托盘通知是这条信息唯一的触达渠道。
-        """
-        if not self.tray_icon:
-            return
-        if reachable:
-            self.show_message(
-                self.i18n.tr("tray.tunnel_recovered_title"),
-                self.i18n.tr("tray.tunnel_recovered_msg"),
-                QSystemTrayIcon.Information,
-                timeout=5000,
-            )
-        else:
-            self.show_message(
-                self.i18n.tr("tray.tunnel_lost_title"),
-                self.i18n.tr("tray.tunnel_lost_msg"),
-                QSystemTrayIcon.Warning,
-                timeout=10000,
-            )
-
     def _on_message_clicked(self):
         """点击托盘通知：若是文件通知则打开文件所在目录。"""
         if self._last_file_dir and os.path.isdir(self._last_file_dir):
