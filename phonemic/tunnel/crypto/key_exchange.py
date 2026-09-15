@@ -4,9 +4,11 @@
 algo，再据此建对应 CryptoProvider（解决"先有 Provider 才能解 auth、解了 auth
 才知道建哪个 Provider"的死锁）。
 
-PC 身份私钥由 SecureChannel 在进程生命周期内稳定持有（每次建连重新生成，
-只通过二维码带外分发，等价于带外 token）。手机临时私钥从不出手机，会话密钥
-只有做过密钥交换的两方持有。
+PC 身份私钥由 SecureChannel 在进程生命周期内稳定持有——只在重建 SecureChannel
+（切换模式 / 重启服务）时才更换，二维码因此不会因新连接失效。它通过二维码带外
+分发，等价于带外 token。手机临时私钥从不出手机，会话密钥只有做过密钥交换的
+两方持有（注：手机在同一页面内复用同一对临时密钥，故同一页面的多次重连会派生出
+相同的会话密钥；跨连接的新鲜度由握手 nonce 提供，见 e2ee.SecureSession）。
 """
 
 import base64

@@ -135,28 +135,26 @@ class PhoneSimulator:
 
 
 def authenticate(ws, phone):
-    """完成 auth 握手，返回解密后的 auth_ack 内容。
+    """完成三步握手（auth → auth_challenge → auth_proof），返回挑战帧内容。
 
-    ack 是下行首帧（服务端 tx_seq=0，整帧加密）：此处必须解密消费，
+    auth_challenge 是下行首帧（服务端 tx_seq=0，整帧加密）：必须在这里解密消费，
     手机端 rx 计数才能与服务端后续下行帧（config 等）对齐。
     """
     ws.send(frame_encode(phone.make_auth()))
-    msg = ws.recv(timeout=5)
-    inner = phone.decrypt(msg)
-    assert inner["type"] == "auth_ack"
-    assert inner["status"] == "OK"
-    return inner
+    challenge = phone.decrypt(ws.recv(timeout=5))
+    assert challenge["type"] == "auth_challenge"
+    ws.send(phone.encrypt({"type": "auth_proof", "nonce": challenge["nonce"]}))
+    return challenge
 
 
 def authenticate_and_verify(ws, phone):
-    """完成 auth 握手并验证 auth_ack 可被客户端解密，返回解密后的内容。"""
-    ws.send(frame_encode(phone.make_auth()))
-    msg = ws.recv(timeout=5)
-    inner = phone.decrypt(msg)
-    assert inner["type"] == "auth_ack"
-    assert inner["status"] == "OK"
-    assert "ts" in inner
-    return inner
+    """同上，并额外校验挑战帧的形态：nonce 为 16 字节 bin、不回显 algo。"""
+    challenge = authenticate(ws, phone)
+    assert isinstance(challenge["nonce"], bytes)
+    assert len(challenge["nonce"]) == 16
+    assert "algo" not in challenge
+    assert "ts" not in challenge  # 旧 auth_ack 的装饰字段已随它一起退役
+    return challenge
 
 
 def consume_connect(queue, algo="xsalsa20"):
@@ -286,16 +284,14 @@ def test_only_one_active_connection(secure_server):
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     ws1 = ws_connect(ws_url(host, port, sc))
-    ws1.send(frame_encode(phone.make_auth()))
-    ws1.recv(timeout=5)  # auth_ack
+    authenticate(ws1, phone)
     event, _ = queue.get(timeout=2)
     assert event == "connect"
     ws1.recv(timeout=2)  # config
 
     ws2 = ws_connect(ws_url(host, port, sc))
     # 新连接会替换旧连接
-    ws2.send(frame_encode(phone.make_auth()))
-    ws2.recv(timeout=5)  # auth_ack
+    authenticate(ws2, phone)
 
     events = []
     for _ in range(2):
@@ -439,63 +435,74 @@ def test_unknown_inner_type_tolerance(secure_server):
 
 # ---------- 端到端完整流程测试 ----------
 def test_full_e2e_flow(secure_server):
-    """完整端到端流程：认证→auth_ack解密→config解密→双向消息→断连"""
+    """完整端到端流程：三步握手→config解密→双向消息→断连"""
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     with ws_connect(ws_url(host, port, sc)) as ws:
-        # 1. 发送 auth
-        ws.send(frame_encode(phone.make_auth()))
+        # 1. 三步握手：auth（明文）→ auth_challenge → auth_proof（均加密）
+        challenge = authenticate_and_verify(ws, phone)
 
-        # 2. 接收并解密 auth_ack（之前未覆盖的关键步骤）
-        msg = ws.recv(timeout=5)
-        ack_inner = phone.decrypt(msg)
-        assert ack_inner["type"] == "auth_ack"
-        assert ack_inner["status"] == "OK"
-        assert "ts" in ack_inner
-
-        # 3. 消费 connect 事件
+        # 2. 握手走完才有 connect 事件（认证失败发生在注册之前）
         event, _ = queue.get(timeout=2)
         assert event == "connect"
 
-        # 4. 接收并解密 config
-        msg = ws.recv(timeout=2)
-        config_inner = phone.decrypt(msg)
+        # 3. 接收并解密 config
+        config_inner = phone.decrypt(ws.recv(timeout=2))
         assert config_inner["type"] == "config"
         assert "mobile_max_records" in config_inner
 
-        # 5. 发送加密消息 → 服务器接收
+        # 4. 发送加密消息 → 服务器接收
         ws.send(phone.encrypt({"type": "preview", "text": "hello e2e"}))
         msg_type, text = queue.get(timeout=2)
         assert msg_type == "preview"
         assert text == "hello e2e"
 
-        # 6. 服务器推送 → 客户端解密
+        # 5. 服务器推送 → 客户端解密
         send_to_phone({"type": "notice", "text": "server push"})
         msg = ws.recv(timeout=2)
         notice_inner = phone.decrypt(msg)
         assert notice_inner["type"] == "notice"
         assert notice_inner["text"] == "server push"
 
-    # 7. 断连后应收到 disconnect 事件
+    # 6. 断连后应收到 disconnect 事件
     event, _ = queue.get(timeout=2)
     assert event == "disconnect"
 
 
-def test_auth_ack_decryption(secure_server):
-    """验证客户端能解密 auth_ack 消息（模拟 JS 端 handleAuthAck）"""
+def test_auth_challenge_decryption(secure_server):
+    """验证客户端能解密 auth_challenge 并回 auth_proof（模拟 JS 端 makeAuthProof）"""
     host, port, queue, sc = secure_server
     phone = PhoneSimulator(sc.get_public_key_b64())
 
     with ws_connect(ws_url(host, port, sc)) as ws:
         ws.send(frame_encode(phone.make_auth()))
-        msg = ws.recv(timeout=5)
 
-        # 模拟 JS handleAuthAck：整帧解密——seq 由 Provider 内部校验（首帧 seq=0）
-        inner = phone.decrypt(msg)
-        assert inner["type"] == "auth_ack"
-        assert inner["status"] == "OK"
-        assert isinstance(inner["ts"], int)
+        # 整帧解密：seq 由 Provider 内部校验（首帧 seq=0）
+        inner = phone.decrypt(ws.recv(timeout=5))
+        assert inner["type"] == "auth_challenge"
+        assert isinstance(inner["nonce"], bytes)
+        assert len(inner["nonce"]) == 16
+
+        # 回 auth_proof 后服务端才认为握手完成
+        ws.send(phone.encrypt({"type": "auth_proof", "nonce": inner["nonce"]}))
+        event, _ = queue.get(timeout=2)
+        assert event == "connect"
+
+
+def test_close_reason_is_byte_truncated():
+    """close reason 按字节裁：非 ASCII 不能撑爆 WS close 帧 123 字节的上限。
+
+    拒绝原因里可能带对端提供的算法名（`algorithm '<algo>' not allowed`），
+    按字符截断会让 CJK 膨胀到上限之外、close 直接抛异常。
+    """
+    assert api_mod._close_reason("") == ""
+    assert len(api_mod._close_reason("x" * 500).encode("utf-8")) <= 100
+    # 每字 3 字节：99 字节塞得下 33 字，第 34 字会越界
+    assert api_mod._close_reason("算" * 200) == "算" * 33
+    assert len(api_mod._close_reason("算" * 200).encode("utf-8")) <= 100
+    # 孤立代理项（无法直接 UTF-8 编码）不能让它抛异常
+    assert len(api_mod._close_reason("a\ud800b").encode("utf-8")) <= 100
 
 
 def test_reconnection_cycle(secure_server):
@@ -640,7 +647,7 @@ def test_client_log_route(server_no_sc, caplog):
     now = int(time.time() * 1000)
     entries = [
         [now, "warn", "[WS] closed code=1006 clean=false"],
-        [now + 1, "error", "auth_ack decrypt failed"],
+        [now + 1, "error", "auth_challenge decrypt failed"],
     ]
     body = json.dumps({"ua": "pytest-mobile-ua", "entries": entries}).encode("utf-8")
 
@@ -650,7 +657,7 @@ def test_client_log_route(server_no_sc, caplog):
 
     # 手机端原样回传的现场必须能在服务端日志里看到（含时间戳与级别）
     assert "[WS] closed code=1006 clean=false" in caplog.text
-    assert "auth_ack decrypt failed" in caplog.text
+    assert "auth_challenge decrypt failed" in caplog.text
     assert "pytest-mobile-ua" in caplog.text
 
 
@@ -912,8 +919,9 @@ class TestConnectionPreemption:
             with ws_connect(ws_url(host, port, sc)) as intruder:
                 bogus = {"type": "auth", "algo": "xsalsa20", "data": b"bogus"}
                 intruder.send(frame_encode(bogus))
-                ack = frame_decode(intruder.recv(timeout=2))
-                assert ack.get("rejected") is True
+                # 认证前失败：不回消息层帧、直接 close 4001
+                with pytest.raises(Exception):
+                    intruder.recv(timeout=2)
 
             time.sleep(0.3)
             self._assert_still_encrypted(ws, phone, 13)

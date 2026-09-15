@@ -20,11 +20,25 @@ from phonemic.tunnel.frame import encode as frame_encode
 ALGO = "xsalsa20"  # 客户端从 a= 列表中协商选择的算法
 
 
+def do_handshake(session, auth_msg):
+    """跑完三步握手 auth → auth_challenge → auth_proof，返回本轮挑战 nonce。
+
+    等价于 api._handle_auth 的第 2、3 步：挑战由服务端现场生成（此处直接取用
+    它的 nonce），客户端必须把它正确回显才算认证通过。
+    """
+    assert session.receive_auth(auth_msg) is True
+    challenge = session.make_auth_challenge()
+    assert session.verify_auth_proof(
+        {"type": "auth_proof", "nonce": challenge["nonce"]}, challenge["nonce"]
+    ) is True
+    return challenge["nonce"]
+
+
 def make_session(phone_algo=ALGO, mode="lan"):
-    """创建一个已完成握手的会话（加密模式，算法由客户端协商）。"""
+    """创建一个已完成三步握手的会话（加密模式，算法由客户端协商）。"""
     sc = SecureChannel(algorithm="auto", mode=mode)
     session = sc.new_session()
-    session.receive_auth(make_phone_auth(sc, algorithm=phone_algo))
+    do_handshake(session, make_phone_auth(sc, algorithm=phone_algo))
     return sc, session
 
 
@@ -101,11 +115,24 @@ class TestSecureChannelKeys:
 class TestSecureChannelAuth:
     """测试 auth 握手流程。"""
 
-    def test_receive_auth_succeeds(self):
+    def test_receive_auth_establishes_keys_but_not_authenticated(self):
+        """解封成功只建立会话密钥，不算认证通过——认证要等 auth_proof。
+
+        这正是防重放的立足点：录下来的 auth 帧重放同样解得开，光靠它挡不住。
+        """
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         assert session.receive_auth(make_phone_auth(sc)) is True
+        assert session.is_authenticated is False
+        # 但密钥已经就绪：可以解开发给它的挑战帧
+        assert session.negotiated_algorithm == ALGO
+
+    def test_verify_auth_proof_completes_handshake(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        do_handshake(session, make_phone_auth(sc))
         assert session.is_authenticated is True
+        assert session.is_rejected is False
 
     def test_receive_auth_fails_with_garbage(self):
         sc = SecureChannel(algorithm="auto")
@@ -157,10 +184,13 @@ class TestSecureChannelAuth:
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         assert session.receive_auth(make_phone_auth(sc, algorithm=phone_algo)) is True
+        challenge = session.make_auth_challenge()
+        # 挑战帧不带明文 algo（algo 早在 auth 密文内协商过）
+        assert "algo" not in challenge
+        assert session.verify_auth_proof(
+            {"type": "auth_proof", "nonce": challenge["nonce"]}, challenge["nonce"]
+        ) is True
         assert session.is_authenticated is True
-        # 成功的 auth_ack 整帧加密且不带明文 algo（algo 已在 auth 密文内协商）
-        ack = session.make_auth_ack()
-        assert "algo" not in ack
         # 协商结果可通过属性查询（供状态栏展示）
         assert session.negotiated_algorithm == phone_algo
 
@@ -188,20 +218,21 @@ class TestSecureChannelAuth:
         assert SecureChannel(algorithm="xchacha20").algorithm == "auto"
         assert SecureChannel(algorithm="auto").algorithm == "auto"
 
-    def test_make_auth_ack_returns_encrypted(self):
+    def test_make_auth_challenge_is_encrypted(self):
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         session.receive_auth(make_phone_auth(sc))
-        ack = session.make_auth_ack()
-        assert ack["type"] == "auth_ack"
-        assert ack["status"] == "OK"
-        # 成功 ack 走 wrap 统一出口：整帧加密成线上字节（无明文泄漏、无信封）
-        wrapped = session.wrap(ack)
+        challenge = session.make_auth_challenge()
+        assert challenge["type"] == "auth_challenge"
+        assert len(challenge["nonce"]) == 16
+        # 挑战帧走 wrap 统一出口：整帧加密成线上字节（无明文泄漏、无信封）
+        wrapped = session.wrap(challenge)
         assert isinstance(wrapped, bytes)
-        assert session.unwrap(wrapped) == ack
+        assert wrapped != frame_encode(challenge)  # 确已加密，不是裸编码
+        assert session.unwrap(wrapped) == challenge
 
-    def test_auth_ack_decrypts_correctly(self):
-        """手机端独立推导会话密钥后可解开整帧加密的 auth_ack（首帧 seq=0）。"""
+    def test_auth_challenge_decrypts_on_phone(self):
+        """手机端独立推导会话密钥后可解开整帧加密的 auth_challenge（首帧 seq=0）。"""
         sc = SecureChannel(algorithm="auto")
         session = sc.new_session()
         phone_private = PrivateKey.generate()
@@ -214,16 +245,74 @@ class TestSecureChannelAuth:
         ).encode("utf-8")
         sb = SealedBox(sc.pc_private.public_key)
         session.receive_auth({"type": "auth", "data": sb.encrypt(inner)})
-        ack = session.make_auth_ack()
-        wrapped = session.wrap(ack)
+        challenge = session.make_auth_challenge()
+        wrapped = session.wrap(challenge)
         # 手机端：ECDH + blake2b 派生同一会话密钥
         shared = crypto_scalarmult(bytes(phone_private), bytes(sc.pc_private.public_key))
         session_key = blake2b(shared, digest_size=32).digest()
         pt = create_provider(ALGO, session_key).decrypt(wrapped)
         msg = frame_decode(pt)
-        assert msg["type"] == "auth_ack"
-        assert msg["status"] == "OK"
-        assert "ts" in msg
+        assert msg["type"] == "auth_challenge"
+        assert msg["nonce"] == challenge["nonce"]
+        # 旧 auth_ack 的装饰字段（无人读的 ts）已随它一起退役
+        assert "ts" not in msg
+
+
+class TestAuthReplayProtection:
+    """auth 帧重放：三步握手必须在第三步把它挡住（这是它存在的全部理由）。"""
+
+    def test_replayed_auth_bytes_cannot_complete_handshake(self):
+        """录下真机的 auth 帧重放：解封照样成功，但过不了 nonce 这一关。"""
+        sc = SecureChannel(algorithm="auto")
+        recorded = make_phone_auth(sc)  # 真机那一帧（攻击者原样录下）
+
+        victim = sc.new_session()
+        assert victim.receive_auth(recorded) is True
+        victim_nonce = victim.make_auth_challenge()["nonce"]
+
+        attacker = sc.new_session()
+        assert attacker.receive_auth(dict(recorded)) is True  # 重放：解封成功
+        attacker_nonce = attacker.make_auth_challenge()["nonce"]
+        assert attacker_nonce != victim_nonce  # 挑战每连接新鲜
+        # 重放者拿不到手机私钥 → 算不出 session_key → 造不出合法 auth_proof：
+        # 即使它把上一轮的真 nonce 送进来，也过不了本题（nonce 对不上）
+        assert attacker.verify_auth_proof(
+            {"type": "auth_proof", "nonce": victim_nonce}, attacker_nonce
+        ) is False
+        assert attacker.is_authenticated is False
+
+    def test_nonce_is_fresh_per_challenge(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        session.receive_auth(make_phone_auth(sc))
+        first = session.make_auth_challenge()["nonce"]
+        second = session.make_auth_challenge()["nonce"]
+        assert first != second
+        assert len(first) == len(second) == 16
+
+    def test_proof_must_be_nonempty_bytes(self):
+        """auth_proof 的 nonce 必须是 bin：str / None / 缺失一律拒绝。"""
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        session.receive_auth(make_phone_auth(sc))
+        nonce = session.make_auth_challenge()["nonce"]
+        for bad in ({"type": "auth_proof", "nonce": nonce.hex()},
+                    {"type": "auth_proof"},
+                    {"type": "auth_proof", "nonce": None},
+                    None,
+                    {"type": "auth", "nonce": nonce}):
+            assert session.verify_auth_proof(bad, nonce) is False
+        assert session.is_authenticated is False
+
+    def test_proof_with_wrong_nonce_rejected(self):
+        sc = SecureChannel(algorithm="auto")
+        session = sc.new_session()
+        session.receive_auth(make_phone_auth(sc))
+        nonce = session.make_auth_challenge()["nonce"]
+        assert session.verify_auth_proof(
+            {"type": "auth_proof", "nonce": b"\x00" * 16}, nonce
+        ) is False
+        assert session.is_authenticated is False
 
 
 class TestSecureChannelEncryptDecrypt:
@@ -461,15 +550,16 @@ class TestNoneMode:
         assert session.is_rejected is True
         assert "token" in session.reject_reason
 
-    def test_none_cf_make_auth_ack(self):
+    def test_none_cf_authenticates_without_challenge(self):
+        """none+CF 没有会话密钥，做不了密钥确认：token 一过即认证。"""
         sc = SecureChannel(algorithm="none", mode="cloudflare")
         session = sc.new_session()
         token = sc.get_public_key_b64()
-        session.receive_auth({"type": "auth", "algo": "none", "data": token})
-        ack = session.make_auth_ack()
-        assert ack["type"] == "auth_ack"
-        assert ack["status"] == "OK"
-        assert "data" not in ack
+        assert session.receive_auth(
+            {"type": "auth", "algo": "none", "data": token}
+        ) is True
+        assert session.is_authenticated is True
+        assert session.is_encrypted is False
 
     def test_none_cf_wrap_passthrough(self):
         sc = SecureChannel(algorithm="none", mode="cloudflare")

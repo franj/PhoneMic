@@ -1,6 +1,6 @@
 # PhoneMic 通信协议设计（v1 · MessagePack）
 
-状态：**设计稿，评审中，尚未落地**。本文档是手机端与服务端实现新协议时的唯一对齐依据。
+状态：**§12 阶段 0–3 已落地**（编解码封装、加密层重构、三步握手，含 `hello` 删除与 `auth_ack` 退役）；阶段 4–7 见 §12。本文档是手机端与服务端实现新协议时的唯一对齐依据。
 
 **加密层设计已抽取为独立文档 `crypto-design.md`**——它内容无关（可承载 JSON / msgpack / CBOR 任意编码），本文档只保留消息层与加密层的边界约定，加密细节一律引用之。
 
@@ -8,7 +8,7 @@
 
 ## 1. 背景与目标
 
-### 现状
+### 迁移前的状态（JSON over WebSocket）
 
 手机端（`phonemic/resources/mobile.html`）与服务端（`phonemic/server/api.py`）之间目前是 JSON over WebSocket：
 
@@ -21,6 +21,8 @@
 |---|---|
 | 上行 | `preview`、`send`、`auth` |
 | 下行 | `config`（`api.py:188 push_config`）、`reconnect`（`api.py:202 request_client_rescan`）、`auth_ack` |
+
+> **已落地**：本文档定义的 msgpack 协议（§12 阶段 1–3，含三步握手）**已经实现**，上面这张表是迁移前的快照，保留它是为了说明「为什么要换」。当前类型清单见 §6。
 
 ### 为什么要换
 
@@ -47,7 +49,7 @@
 
 ### 全部消息统一用 msgpack，没有例外
 
-**包括 `auth` / `auth_ack`。** 其中**只有 `auth` 不能加密**（会话密钥尚未建立；到 `auth_ack` 时密钥已就绪，整帧加密，见第 4 节），但两者都完全可以用 msgpack 编码——**"不能加密"和"不能用 msgpack"是两回事**。统一编码换来的好处：
+**包括 `auth` / `auth_challenge` / `auth_proof`。** 其中**只有 `auth` 不能加密**（会话密钥尚未建立；到 `auth_challenge` 时密钥已就绪，整帧加密，见第 4 节），但三者都完全可以用 msgpack 编码——**"不能加密"和"不能用 msgpack"是两回事**。统一编码换来的好处：
 
 - 全程只有一种编解码路径，`api.py` 里 `message.get("text")` 分支可以整个删掉；
 - `auth` 的 `data`（sealed box 公钥）由 base64 字符串改为 `bin`，握手那次 base64 编解码也一并去掉。
@@ -66,7 +68,7 @@
 | `map` | 每条消息本身 | 键为 `str` |
 | `str` | 所有文本、字段名、**`type` 字段值** | 必须是合法 UTF-8 |
 | `int` | 坐标、块号、文件大小 | 变长编码，小整数只占 1 字节（`seq` 不在此列——它由加密层承载，不进 msgpack，见 `crypto-design.md` §5） |
-| `bin` | 文件/图片分块、`auth` 的 `data` | **原生类型，不做 base64** |
+| `bin` | 文件/图片分块、`auth` 的 `data`、握手 `nonce` | **原生类型，不做 base64** |
 
 文本与二进制可以在同一个 map 里混编，解码端按类型头精确还原，边界不会混淆：
 
@@ -138,13 +140,13 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 | 帧 | 加密方式 |
 |---|---|
 | `auth` | **唯一明文帧**：`type` 明文（服务端要先知道这是 auth）；`data` 为 SealedBox 密文，内含 `algo` 与手机临时 X25519 公钥，均不出现在线上明文 |
-| `auth_ack` 及之后所有帧 | **对称整帧加密**（含 `type`），Provider 输出直接上帧（`none+LAN` 无此帧，全程明文） |
+| `auth_challenge` 及之后所有帧 | **对称整帧加密**（含 `type`），Provider 输出直接上帧（`none+LAN` 无此帧，全程明文） |
 
 - **会话状态是权威**：`is_encrypted` 握手时确定、之后不变，接收端永远知道该不该解；**绝不"解密失败就当明文"**（安全论证见 `crypto-design.md` §7）。
 - **CF 强制加密**：Cloudflare 模式下 `none` 被归一为 `auto`（`mode.py` 的 `effective_algorithm`），**不存在明文 CF**（历史模式 `none`+CF 已删）。因此 `needs_auth` 对所有非 `none+LAN` 连接为真。
-- **`none` + LAN**：全程明文，**没有 `auth` 帧**（`needs_auth` 为 False），握手由 `hello` 完成。
+- **`none` + LAN**：全程明文，**一条握手帧都没有**（`needs_auth` 为 False），连上即可发数据帧。
 - **`auth.data` 统一编码为 `bin`**：保证该字段类型唯一，接收端不需要按模式分支判断是 str 还是 bin。
-- **握手失败**：服务端不回消息层帧，直接 WS close 4001 + reason（见第 5 / 7 节）。
+- **握手失败分两类**（详见第 5 / 7 节）：**认证前**（解封失败 / `algo` 不在列表）此刻无密钥可用 → 不回消息层帧，直接 WS close 4001 + reason；**认证后**（`auth_proof` 的 `nonce` 不符 / 超时）已有会话密钥 → 回**加密的** `error(code:"auth")` 再关闭。
 - **信任模型**：PC 公钥 = 带外 bearer token，能密封即认证（`crypto-design.md` §2）。
 
 ### 4.1 密钥交换独立成类（算法无关）
@@ -158,22 +160,31 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 ## 5. 握手流程
 
 ```
-手机                                           服务端
+手机                                                  服务端
  │  WS 连接
- │──── auth（明文帧）{"type":"auth","data":<bin>} ─────►│   仅 needs_auth 模式
- │◄─── auth_ack（加密帧）{"type":"auth_ack"} ────────────────│   握手成功
- │◄─── 或 WS 关闭（close 4001 + reason）──────────────│   握手失败，无密钥可用
  │
- │──── hello {"type":"hello","v":1} ─────────────►│   总是发
- │◄─── config {"type":"config","key","value"} ─────│   或 error {"type":"error","code":"version"}
+ │──── auth ──────────────────────────────────────────►│  明文帧  {"type":"auth","data":<bin>}
+ │◄─── auth_challenge ─────────────────────────────────│  加密帧  {"type":"auth_challenge","nonce":<bin>}
+ │──── auth_proof ────────────────────────────────────►│  加密帧  {"type":"auth_proof","nonce":<bin>}
+ │◄─── config ─────────────────────────────────────────│  加密帧  {"type":"config","key","value"}
+ │◄─── error ──────────────────────────────────────────│  加密帧  {"type":"error","code":"auth"}     ← 仅 auth_proof 校验失败时
  │
  │  …… 正常数据消息 ……
 ```
 
-- `auth` / `auth_ack` 仅在 `needs_auth` 时出现。**`none+LAN` 没有 auth**（`e2ee.py:268` `needs_auth` 为 False）。
-- `auth.data` 的密封内容与密钥交换流程见 `crypto-design.md` §3；本文档只定义 `auth` 消息的帧格式（见第 7 节）。
-- **`hello` 总是发**，正是靠它补上 `none+LAN` 下"模式/版本不一致时连报错机会都没有"这个洞。
-- **版本天然一致**：`mobile.html` 由服务端下发（`api.py` 里 `html.replace` 注入），两端永远同版本，无灰度兼容问题。`hello` 的实际作用退化为**检测手机上那个页面还没刷新**——版本不符回 `error(code:"version")`，页面提示"请刷新"。
+`none + LAN` 下一条握手帧都没有，连上直接进数据帧：
+
+```
+ │◄─── config ─────────────────────────────────────────│  明文帧（无握手，config 照样下发）
+```
+
+- 三条握手帧仅在 `needs_auth` 时出现。**`none+LAN` 一条都不发**（`e2ee.py:268` `needs_auth` 为 False），也就没有这里描述的任何失败路径。
+- `auth.data` 的密封内容与密钥交换流程见 `crypto-design.md` §3；本文档只定义三条握手帧的帧格式（见第 7 节）。
+- **握手三步的理由**：`auth` 解封成功只证明"发送方持有 PC 公钥"，**不证明这一帧是刚发出来的**——把录下的 `auth` 原样重放同样解得开，而且重放者拿不到手机私钥、算不出 `session_key`，服务端却会照常承认它。因此解封成功后服务端必须给出一个**本连接现场生成的新鲜值**，客户端能回显它才算握手完成。
+- **新鲜度不外发**：`nonce` 只活这一次握手，因此握手**不需要任何跨连接状态**——不需要客户端持久化任何东西（对比"轮换密钥对 / 盐 / 续期 token"这类方案，它们都要把新鲜度存进长期凭据，而那恰是唯一必须靠二维码带外分发的东西）。`nonce` 也不进 `SecureSession` 的字段，它是 `_handle_auth` 协程里的一个局部变量。
+- **seq 语义不变**：`auth_challenge` 是下行的 0 号加密帧（客户端 `rxSeq=0`），`auth_proof` 是上行的 0 号加密帧（服务端 `rxSeq=0`），`config` 起为 1 号——与旧的 `auth` / `auth_ack` 两步版完全一致。
+- **没有版本协商帧**：`mobile.html` 由服务端下发（`api.py` 里 `html.replace` 注入），两端永远同版本，**不存在需要协商的版本号**——"服务端旧、页面新"这个方向在架构上不可能出现。
+  唯一可能的错配是**手机上那个页面还没刷新**（本次启动之前加载的旧页面），而它由编码层直接识破：旧页面发 **JSON text 帧**，新协议只认 binary 帧，收到 text 帧即关闭连接并提示重新扫码（见 §2 / §10）。这条规则比"在握手里声明版本"更强——它作用在**每一帧**上，且 `none+LAN` 下同样有效。
 
 ---
 
@@ -186,7 +197,7 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 | type | 说明 | payload 字段 |
 |---|---|---|
 | `auth` | 密钥交换（加密模式，仅 needs_auth） | `data`(bin) |
-| `hello` | 版本声明 | `v` |
+| `auth_proof` | 回显握手 `nonce`，证明持有会话密钥（加密模式，仅 needs_auth） | `nonce`(bin) |
 | `preview` | 输入预览 | `text` |
 | `send` | 文本上屏 | `text` |
 | `key` | 模拟按键 | `keys` |
@@ -198,7 +209,7 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 
 | type | 说明 | payload 字段 | 来源 |
 |---|---|---|---|
-| `auth_ack` | 握手应答 | 成功时为加密空帧 `{"type":"auth_ack"}`；失败不回消息帧，以 WS close（4001 + reason）传递 | 迁移已有 |
+| `auth_challenge` | 握手挑战：材料已解封，给出本连接的 `nonce` | `nonce`(bin) | 迁移已有 |
 | `config` | 单键配置推送 | `key`、`value` | 迁移 `push_config` |
 | `reconnect` | 要求重新扫码 | `reason` | 迁移 `request_client_rescan` |
 | `rekey` | 密钥轮换 | — | 预留 |
@@ -214,35 +225,54 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 
 ## 7. 各 type 详细定义
 
-### auth / auth_ack
+### auth / auth_challenge / auth_proof
 
-**线上帧的明文部分只有 `type`**：
+三步握手，**线上帧的明文部分只有第一步**：
+
 ```
-{"type":"auth", "data":<bin>}
+c→s  {"type":"auth", "data":<bin>}                  ← 唯一明文帧
+s→c  {"type":"auth_challenge", "nonce":<bin>}       ← 加密帧
+c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
 ```
+
+**第一步 `auth`（明文）**
 
 `data` 是用 PC 公钥 `SealedBox` 密封的**不透明字节**，消息层不解释其内容——内层结构 `{"algo","pk"}`（JSON 编码）、`algo` 校验、ECDH/KDF 全在 `crypto-design.md` §3。要点：
 
 - `algo` 取自二维码 fragment 的 `a=` 列表，服务端解封后校验其属于下发列表。**`algo` 只在密文里出现，从不以明文传输**。
 - 新协议已无 `none`+CF 明文模式，因此 `data` 在所有 `needs_auth` 会话里都是 SealedBox 密文，不再有 token 分支。
+- 解封成功**不等于**认证通过，它只建立会话密钥；认证要等第三步（见下）。
 
-加密帧（会话密钥已建立，整帧加密，含 `type`）：
+**第二步 `auth_challenge`（加密）**
 
-```
-{"type":"auth_ack"}
-```
+服务端解封成功后立即下发，字段只有一个 `nonce`：
 
-- **无 `data`、无明文 `algo`**：手机能解开这一帧即证明 PC 持有正确会话密钥，且 `algo` 在 `auth.data` 里早已协商过（`crypto-design.md` §7）。
-- `none+LAN` 模式**不发 `auth` / `auth_ack` 这一对帧**（见第 5 节），握手直接由 `hello` 完成。
+- **`nonce` 是 16 字节随机值**（`bin`），由服务端现场生成，生命周期只有这一次握手。
+- **只要求"每连接不同"，不要求"不可预测"**：重放者没有会话密钥，连 `nonce` 都读不到，猜中它毫无意义。要挡的是"录下 `auth` + `auth_challenge` + `auth_proof` 整段按序重放"——`nonce` 一旦复用，录下的 `auth_proof` 就会通过。
+- 因此**不要把 `ts` 之类既有字段升格成它**：毫秒级时间戳原则上会碰撞（同一毫秒内的两条连接 → 同一个值），而且会把一个纯装饰字段悄悄变成安全关键字段，日后无人查得出来。
+- 该 `nonce` 是**消息层的握手随机数**，与 `crypto-design.md` §6 密文布局里的 AEAD nonce（24 字节、由库自动生成、消息层不可见）没有关系。
+- **它不重复"我已经承认你的材料"这件事**：手机能解开这一帧，本身就是"PC 持有正确会话密钥"的证明，不需要再加一句话；`nonce` 在这里的唯一职责是提供新鲜度。
 
-**握手失败时服务端不回 `auth_ack`**——此时 PC 还没有会话密钥，无法加密，也没有任何可下发的机密。服务端直接关闭 WS 连接：
+**第三步 `auth_proof`（加密）**
 
-```
-WS close: code=4001, reason="algo not offered" | "bad sealed box"
-```
+只回显 `nonce`，不含其它内容：
 
-- 失败原因只可能来自解封阶段：`SealedBox` 解不开（公钥/数据损坏），或解封后的 `algo` 不在下发列表。
-- 用 close 帧而非明文 `auth_ack(rejected)`，是为了不破坏"绝不解密失败就当明文"的原则：手机端收到 `auth` 后等待的要么是**一条能解密的加密帧**（成功），要么是**连接关闭**（失败），无需"先试解密、失败再当明文解析"。close reason 在密钥建立前本就明文，泄露无害。
+- **能回出一个"本轮才产生、且被会话密钥正确加密的值"，就是持有会话密钥的证明。** 加密本身已经承载了"我解得开你的挑战"。
+- **手机在发出 `auth_proof` 之后即可认为通道已建立**（乐观，与 TLS 1.3 客户端 `Finished` 同形）。服务端随后下发的 `config` 是它的确认；若被拒，则会收到 `error(code:"auth")`。**不额外回一条"握手成功"帧**——那只会重复 `config` 已经传达的信息。
+- `auth_challenge` / `auth_proof` 都是**整帧加密**（含 `type`），字段作为 map 键藏在密文内，不新增任何明文面。
+
+**握手失败分两类**，判据是"此刻能不能加密"：
+
+| 时机 | 触发 | 处理 |
+|---|---|---|
+| **认证前** | `SealedBox` 解不开、或解封后的 `algo` 不在下发列表 | **不回任何消息层帧**，直接 `WS close: code=4001, reason=<拒绝原因>`。原因由 `e2ee.py` 给出（`missing auth data` / `invalid auth data encoding` / `key exchange failed: …` / `algorithm '…' not allowed`），`api._close_reason()` 按**字节**裁到 100 以内——close 帧的 reason 上限是 123 字节，按字符裁会让非 ASCII 撑爆它 |
+| **认证后** | `auth_proof` 的 `nonce` 不符，或等不到该帧（超时） | 已持有会话密钥 → 回**加密的** `error(code:"auth")`，然后关闭连接 |
+
+- 认证前用 close 帧而非明文 `auth_ack(rejected)`，是为了不破坏"绝不解密失败就当明文"的原则：手机端收到 `auth` 后等待的要么是**一条能解密的加密帧**，要么是**连接关闭**，无需"先试解密、失败再当明文解析"。close reason 在密钥建立前本就明文，泄露无害。
+- 认证后用 `error` 帧而非 close reason：close reason 有 123 字节上限、部分中间商会丢弃，而 `error` 是加密的、可以带完整语义。一句话：**可加密就回 `error` 帧，不可加密就 close。**
+- **两次等待共享同一个 10 秒预算**：`_handle_auth` 先算出绝对截止时刻 `deadline = time.monotonic() + AUTH_TIMEOUT`（`e2ee.AUTH_TIMEOUT = 10`），两次 `_recv_handshake_frame(websocket, deadline)` 都用它的**剩余量**作为 `asyncio.wait_for` 的超时。因此「每一步都拖到超时」不会把握手时长翻倍——整轮上限仍是 10 秒。
+
+> **为什么退役 `auth_ack` 这个名字**（而不是改语义沿用）：旧页面（本协议之前那版）判定握手成功的条件是「解出来的 `auth_ack.status === 'OK'`」。若新帧沿用 `auth_ack` 这个名字，**未刷新的旧页面会先显示"已连接"，等 `auth_proof` 超时后才被服务端踢掉**，界面来回抖；改名后它在解析阶段就失败，直接落到"请刷新页面"路径上——虽然按第 5 节它本该先被 text 帧规则拦下，但两道防线互不冲突。顺带丢掉的那条 `ts` 字段纯属装饰（旧客户端只查 `status`，服务端也不存它），**不要**把它升格成挑战 `nonce`。
 
 ### key
 
@@ -282,7 +312,7 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 **单键单值**结构，迁移自 `api.py:188 push_config`。现有代码发的是扁平形式 `{"type":"config","mobile_max_records":50}`，新协议统一规范为 `key` / `value` 两字段，便于通用分派。
 
-连接握手成功后服务端**主动下发一次**，**各加密模式一致**——不挂在 `auth_ack` 上，因此 `none+LAN`（无 auth 握手）同样收得到：
+连接握手成功后服务端**主动下发一次**，**各加密模式一致**——不挂在握手的任何一条消息上，因此 `none+LAN`（无握手帧）同样收得到；加密模式下它顺带充当了"通道已建立"的确认（见 §7 握手小节）：
 
 ```
 {"type":"config", "mobile_max_records":10, "max_frame_size":16777216}
@@ -308,12 +338,13 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 
 | code | 含义 | 客户端处理 |
 |---|---|---|
-| `version` | 版本不支持 | 提示"请刷新页面" |
-| `mode` | 模式不匹配 | 提示"请刷新页面" |
+| `auth` | 握手 `nonce` 校验失败（重放 / 实现异常） | 提示"请重新扫码"，断开后停止重连 |
 | `decrypt` | 解密失败 / 密钥失效 | 提示"请刷新页面"，连续 N 次则断连 |
 | `replay` | seq 未递增 | 丢弃，连续 N 次则断连 |
 | `ratelimit` | 限流 | 退避重试 |
 | `malformed` | 非法消息 / 未知 type | 记录日志，丢弃 |
+
+> `version` / `mode` 两个码随 `hello` 一起删除，它们本来就是 `hello` 的专属产物。版本天然一致，无需协商；而"未刷新的旧页面"这一情形**只能在 WS close 里表达**——旧页面读的是 JSON，发给它的 msgpack `error` 帧它根本解析不了。该情形由 binary/text 分帧规则识破（见 §2 / §5 / §10）。
 
 ### status
 
@@ -402,10 +433,11 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | 加密 | 解密成功（provider 内部已校验 seq 单调，外部不可见） | OK | 按分派表处理 |
 | 加密 | 解密抛 `ReplayError`（仅前缀路径；AAD 路径下重放表现为 MAC 失败，归入下一行） | REPLAY | 丢弃，回 `error(code:"replay")` |
 | 加密 | 解密失败 | DECRYPT_FAIL | 丢弃，回 `error(code:"decrypt")`；连续 N 次断连 |
+| 加密（已发 `auth_challenge`、未收 `auth_proof`） | 收到**任何其它帧** | PENDING_PROOF | 一律丢弃（**不得执行**），回 `error(code:"auth")` 并断连 |
 | 任意 | `type` 不在分派表内（含方向错误） | BAD_TYPE | 丢弃，回 `error(code:"malformed")` |
 | 任意 | WS text 帧 | 未刷新的旧页面 | 关闭连接，手机端提示重新扫码 |
 
-> 补充：格式问题与编码方式无关，现有 JSON 协议里也有同样的洞——`none+LAN` 下未刷新的旧页面发来 `{type:"data",...}`，`inner.get("text","")` 返回空串，`bridge.emit("send","")` 什么都不发生。`hello` + `error` 是唯一能修掉它的东西。
+> 补充：格式问题与编码方式无关，现有 JSON 协议里也有同样的洞——`none+LAN` 下未刷新的旧页面发来 `{type:"data",...}`，`inner.get("text","")` 返回空串，`bridge.emit("send","")` 什么都不发生。**binary/text 分帧规则就是修掉它的东西**：旧页面发的是 JSON text 帧，新服务端收到 text 帧一律关闭连接并提示重新扫码。它作用在每一帧上、且 `none+LAN` 下同样有效，比"在握手里声明版本号"更强。
 
 ---
 
@@ -428,12 +460,14 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 |---|---|---|
 | 0 | 本文档评审通过 | review |
 | 1 | `msgpack` 依赖接入 + 编解码封装（后端 `phonemic/tunnel/frame.py`、前端同构模块），**纯函数、不碰网络** | pytest + node 跑同一套测试向量 |
-| 2 | 加密层重构（设计见 crypto-design.md）：新增 `KeyExchange` 类，`CryptoProvider` 收窄为纯 AEAD 封装（构造只收 `session_key`）；`create_provider` 改签名为 `(algo, session_key)`；`SecureChannel` 持有 `KeyExchange` 实例；`receive_auth` 改为两段式。删 `e2ee.py` 旧 base64 与 `make_auth_ack_data` | 单测：`handle_auth` 给定 sealed → 出正确 `session_key`；各 Provider `encrypt`/`decrypt` 往返 |
-| 3 | 握手层：`auth` / `auth_ack` / `hello` / `config` / `error`，WS 全 binary 分流（两段式握手顺序见 crypto-design.md §3.4） | 连上后看 config 回包 |
+| 2 | 加密层重构（设计见 crypto-design.md）：新增 `KeyExchange` 类，`CryptoProvider` 收窄为纯 AEAD 封装（构造只收 `session_key`）；`create_provider` 改签名为 `(algo, session_key)`；`SecureChannel` 持有 `KeyExchange` 实例；`receive_auth` 改为两段式。删 `e2ee.py` 旧 base64 信封与 `make_auth_ack`（握手帧改名见阶段 3） | 单测：`handle_auth` 给定 sealed → 出正确 `session_key`；各 Provider `encrypt`/`decrypt` 往返 |
+| 3 | 握手层：`auth` / `auth_challenge` / `auth_proof` / `config` / `error`，WS 全 binary 分流（三步握手流程见 §5、帧格式见 §7）。**已落地**；`hello` 已删、`auth_ack` 已退役 | 连上后看 config 回包；重放录下的旧 `auth` 被拒（`test_e2ee.py::TestAuthReplayProtection`、`test_e2ee_server.py::TestAuthHandshake::test_replayed_auth_cannot_steal_the_connection`） |
 | 4 | 迁移 `preview` / `send` | 真机 |
 | 5 | 新增 `key` / `mouse` / `status` | 真机（`key` / `mouse` 已落地，`status` 未做） |
 | 6 | 面板 UI（按钮集内置） | 真机 |
 | 7 | `file` / `photo` 分块 | 真机 |
+
+> **进度（2026-09-15）**：阶段 1–3 已落地（编解码封装、加密层重构、三步握手），阶段 4–7 见各行内备注。
 
 **第 1 阶段单独做**：编解码是纯函数，能完整进 pytest，正好补上"mobile.html 没有测试覆盖"这个洞；且后续接网络出问题时可确定不是编解码的锅。
 
@@ -447,5 +481,5 @@ WS close: code=4001, reason="algo not offered" | "bad sealed box"
 | 2 | 是否启用 AAD | **已定：AAD 优先**（XChaCha20 / AES-GCM 用 aad 带 `seq`），不支持 aad 的 XSalsa20 用 8 字节大端前缀兜底；细节已移交 `crypto-design.md` §5 |
 | 3 | file 落地目录、photo 是否直接写剪贴板 | **已定：photo 直接写剪贴板、不落盘；file 落盘、不进剪贴板（图片文件也走 file）。file 落地目录 v1 写死 `~/Downloads/PhoneMic/`（自动创建），配置项后续再加（落地/命名规则见 §9.2）** |
 | 4 | 面板按钮将来是否由 PC 下发 | v1 内置；插件化方案见 `panel-plugin-design.md`（声明式 JSON 面板，用户可让 AI 生成后放入插件目录） |
-| 5 | 是否兼容未刷新的旧页面（旧 JSON 协议） | 建议否——页面由服务端下发；text 帧直接关闭并提示重新扫码 |
+| 5 | 是否兼容未刷新的旧页面（旧 JSON 协议） | **已定：不兼容**。页面由服务端下发，不存在需要协商的版本号；旧页面发 JSON **text 帧**，新服务端收到 text 帧即关闭连接并提示重新扫码（§2 / §5 / §10）。因此也不需要 `hello` 这类版本声明帧 |
 | 6 | `photo` 是否并入 `file`（加 `dest` 字段：`file`/`clipboard`） | **已定：保持独立**。根因有二：① `file`→磁盘、`photo`→剪贴板是两条平台强相关的落地管线（剪贴板图片格式见 §9.1）；② `photo` 纯为剪贴板设计、不落盘，`file` 纯为磁盘、不进剪贴板，语义正交。代价多一条代码路径，可接受 |

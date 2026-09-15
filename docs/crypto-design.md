@@ -6,7 +6,7 @@
 
 | 内容                                                           | 归属                      |
 | ------------------------------------------------------------ | ----------------------- |
-| 哪些帧明文 / 加密、`auth` / `auth_ack` 消息帧、WS close 4001、error code | `wire-protocol.md`（消息层） |
+| 哪些帧明文 / 加密、`auth` / `auth_challenge` / `auth_proof` 握手帧、WS close 4001、error code | `wire-protocol.md`（消息层） |
 | 信任模型、密钥交换、对称封装、seq 防重放、算法实现、线上密文布局                           | 本文档（加密层）                |
 
 
@@ -70,13 +70,15 @@ class CryptoProvider(ABC):
 
 ### bearer 认证：能密封即认证
 
-PC 公钥在此部署中不是公开密钥，而是**带外分发的 bearer 能力（等价于 token）**：只出现在二维码 fragment、从不发布，且每次建连由 `PrivateKey.generate()` 重新生成（`e2ee.py` 的 `SecureChannel`）。因此"能成功解封 `SealedBox`"本身就构成对发送方的认证——只有扫过该二维码的一方持有此公钥，能密封出 PC 私钥解得开的密文。
+PC 公钥在此部署中不是公开密钥，而是**带外分发的 bearer 能力（等价于 token）**：只出现在二维码 fragment、从不发布；在 `SecureChannel`（进程生命周期）内稳定持有，切换模式 / 重启服务时由 `PrivateKey.generate()` 重新生成（`e2ee.py` 的 `SecureChannel`）。因此"能成功解封 `SealedBox`"本身就构成对发送方的认证——只有拿到过该二维码的一方持有此公钥，能密封出 PC 私钥解得开的密文。
 
-这属于**匿名 / bearer 认证**：证明"你是持有此二维码的一方"，不绑定特定设备身份；1:1（一台手机 ↔ 一台 PC）场景已足够。在此之上有更强一层：会话密钥由 ECDH 派生（PC 身份私钥 × 手机**临时**私钥，临时私钥从不出手机），会话内所有帧均为 AEAD，只有做过密钥交换的两方持有会话密钥——**即便二维码（PC 公钥）泄露，攻击者也无法伪造会话内帧**。
+这属于**匿名 / bearer 认证**：它证明的是"你持有此二维码"，而**不是**"你是那台手机"。这条边界值得说清楚，因为它决定了下一步推论的方向：**任何拿到二维码的人都能用自己的临时密钥对完成一次合法握手，并在这条连接上发送任意应用帧**——这是 bearer 凭据的固有代价，不是实现缺陷。1:1（一台手机 ↔ 一台 PC）场景下可接受。
+
+在此之上有更强一层，作用是**隔离会话**：会话密钥由 ECDH 派生（PC 身份私钥 × 手机**临时**私钥，临时私钥从不出手机），会话内所有帧均为 AEAD。因此拿到二维码的一方虽然能建立**属于它自己**的那条会话，却**读不到、也伪造不了**真机那条会话的帧，**也无法重放**录下的帧——重放由握手的 `nonce` 挑战挡掉（`wire-protocol.md` §5 / §7）。
 
 随机 `secret_path`（32 位 `token_urlsafe`）是**端点门禁**而非认证主体：让未授权客户端连 WS 入口都够不着（根路由 404）。它与 PC 公钥同处二维码、各司其职——`path` 挡"到达"，`pubkey` 认证"发送方"。
 
-> corollary：公钥按 token 对待即有 token 级敏感性。泄露二维码意味着他人可发起 `auth`，但 (a) 公钥 per-session 生成，重新扫码即作废；(b) 无法伪造会话帧。风险可控，不应视作"无所谓公开"。
+> corollary：公钥按 token 对待即有 token 级敏感性。泄露二维码意味着他人可发起 `auth`，但 (a) 公钥在进程内稳定、切换模式 / 重启服务即更换（届时必须重新扫码）；(b) 那是一条**属于它自己**的会话，读不到也伪造不了真机会话的帧，更无法重放。风险可控，不应视作"无所谓公开"。
 
 ---
 
@@ -133,7 +135,8 @@ class KeyExchange:
 
 - **内层编码刻意选 JSON**（两端 `string ↔ bytes` 各三行即可），**不依赖上层编解码器**——否则加密层反向依赖编码层，鸡生蛋：密钥交换发生时上层编码器还没轮到出场。上层将来用 msgpack 还是 CBOR，与这里无关。
 - `algo` 只存在于密文内部，**从不明文传输**——暴露服务端支持的算法列表等于泄露能力面，没有必要。
-- 失败路径只有两条：解封失败（`bad sealed box`）、`algo` 不在下发列表（`algo not offered`）。对应 WS close 4001（帧层行为见 `wire-protocol.md` §5/§7）。
+- **`handle_auth` 的失败路径只有两条**：解封失败（`bad sealed box`）、`algo` 不在下发列表（`algo not offered`）。两者都在密钥建立之前，对应 WS close 4001（帧层行为见 `wire-protocol.md` §5/§7）。
+- 握手还有**第三种**失败：第三步 `auth_proof` 的 `nonce` 校验不通过（或超时）。它**不属于 `handle_auth`**——此时 `session_key` 已派生成功，失败由消息层在加密帧里表达（`error(code:"auth")`，见 `wire-protocol.md` §7）。`handle_auth` 的签名与职责不因此改变。
 
 ### 3.4 调用侧：两段式，顺序不可逆
 
@@ -142,7 +145,9 @@ algo, session_key = self._channel.key_exchange.handle_auth(auth_data)  # 先解 
 self._provider = create_provider(algo, session_key)                    # 才知道建哪个 Provider
 ```
 
-`KeyExchange` 在 `SecureChannel`（长期配置）层持有一个实例，与 `pc_private` 生命周期一致；每个 `SecureSession` 握手时调用 `handle_auth`，产出的 `session_key` 按连接隔离。
+`KeyExchange` 在 `SecureChannel`（长期配置）层持有一个实例，与 `pc_private` 生命周期一致；每个 `SecureSession` 握手时各调用一次 `handle_auth`。
+
+> **注意"每连接"的边界**：`session_key` 只活在这条连接上、不会跨连接复用，但它**不等于"每连接一个新的随机值"**——同一对密钥对（PC 身份私钥 × 手机页面密钥对）重连时会派生出**完全相同**的 `session_key`。跨连接的新鲜度不由 ECDH 提供，而由握手的 `nonce` 挑战提供（`wire-protocol.md` §5 / §7）。任何"密钥每连接不同、所以旧帧必然解不开"的推论都是错的。
 
 **收益**：新增算法只需写一个几十行的 `CryptoProvider` 子类并在 `create_provider` 注册，`KeyExchange` 一行不用改；X25519 交换代码从两份收敛为一处。老的 `algo == "none"`（token）分支随明文 CF 模式一并删除。
 
@@ -225,10 +230,10 @@ class AESGCMProvider(CryptoProvider):
 - **单调策略**：`seq` 必须等于当前 `_rx_seq`（初始 0，每成功收一帧 +1），即首帧 seq=0、每帧严格 +1。`encrypt` 自动打当前 `_tx_seq` 并 +1；`decrypt` 校验失败即抛异常，不返回任何明文。
 - **外部只收状态，不收 seq**：`decrypt` 成功返回明文；失败抛 `DecryptError` / `ReplayError`（§1.1），供 `SecureSession` 映射成 error code（异常类型即状态）。**注意**：AAD 路径下重放也表现为 MAC 失败（aad 不符），一并归 `DecryptError`；前缀路径能区分，重放单独归 `ReplayError`。两者对客户端行为一致（丢弃该帧），区分只在日志粒度；安全上"重放当解密失败处理"更稳妥——不向攻击者区分是重放还是篡改。
 - **`SecureSession` 不碰 seq**：只调用 `provider.decrypt()`，按异常类型归类 error code（见 §8）。
-- **重置**：seq 状态随 Provider 实例生命周期。每个连接握手时新建 Provider（session_key 按连接隔离），`seq` 天然从 0 开始，通常无需显式 reset。若同一实例复用（rekey 沿用 Provider），`reset()` 把 `_tx_seq` / `_rx_seq` 归零，等价于重新初始化。
+- **重置**：seq 状态随 Provider 实例生命周期。每个连接握手时新建 Provider，`seq` 天然从 0 开始，通常无需显式 reset。若同一实例复用（rekey 沿用 Provider），`reset()` 把 `_tx_seq` / `_rx_seq` 归零，等价于重新初始化。
 - **明文模式（`none` + LAN）不带 `seq`**：没有密钥就没有 MAC，seq 既无完整性也无机密性，无意义，故省略。
 - **上下行各自独立计数器**：服务端校验上行、手机端校验下行，规则相同（严格 +1）。CF 隧道在边缘终结 TLS，下行重放需靠手机端 `seq` 校验挡掉。
-- **边际价值**：会话密钥按连接 ECDH 派生，跨连接重放天然不可能；同连接内 WS 可靠有序，seq 主要防御 (a) CF 边缘节点这类"TLS 在别处终结"的中间重放，(b) 实现 bug 导致的帧乱序。成本仅 8 字节/帧 + 约 5 行，保留。
+- **边际价值，以及它的边界**：同连接内 WS 可靠有序，`seq` 主要防御 (a) 连接内的帧重放 / 乱序，(b) CF 边缘节点这类"TLS 在别处终结"的中间节点重放。**跨连接的重放不是它的职责**——`seq` 每个连接都从 0 重来（见上），所以从会话开头录下的整段密文，在新连接上按序重放是**解得开**的；挡住它的是握手的新鲜值 `nonce`（`wire-protocol.md` §5 / §7）。成本仅 8 字节/帧 + 约 5 行，保留。
 
 ---
 
@@ -246,17 +251,18 @@ class AESGCMProvider(CryptoProvider):
 - 加密覆盖**整个上层消息，包括 `type`**——元数据不泄露（攻击端看不出你在发 mouse 还是 file）。
 - 例外：**`auth` 帧不走此布局**——它是密钥交换本身的载体，见 §3.3 与 `wire-protocol.md` §7。
 
-> 现状说明：本节描述的是目标形态。当前代码处于中间态——`SecureSession.wrap/unwrap` 仍是 JSON 信封 + base64 包裹 provider 输出；切 msgpack 时（`wire-protocol.md` §12 阶段 1-3）一并去掉 base64，让 provider 输出直接上帧。
-
 ---
 
 ## 7. 会话状态与安全原则
 
 - **会话状态是权威**：`SecureSession.is_encrypted` 在握手时按连接确定，之后不变。接收端永远知道该解还是不该解，不需要"试一试"。
 - **原则：绝不"解密失败就当明文"。** 解密失败的可能原因（对端模式不同、版本不同、中间人篡改）处理动作完全一致——丢弃 + 回 `error`。区分它们没有价值。
-- **唯一明文帧是 `auth`**：会话密钥在服务端解出 `auth` 之后才建立，因此只有这一帧没有密钥可用；握手**成功**时从 `auth_ack` 起（含）全部整帧对称加密（含 `type`），握手**失败**时服务端不回消息层帧、直接关闭 WS（close 4001）——因此不存在"解密失败就当明文"的例外。实现上绝不能把 `auth` 帧塞进 `wrap()`。
-- **`auth_ack` 无 data 字段**：手机能成功解开这一帧，本身就是"PC 持有正确会话密钥"的证明，无需再塞 `{"status":"OK"}`；成功帧也不回显 `algo`（握手时早已协商）。
-- **判别不靠帧类型，靠会话状态机**：连接建立后按 `needs_auth` 决定期待 `auth` 还是 `hello`，之后按 `is_encrypted` 决定解不解密。（状态机表与 text 帧拒绝策略见 `wire-protocol.md` §10。）
+- **唯一明文帧是 `auth`**：会话密钥在服务端解出 `auth` 之后才建立，因此只有这一帧没有密钥可用；握手**成功**时从 `auth_challenge` 起（含）全部整帧对称加密（含 `type`），握手在**认证前**失败时服务端不回消息层帧、直接关闭 WS（close 4001）——因此不存在"解密失败就当明文"的例外。实现上绝不能把 `auth` 帧塞进 `wrap()`。
+- **唯一的加密失败例外是握手第三步**：`auth_proof` 校验不通过（或超时）时密钥已经存在、对端也读得懂加密帧，所以这一路失败用**加密的 `error(code:"auth")`** 表达而非 close（`wire-protocol.md` §7）。这不破坏上一条——那条约束的是"无密钥可用的时刻"。
+- **`auth_challenge` 只带一个 `nonce`**：它不重复"我已经承认你的材料"这件事——手机能把它解开，本身就是"PC 持有正确会话密钥"的证明；`nonce` 的唯一职责是**给本次连接一个新鲜值**，使录下的整段旧握手（`auth` + `auth_challenge` + `auth_proof`）无法按序重放。它既不是 `algo` 的回显（`algo` 早在 `auth.data` 里协商完），也不是"你通过了"的最终回执（那是随后 `config` 的事）。
+  - 威胁前提要说清楚：这套重放防护对**"能看见隧道明文帧、但拿不到二维码"**的对手才有意义（CF 内部路径、或 TLS 在别处被终结）。对**持有二维码**的一方，重放本来就是多余手段——它直接自己完成一次握手即可（见 §2）。
+- **判别不靠帧类型，靠会话状态机**：连接建立后按 `needs_auth` 决定期待 `auth` 还是**直接进入数据帧**，之后按 `is_encrypted` 决定解不解密。（状态机表与 text 帧拒绝策略见 `wire-protocol.md` §10。）
+- **握手三步不带任何跨连接状态**：`nonce` 由服务端现场生成、只活这一次握手，是 `_handle_auth` 协程里的局部变量（不入 `SecureSession` 字段）。这正是它相对「轮换密钥对 / 盐 / 续期票据」那类方案的关键差别——那些方案要把新鲜度存进长期凭据，而长期凭据唯一的分发通道是二维码（带外、只在页面加载时读一次），于是要么每次重连都重新扫码，要么把真机锁死。
 
 ---
 
@@ -264,10 +270,10 @@ class AESGCMProvider(CryptoProvider):
 
 消息层与加密层的全部接触面，收敛为四条：
 
-1. **握手判定**：`needs_auth` = not (`none` and LAN)（`e2ee.py` 的 `SecureChannel`）。为真时消息层期待 `auth` 消息帧，把 `data`（bytes）交给 `KeyExchange.handle_auth`；成功后用返回的 `algo` + `session_key` 经 `create_provider` 建 Provider，`auth_ack` 起整帧走 Provider。失败 → WS close 4001 + reason（帧层语义见 `wire-protocol.md` §7）。
+1. **握手判定**：`needs_auth` = not (`none` and LAN)（`e2ee.py` 的 `SecureChannel`）。为真时消息层期待 `auth` 消息帧，把 `data`（bytes）交给 `KeyExchange.handle_auth`；成功后用返回的 `algo` + `session_key` 经 `create_provider` 建 Provider，此后连 `auth_challenge` 在内整帧走 Provider。握手第三步（`auth_proof` 的 `nonce` 校验）属于消息层，见 `wire-protocol.md` §7：认证前失败 → WS close 4001 + reason；`nonce` 不符 / 超时 → 加密 `error(code:"auth")`。
 2. **数据帧**：消息层把编码后的字节交给 `provider.encrypt()`，密文原样上 WS binary 帧；收到 binary 帧交给 `provider.decrypt()`，把返回的字节交给编码层解析。
 3. **错误映射**：`CryptoError` → `error(code:"decrypt")`；`ReplayError` → `error(code:"replay")`。统一丢弃 + 回 error，连续 N 次断连（code 表见 `wire-protocol.md` §7 的 error 小节）。
-4. **明文模式**：`none` + LAN 时消息层直接编解码，不经加密层，也没有 `auth` / `auth_ack` 帧（握手由 `hello` 完成）。
+4. **明文模式**：`none` + LAN 时消息层直接编解码，不经加密层，也没有 `auth` / `auth_challenge` / `auth_proof` 帧——**一条握手帧都没有**，连上即进数据帧（`wire-protocol.md` §5）。
 
 ---
 

@@ -26,7 +26,7 @@ from phonemic.bridge_interface import EventBridge
 from phonemic.gui.file import FileReceiver
 from phonemic.gui.photo import PhotoReceiver
 from phonemic.server.transfer import TransferQueue
-from phonemic.tunnel.e2ee import SecureChannel
+from phonemic.tunnel.e2ee import AUTH_TIMEOUT, SecureChannel
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
@@ -287,38 +287,72 @@ def request_client_rescan() -> bool:
 
 # ---------- WebSocket 连接处理 ----------
 
-async def _handle_auth(websocket, session) -> bool:
-    """
-    S0：处理认证握手。
+def _close_reason(reason: str, limit: int = 100) -> str:
+    """把拒绝原因裁到 WS close 帧能装下的长度（协议上限 123 字节）。
 
-    仅在 session.needs_auth 时等待并校验首条 auth 消息。
-    认证失败或消息非法时关闭连接并返回 False，此时连接未注册，
-    不会影响活动连接的加密状态。
+    必须按**字节**裁而不是按字符：拒绝原因里可能带对端提供的算法名
+    （`algorithm '<algo>' not allowed`），长度与字符集都不受控；按字符裁会让
+    非 ASCII 膨胀到上限之外，close 直接抛异常——那等于把「拒绝了对端」变成
+    「服务端自己出错」。留 23 字节余量给 reason 之外的帧头。
+    """
+    return reason.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
+
+
+async def _recv_handshake_frame(websocket, deadline: float):
+    """在握手的绝对截止时刻前读取一条 binary 帧。
+
+    两次握手等待（auth / auth_proof）共用同一个 deadline，因此慢速或恶意的
+    客户端无法靠「每一步都拖到超时」把握手时长翻倍。
 
     Returns:
-        True 表示认证通过（或该模式无需认证），可进入 S1
+        ``(raw_bytes, None)`` 成功；``(None, reason)`` 失败（reason 供日志）。
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None, "timed out"
+    try:
+        message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+    except asyncio.TimeoutError:
+        return None, "timed out"
+    except WebSocketDisconnect:
+        return None, "client closed connection"
+    except Exception as e:
+        return None, f"receive error: {e}"
+
+    if message.get("type") == "websocket.disconnect":
+        return None, "client disconnected"
+    raw = message.get("bytes")
+    if raw is None:
+        # 协议全部走 binary：text 帧只可能来自未刷新的旧页面（旧 JSON 协议）
+        return None, "non-binary frame (stale client?)"
+    return raw, None
+
+
+async def _handle_auth(websocket, session) -> bool:
+    """S0：三步握手 —— auth（明文）→ auth_challenge → auth_proof（后两条加密）。
+
+    加密模式下只有第三步通过才算握手完成；`none+CF` 的明文 token 没有会话
+    密钥、做不了密钥确认，auth 一过即完成。`none+LAN` 直接返回 True。
+
+    所有失败都发生在 `_manager.connect()` 之前（调用方在返回 False 时短路），
+    这正是「重放 auth 帧顶掉真机连接」那条 DoS 被顺带消掉的原因。失败分两类，
+    判据是「此刻能不能加密」：
+
+      认证前（解封失败 / algo 不在下发列表）：还没有密钥，只能直接 close 4001；
+      认证后（nonce 不符 / 超时）：密钥已在手，回加密的 error(code="auth")。
+
+    Returns:
+        True 表示握手完成（或该模式无需认证），可进入 S1
     """
     if not session.needs_auth:
         return True
 
-    try:
-        message = await asyncio.wait_for(websocket.receive(), timeout=10.0)
-    except asyncio.TimeoutError:
-        logger.warning("Auth timeout, closing")
-        await websocket.close(code=1000)
-        return False
-    except WebSocketDisconnect:
-        logger.warning("Auth: client closed connection before auth")
-        return False
-    except Exception as e:
-        logger.warning(f"Auth receive error: {e}")
-        await websocket.close(code=1000)
-        return False
+    deadline = time.monotonic() + AUTH_TIMEOUT
 
-    raw = message.get("bytes")
+    # ---- 第 1 步：auth（唯一明文帧）----
+    raw, err = await _recv_handshake_frame(websocket, deadline)
     if raw is None:
-        # 协议全部走 binary：text 帧只可能来自未刷新的旧页面（旧 JSON 协议）
-        logger.warning("Auth: non-binary frame (stale client?), closing")
+        logger.warning(f"Auth: {err}, closing")
         await websocket.close(code=1000)
         return False
 
@@ -335,14 +369,33 @@ async def _handle_auth(websocket, session) -> bool:
         return False
 
     if not session.receive_auth(data):
-        logger.warning(f"Auth failed: {session.reject_reason}, closing")
-        # 握手失败无 Provider，wrap 按明文发出（rejected 本就可明文）
-        await websocket.send_bytes(session.wrap(session.make_auth_ack()))
+        reason = session.reject_reason or "auth failed"
+        logger.warning(f"Auth rejected: {reason}, closing 4001")
+        # 认证前失败：没有任何会话密钥，也就没有任何能加密回给对端的内容
+        await websocket.close(code=4001, reason=_close_reason(reason))
+        return False
+
+    # none+CF：明文 token 认证，无会话密钥可用 → 做不了密钥确认
+    if not session.is_encrypted:
+        logger.info("Auth succeeded (plaintext token)")
+        return True
+
+    # ---- 第 2 步：auth_challenge（加密帧）----
+    challenge = session.make_auth_challenge()
+    await websocket.send_bytes(session.wrap(challenge))
+
+    # ---- 第 3 步：auth_proof（加密帧）----
+    raw, err = await _recv_handshake_frame(websocket, deadline)
+    proof = session.unwrap(raw) if raw is not None else None
+    if not session.verify_auth_proof(proof, challenge["nonce"]):
+        # 认证后失败：密钥已在手，用加密的 error 帧带完整语义
+        #（close reason 只有 123 字节上限，部分中间商还会丢弃）
+        logger.warning(f"Auth proof rejected: {err or 'nonce mismatch'}, closing")
+        await websocket.send_bytes(session.wrap({"type": "error", "code": "auth"}))
         await websocket.close(code=1000)
         return False
 
-    await websocket.send_bytes(session.wrap(session.make_auth_ack()))
-    logger.info(f"Auth succeeded, algorithm={session.negotiated_algorithm}, auth_ack sent")
+    logger.info(f"Auth succeeded, algorithm={session.negotiated_algorithm}")
     return True
 
 

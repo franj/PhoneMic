@@ -23,13 +23,14 @@ from nacl.secret import Aead, SecretBox
 from nacl.bindings import crypto_scalarmult
 from nacl.utils import random as random_bytes
 
+from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 
 pytest.importorskip("playwright")
 
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
 SODIUM_JS = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
-# crypto_providers.js 的 handleAuthAck 用 MessagePack 解析 ack 载荷
+# 跨平台握手用例在 JS 侧要用 MessagePack 解析解密后的帧
 MSGPACK_JS = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
 CRYPTO_JS = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
 
@@ -106,15 +107,6 @@ class TestPlainProvider:
                 p.setPcPublicKey(new Uint8Array(32));
             }
         """)
-
-    def test_handle_auth_ack_always_true(self, crypto_page):
-        result = crypto_page.evaluate("() => new PlainProvider().handleAuthAck(new Uint8Array(0))")
-        assert result is True
-
-    def test_handle_auth_ack_null(self, crypto_page):
-        """handleAuthAck 接收 null 也不报错（none+CF 的 auth_ack 无 data）。"""
-        result = crypto_page.evaluate("() => new PlainProvider().handleAuthAck(null)")
-        assert result is True
 
 
 # ---------- NaClBoxProvider ----------
@@ -248,7 +240,11 @@ class TestNaClBoxProvider:
         assert json.loads(result)["text"] == "cross-py2js"
 
     def test_cross_platform_full_handshake(self, crypto_page):
-        """跨平台完整 auth 握手 + 双向加密通信。"""
+        """跨平台三步握手 + 双向加密通信（Python 当服务端，JS 当手机）。
+
+        握手帧的组装/识别归 SecureClient，Provider 只碰原始字节——所以这里
+        JS 侧直接用 MessagePack 解析解密后的明文，等价于 SecureClient 的职责。
+        """
         pc_priv = PrivateKey.generate()
         pc_pub_b64 = _to_b64(bytes(pc_priv.public_key))
 
@@ -274,33 +270,44 @@ class TestNaClBoxProvider:
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
         box = SecretBox(blake2b(shared, digest_size=32).digest())
 
-        # Python 端：生成加密的 auth_ack——handleAuthAck 走统一 decrypt 路径，
-        # 期望首帧为 seq(8B)=0 前缀 + msgpack({"status":"OK"})
-        ack_payload = (0).to_bytes(8, "big") + frame_encode({"status": "OK"})
-        ack_nonce = random_bytes(SecretBox.NONCE_SIZE)
-        ack_encrypted = bytes(box.encrypt(ack_payload, ack_nonce))
-        ack_b64 = _to_b64(ack_encrypted)
+        # 第二步：Python 下发 auth_challenge（下行 0 号帧 = 8B seq 前缀 + msgpack）
+        nonce = random_bytes(16)
+        ch_plain = (0).to_bytes(8, "big") + frame_encode(
+            {"type": "auth_challenge", "nonce": nonce}
+        )
+        ch_encrypted = bytes(box.encrypt(ch_plain, random_bytes(SecretBox.NONCE_SIZE)))
 
-        # JS 端：处理 auth_ack，然后加密消息发回
-        js_result = crypto_page.evaluate("""
-            (ackB64) => {
-                const raw = sodium.from_base64(ackB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
-                const ok = window.__testPhone.handleAuthAck(raw);
-                if (!ok) return { authenticated: false, encryptedB64: null };
-                const pt = sodium.from_string('{"type":"send","text":"handshake-ok"}');
-                const encrypted = window.__testPhone.encrypt(pt);
-                return {
-                    authenticated: true,
-                    encryptedB64: sodium.to_base64(encrypted, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
-                };
+        # 第三步：JS 解密挑战并回 auth_proof（上行 0 号帧）
+        proof_b64 = crypto_page.evaluate("""
+            (chB64) => {
+                const raw = sodium.from_base64(chB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const msg = MessagePack.decode(window.__testPhone.decrypt(raw));
+                if (msg.type !== 'auth_challenge') return null;
+                const proof = MessagePack.encode({ type: 'auth_proof', nonce: msg.nonce });
+                return sodium.to_base64(window.__testPhone.encrypt(proof),
+                                        sodium.base64_VARIANT_URLSAFE_NO_PADDING);
             }
-        """, ack_b64)
+        """, _to_b64(ch_encrypted))
+        assert proof_b64, "JS 未回 auth_proof"
 
-        assert js_result["authenticated"] is True
+        # Python 端解出 proof 并校验 nonce（等价于 SecureSession.verify_auth_proof）
+        proof_pt = bytes(box.decrypt(_from_b64(proof_b64)))
+        assert int.from_bytes(proof_pt[:8], "big") == 0  # proof 是上行 0 号帧
+        proof = frame_decode(proof_pt[8:])
+        assert proof["type"] == "auth_proof"
+        assert proof["nonce"] == nonce
 
-        # Python 端解密 JS 消息（剥 8B seq 前缀）
-        plaintext = box.decrypt(_from_b64(js_result["encryptedB64"]))[8:]
-        assert json.loads(plaintext)["text"] == "handshake-ok"
+        # 握手完成后 JS 继续发应用层消息，Python 能解开（seq 递增到 1）
+        js_msg = crypto_page.evaluate("""
+            () => {
+                const pt = MessagePack.encode({ type: 'send', text: 'handshake-ok' });
+                return sodium.to_base64(window.__testPhone.encrypt(pt),
+                                        sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+            }
+        """)
+        send_pt = bytes(box.decrypt(_from_b64(js_msg)))
+        assert int.from_bytes(send_pt[:8], "big") == 1
+        assert frame_decode(send_pt[8:])["text"] == "handshake-ok"
 
 
 # ---------- XChaCha20Provider ----------

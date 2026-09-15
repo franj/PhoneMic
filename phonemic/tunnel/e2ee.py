@@ -10,29 +10,42 @@
 
 连接模型：
   SecureChannel 持有跨连接的长期配置（算法、模式、PC 密钥对或 token）与
-  KeyExchange 实例；每个 WebSocket 连接通过 new_session() 取得一个独立的
-  SecureSession，握手状态与会话密钥按连接隔离，互不干扰。
+  KeyExchange 实例；PC 密钥对在进程内稳定持有、只随 SecureChannel 重建而
+  更换（因此二维码不会因新连接失效）。每个 WebSocket 连接通过 new_session()
+  取得一个独立的 SecureSession，握手状态按连接隔离，互不干扰。
+
+  「按连接隔离」的边界要说清：手机端在同一页面内复用同一对临时密钥，因此
+  同一页面的多次重连会 ECDH 出**相同**的 session_key。跨连接的新鲜度由握手
+  nonce（auth_challenge）提供，不由会话密钥提供。
 
   只有握手成功的连接才会抢占当前活动连接；仍在握手中或握手失败的连接
   不影响已有连接，避免新连接把活动连接降级为明文。
 
 状态机（每个 session 独立）：
-  needs_auth=True:  S0 (未认证) → 收到 auth → 验证 → S1 (已认证)，S0 超时 10 秒断开
-  needs_auth=False: 连接即 S1，直接处理消息
+  加密模式:  S0 (未认证) --auth--> S1 (密钥就绪) --auth_proof--> S2 (已认证)
+  none+CF:   S0 --auth(token)--> S2（无会话密钥，做不了密钥确认，auth 一过即认证）
+  none+LAN:  连接即 S2，直接处理消息
+  整轮握手受 AUTH_TIMEOUT 约束：两次等待共享同一**绝对截止时刻**，不是各 10 秒。
 
 协议格式（全部帧统一 msgpack 编码，WS 走 binary 帧，密文用 bin 类型、无 base64）：
   URL fragment:
     none+LAN:  无
     none+CF:   #k=<token>&a=none
     加密:      #k=<pubkey>&a=<algo1,algo2,...>（服务端支持的算法，按优先级排序）
-  auth（加密模式）:
+  auth（加密模式，唯一明文帧）:
     {"type":"auth", "data":<bin SealedBox( {"algo":..., "pk":<手机公钥 b64>} )>}
-    仅 type 为明文；algo 与手机公钥均在密封 blob 内。解密失败即认证失败。
+    仅 type 为明文；algo 与手机公钥均在密封 blob 内。解封成功只建立会话密钥，
+    不等于认证通过——录下来的 auth 帧原样重放同样解得开。
   auth（none+CF）:
     {"type":"auth", "algo":"none", "data":"<token>"}
-  auth_ack:
-    {"type":"auth_ack", "rejected":true, "reason":"..."}（失败，明文）
-    或整帧对称加密的 {"type":"auth_ack", "status":"OK"}（成功，无明文字段）
+  auth_challenge（加密）:
+    {"type":"auth_challenge", "nonce":<bin 16B>}
+    解封成功后立即下发，是本连接现场生成的新鲜值。只要求「每连接不同」，
+    不要求「不可预测」：重放者没有会话密钥，连它都读不到。
+  auth_proof（加密）:
+    {"type":"auth_proof", "nonce":<bin>}
+    回显该值。能把它正确加密回来，就是持有会话密钥的证明；握手到此完成，
+    不再另发一条「成功」帧（随后的 config 即确认）。
   消息（加密模式）:
     整帧对称加密：WS binary 帧 = AEAD(msgpack(消息))，无外层信封——
     加密状态由会话状态机决定，不靠帧内容判别。
@@ -55,14 +68,16 @@ from phonemic.tunnel.crypto.errors import CryptoError
 from phonemic.tunnel.frame import decode as decode_frame
 from phonemic.tunnel.frame import encode as encode_frame
 
-_AUTH_TIMEOUT = 10  # 秒
+AUTH_TIMEOUT = 10  # 秒：整轮握手的**绝对预算**，两次等待共享（见 api._handle_auth）
+CHALLENGE_NONCE_BYTES = 16  # auth_challenge 的 nonce 长度
 
 
 class SecureSession:
     """单个 WebSocket 连接的握手状态与加解密上下文。
 
-    每个连接持有一个实例。手机端每次握手生成临时密钥对，
-    因此会话密钥必须按连接隔离，不能挂在共享对象上。
+    每个连接持有一个实例。会话密钥由 ECDH 按连接派生（手机端在同一页面内
+    复用同一对临时密钥，故同一页面的多次重连会派生出相同的会话密钥）；
+    跨连接的新鲜度由握手 nonce 提供，不依赖会话密钥。
     """
 
     def __init__(self, channel: "SecureChannel"):
@@ -91,7 +106,7 @@ class SecureSession:
 
     @property
     def auth_timed_out(self) -> bool:
-        return not self._authenticated and (time.monotonic() - self._connected_at) > _AUTH_TIMEOUT
+        return not self._authenticated and (time.monotonic() - self._connected_at) > AUTH_TIMEOUT
 
     @property
     def is_rejected(self) -> bool:
@@ -114,13 +129,18 @@ class SecureSession:
     # ---- 握手 ----
 
     def receive_auth(self, auth_msg: dict) -> bool:
-        """处理 auth 消息：验证算法和密钥材料/token。
+        """处理握手第一步 ``auth``：校验 token / 解封密钥材料。
+
+        加密模式下**只建立会话密钥，不算认证通过**——认证要等
+        ``verify_auth_proof()``。理由是解封成功仅证明「发送方持有 PC 公钥」，
+        而录下来的 auth 帧原样重放同样解得开：帧本身无法自证「它是刚发出来的」。
+        none+CF 没有会话密钥、做不了密钥确认，故 token 一过即认证。
 
         Args:
             auth_msg: 完整的 auth 消息 dict。
 
         Returns:
-            True 如果认证成功，False 如果被拒绝。
+            True 表示材料可用（明文 token 模式下即认证通过），False 表示被拒绝。
         """
         if not self.is_encrypted:
             # none 模式：token 认证（明文，依赖 WSS 保护）
@@ -157,24 +177,45 @@ class SecureSession:
             self._reject_reason = str(e) or "auth data processing failed"
             return False
         self._provider = create_provider(algo, session_key)
-        self._authenticated = True
+        # 不置 _authenticated：认证由 verify_auth_proof() 完成（见该方法说明）
         return True
 
-    def make_auth_ack(self) -> dict:
-        """生成 auth_ack 帧（不含加密，加密由 wrap() 统一出口完成）。
+    def make_auth_challenge(self) -> dict:
+        """生成握手第二步 ``auth_challenge`` 帧（不含加密，加密由 wrap() 完成）。
 
-        成功帧不带任何明文字段，也不带 data 信封：手机能解开这一帧本身
-        就证明 PC 持有正确的会话密钥，且 algo 在 auth.data 密文内早已
-        协商过（不明文回显）。
+        nonce 现场生成、生命周期只有这一次握手，因此**不需要任何跨连接状态**
+        （不像「轮换密钥对 / 盐 / 续期票据」那样要把新鲜度存进长期凭据，也就
+        不需要客户端持久化任何东西）。它由调用方从返回的帧里取回、作为局部
+        变量持有，用完即弃，不进本对象的字段。
+
+        Returns:
+            ``{"type":"auth_challenge","nonce":<bytes>}``
         """
-        if self._rejected:
-            return {
-                "type": "auth_ack",
-                "rejected": True,
-                "reason": self._reject_reason,
-            }
+        return {"type": "auth_challenge", "nonce": secrets.token_bytes(CHALLENGE_NONCE_BYTES)}
 
-        return {"type": "auth_ack", "status": "OK", "ts": int(time.time() * 1000)}
+    def verify_auth_proof(self, proof_msg: Optional[dict], nonce: bytes) -> bool:
+        """校验握手第三步 ``auth_proof``：回显的 nonce 是否与本连接挑战一致。
+
+        这是整套握手里唯一能挡住重放的地方：重放者没有会话密钥，既读不到
+        nonce、也无法把任意值正确地加密回来。
+
+        Args:
+            proof_msg: 解密后的 auth_proof 帧；无法解密/类型不符时传 None。
+            nonce: ``make_auth_challenge()`` 本轮下发、由调用方持有的值。
+
+        Returns:
+            True 表示认证通过（并置 ``is_authenticated``），False 表示拒绝。
+        """
+        if not isinstance(proof_msg, dict) or proof_msg.get("type") != "auth_proof":
+            return False
+        got = proof_msg.get("nonce")
+        if not isinstance(got, (bytes, bytearray)):
+            return False
+        # 常数时间比较：失败即关闭连接，理论上无可利用的时序差，但成本为零
+        if not hmac.compare_digest(bytes(got), nonce):
+            return False
+        self._authenticated = True
+        return True
 
     # ---- 数据加解密 ----
 

@@ -12,7 +12,7 @@
 - set_content 加载 HTML（与 test_mobile.py 一致）
 - patch _parseUrlFragment 注入 PC 公钥和 a= 算法列表（绕过 location.hash 限制）
 - 不 patch _selectAlgorithm — 让真实的协商选择逻辑运行
-- Mock WebSocket 不自动回复 auth_ack — Python 手动处理并发送
+- Mock WebSocket 不自动回帧 — Python 手动完成握手（auth_challenge / auth_proof）
 - 参数化测试 xsalsa20 和 xchacha20 两种算法（通过调整 a= 列表顺序让客户端分别选中）
 """
 
@@ -54,9 +54,12 @@ window.__mockWS = {
             this.current.onmessage({ data: new Uint8Array(byteList) });
         }
     },
-    triggerClose: function() {
+    // code 可省略；传 4001 即模拟「服务端在密钥建立前拒绝握手」
+    triggerClose: function(code, reason) {
         if (this.current) {
-            if (this.current.onclose) this.current.onclose();
+            if (this.current.onclose) {
+                this.current.onclose({ code: code, reason: reason || '', wasClean: true });
+            }
             this.current.readyState = 3;
         }
     },
@@ -191,17 +194,42 @@ def _wait_auth(page):
 
 
 def _process_auth(page, channel):
-    """Python 处理 auth 并发送 auth_ack。
+    """跑完握手，并下发首个 config——等价于真实服务端的 _handle_auth + 首个 config。
 
-    与真实服务端一致：成功 ack = 整帧加密（session.wrap 产出密文字节），
-    无外层信封。这同时验证 JS 端 handleAuthAck 的解密路径。
+    加密模式：回 auth_challenge（整帧加密），等 JS 回 auth_proof 后由 Python 校验，
+    即 _handle_auth 的第三步。明文模式（none+CF）：没有会话密钥、不发挑战，token
+    一过即完成——客户端要到第一个数据帧才判定接入，所以两种模式都要推 config。
+
+    加密模式下客户端随后即 isConnected，这是**乐观接入**（与 TLS 1.3 客户端
+    Finished 同形）；被拒由 error(code="auth") 或 close 4001 体现。
     """
     auth_msg = _wait_auth(page)
     assert channel.receive_auth(auth_msg) is True
-    ack = channel.make_auth_ack()
+
+    if channel.is_encrypted:
+        challenge = channel.make_auth_challenge()
+        page.evaluate(
+            "(msg) => window.__mockWS.triggerMessage(msg)",
+            list(channel.wrap(challenge)),
+        )
+        # auth_proof 是加密帧 → mock 按「raw」保存（明文帧才会被解成 dict）
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.some(m => m.raw)", timeout=3000
+        )
+        proof_raw = page.evaluate(
+            "() => { const m = window.__mockWS.sentMessages.find(m => m.raw);"
+            " return m ? m.raw : null; }"
+        )
+        assert proof_raw, "客户端未回 auth_proof"
+        assert channel.verify_auth_proof(
+            channel.unwrap(bytes(proof_raw)), challenge["nonce"]
+        ) is True, "auth_proof 未能通过 nonce 校验"
+    else:
+        assert channel.is_authenticated is True
+
     page.evaluate(
         "(msg) => window.__mockWS.triggerMessage(msg)",
-        list(channel.wrap(ack)),
+        list(channel.wrap({"type": "config", "mobile_max_records": 20})),
     )
     page.wait_for_function(
         "() => window.__wsClient && window.__wsClient.isConnected"
@@ -248,8 +276,8 @@ class TestHandshake:
         assert "algo" not in auth_msg  # 线上不泄露算法
         assert channel.negotiated_algorithm == algo
 
-    def test_auth_ack_received(self, secure_pair):
-        """auth_ack 被正确处理，SecureClient 已认证。"""
+    def test_auth_proof_completes_handshake(self, secure_pair):
+        """auth_challenge 被正确处理、auth_proof 已回，SecureClient 已认证。"""
         page, channel, algo = secure_pair
         assert page.evaluate("() => window.__wsClient.secure.isAuthenticated") is True
 
@@ -408,10 +436,10 @@ class TestAlgorithmRejection:
         # 新协议下 algo 在密封 blob 内：none 算法走不到密钥交换，以解封失败被拒
         assert channel.reject_reason
 
-        ack = channel.make_auth_ack()
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(channel.wrap(ack)))
+        # 认证前失败：服务端不回消息层帧，直接 close 4001（与 api._handle_auth 一致）
+        page.evaluate("() => window.__mockWS.triggerClose(4001)")
 
-        page.wait_for_function("() => !window.__wsClient.isConnected", timeout=2000)
+        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
         assert page.evaluate("() => window.__wsClient.isConnected") is False
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
@@ -676,10 +704,10 @@ class TestNoneCloudflareRejection:
         assert channel.is_rejected
         assert "token mismatch" in channel.reject_reason
 
-        ack = channel.make_auth_ack()
-        page.evaluate("(msg) => window.__mockWS.triggerMessage(msg)", list(channel.wrap(ack)))
+        # 明文模式同样：认证前失败直接 close 4001，客户端据此提示重新扫码
+        page.evaluate("() => window.__mockWS.triggerClose(4001)")
 
-        page.wait_for_function("() => !window.__wsClient.isConnected", timeout=2000)
+        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
         assert page.evaluate("() => window.__wsClient.isConnected") is False
         assert page.locator("#status-bar").is_visible()
         assert page.locator("#input-box").is_disabled()
@@ -690,18 +718,15 @@ class TestNoneCloudflareRejection:
 class TestAuthFailureUX:
     """认证失败后：明确提示用户、停止无意义重连；密钥缺失时不发起连接。"""
 
-    def test_rejected_ack_shows_warning_and_stops_reconnect(self, page):
-        """模拟旧二维码：服务端拒绝认证后提示重新扫码，且不再自动重连。"""
+    def test_close_4001_shows_warning_and_stops_reconnect(self, page):
+        """模拟旧二维码：服务端在密钥建立前就 close 4001 → 提示重新扫码且不再重连。"""
         pc = SecureChannel(algorithm="auto")
         html = _prepare_html(pc, ["xsalsa20"])
         page.set_content(html)
         _wait_auth(page)
 
-        # 服务端拒绝（对应二维码过期 / 密钥不匹配）
-        page.evaluate(
-            "(msg) => window.__mockWS.triggerMessage(msg)",
-            list(frame_encode({"type": "auth_ack", "rejected": True, "reason": "auth data processing failed"})),
-        )
+        # 解封失败（二维码过期 / 密钥不匹配）：服务端不发明文拒绝帧，只关连接
+        page.evaluate("() => window.__mockWS.triggerClose(4001)")
 
         page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
         # 状态栏提示重新扫码，输入框禁用
@@ -709,6 +734,28 @@ class TestAuthFailureUX:
         assert "重新扫码" in text
         assert page.locator("#input-box").is_disabled()
         # 不再安排重连
+        assert page.evaluate("() => window.__wsClient.reconnectTimer") is None
+
+    def test_rejected_proof_shows_warning(self, page):
+        """auth_proof 校验失败：服务端回加密的 error(code="auth") → 同样停止重连。
+
+        这是「认证后失败」那条路径——密钥已在手，所以拒绝是加密帧而非 close 码。
+        """
+        pc = SecureChannel(algorithm="auto")
+        channel = pc.new_session()
+        html = _prepare_html(pc, ["xsalsa20"])
+        page.set_content(html)
+
+        auth_msg = _wait_auth(page)
+        assert channel.receive_auth(auth_msg) is True
+
+        page.evaluate(
+            "(msg) => window.__mockWS.triggerMessage(msg)",
+            list(channel.wrap({"type": "error", "code": "auth"})),
+        )
+
+        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
+        assert page.locator("#input-box").is_disabled()
         assert page.evaluate("() => window.__wsClient.reconnectTimer") is None
 
     def test_missing_key_does_not_connect(self, page):

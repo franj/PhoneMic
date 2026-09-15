@@ -11,6 +11,8 @@ import urllib.request
 import urllib.error
 
 import pytest
+from queue import Empty
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as ws_connect
 from hashlib import blake2b
 from nacl.bindings import crypto_scalarmult
@@ -103,13 +105,20 @@ class PhoneSimulator:
         # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
         return {"type": "auth", "data": sealed}
 
-    def verify_auth_ack(self, ack_frame: bytes) -> bool:
-        """模拟 JS 端 handleAuthAck：整帧解密 ack（首帧 seq=0）。"""
-        try:
-            msg = self.decrypt(ack_frame)
-            return msg.get("type") == "auth_ack" and msg.get("status") == "OK"
-        except Exception:
-            return False
+    def answer_challenge(self, frame: bytes) -> bytes:
+        """模拟 JS 端 SecureClient.makeAuthProof：解密 auth_challenge 并回 auth_proof。
+
+        挑战是下行的 0 号加密帧，proof 是上行的 0 号加密帧——两端 seq 都在这里
+        从 0 走起（make_auth 已把计数器归零）。
+        """
+        msg = self.decrypt(frame)
+        assert msg.get("type") == "auth_challenge", msg
+        return self.encrypt({"type": "auth_proof", "nonce": msg["nonce"]})
+
+    def handshake(self, ws) -> None:
+        """在一条连接上跑完三步握手（auth → auth_challenge → auth_proof）。"""
+        ws.send(frame_encode(self.make_auth()))
+        ws.send(self.answer_challenge(ws.recv(timeout=5)))
 
     def encrypt(self, msg: dict) -> bytes:
         # 产出线上字节：none 模式直接 msgpack 编码，加密模式整帧加密；无信封
@@ -158,27 +167,60 @@ def secure_server():
 class TestAuthHandshake:
     """测试 auth 握手流程。"""
 
-    def test_valid_auth_receives_auth_ack(self, secure_server):
+    def test_valid_handshake_completes(self, secure_server):
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            msg = ws.recv(timeout=5)
-            # 成功 ack = 整帧加密（无信封），能整帧解密即验证通过
-            assert phone.verify_auth_ack(msg) is True
+            phone.handshake(ws)
+            # 三步走完服务端才注册连接：connect 事件是「真的通过了」的可靠证据
+            msg_type, text = queue.get(timeout=2)
+            assert msg_type == "connect"
 
-    def test_invalid_auth_closes_connection(self, secure_server):
+    def test_invalid_auth_closes_with_4001(self, secure_server):
+        """认证前失败：不回消息层帧、直接 close 4001（与 wire-protocol §7 一致）。
+
+        这一条覆盖了原先「先发明文 auth_ack(rejected) 再 close(1000)」的漂移。
+        """
         host, port, queue, sc = secure_server
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(frame_encode({"type": "auth", "algo": "xsalsa20", "data": b"garbage!!!"}))
-            # 服务端先发送拒绝消息再关闭
-            ack = frame_decode(ws.recv(timeout=3))
-            assert ack["type"] == "auth_ack"
-            assert ack.get("rejected") is True
-            with pytest.raises(Exception):
+            with pytest.raises(ConnectionClosed) as ei:
                 ws.recv(timeout=3)
+            assert ei.value.rcvd is not None
+            assert ei.value.rcvd.code == 4001
+
+    def test_replayed_auth_cannot_steal_the_connection(self, secure_server):
+        """重放真机的 auth 帧：解封成功，但过不了 auth_proof，连接不会被注册。
+
+        这是三步握手买到的直接好处——认证失败发生在 _manager.connect() 之前，
+        真机那条活动连接不会被顶掉（旧的两步握手下这里是一条零成本的 DoS）。
+        """
+        host, port, queue, sc = secure_server
+        victim = PhoneSimulator(sc.get_public_key_b64())
+        recorded = frame_encode(victim.make_auth())  # 攻击者录下真机那一帧
+
+        with ws_connect(ws_url(host, port, sc)) as ws:
+            ws.send(recorded)
+            # 能拿到 challenge：说明解封确实成功了，重放卡不住第一步
+            challenge = victim.decrypt(ws.recv(timeout=5))
+            assert challenge["type"] == "auth_challenge"
+
+            # 认证后失败：已有会话密钥 → 回加密的 error(code="auth")，随后关闭
+            ws.send(victim.encrypt({"type": "auth_proof", "nonce": b"\x00" * 16}))
+            reject = victim.decrypt(ws.recv(timeout=3))
+            assert reject["type"] == "error"
+            assert reject["code"] == "auth"
+
+            with pytest.raises(ConnectionClosed) as ei:
+                ws.recv(timeout=3)
+            assert ei.value.rcvd is not None
+            assert ei.value.rcvd.code == 1000
+
+        # 全程没有 connect 事件：真机连接毫发无损
+        with pytest.raises(Empty):
+            queue.get(timeout=0.5)
 
     def test_non_auth_first_message_closes(self, secure_server):
         host, port, queue, sc = secure_server
@@ -188,13 +230,12 @@ class TestAuthHandshake:
             with pytest.raises(Exception):
                 ws.recv(timeout=3)
 
-    def test_connect_event_after_auth(self, secure_server):
+    def test_connect_event_after_handshake(self, secure_server):
         host, port, queue, sc = secure_server
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ws.recv(timeout=5)  # auth_ack
+            phone.handshake(ws)
 
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "connect"
@@ -208,8 +249,7 @@ class TestEncryptedMessageFlow:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ws.recv(timeout=5)  # auth_ack
+            phone.handshake(ws)
             queue.get(timeout=2)  # connect event
 
             ws.send(phone.encrypt({"type": "preview", "text": "secret hello"}))
@@ -223,8 +263,7 @@ class TestEncryptedMessageFlow:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ws.recv(timeout=5)
+            phone.handshake(ws)
             queue.get(timeout=2)
 
             ws.send(phone.encrypt({"type": "send", "text": "encrypted send"}))
@@ -242,9 +281,7 @@ class TestServerSendsEncrypted:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ack_inner = phone.decrypt(ws.recv(timeout=5))
-            assert ack_inner["type"] == "auth_ack"  # 消费 ack（seq=0），对齐下行计数
+            phone.handshake(ws)
             queue.get(timeout=2)  # connect
 
             # config 应为整帧加密：能整帧解密即证明无明文泄漏、无外层信封
@@ -257,9 +294,7 @@ class TestServerSendsEncrypted:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ack_inner = phone.decrypt(ws.recv(timeout=5))
-            assert ack_inner["type"] == "auth_ack"  # 消费 ack（seq=0），对齐下行计数
+            phone.handshake(ws)
             queue.get(timeout=2)  # connect
             initial = phone.decrypt(ws.recv(timeout=2))
             assert initial["type"] == "config"
@@ -287,8 +322,7 @@ class TestStateMachineSecurity:
         phone = PhoneSimulator(sc.get_public_key_b64())
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_auth()))
-            ws.recv(timeout=5)  # auth_ack
+            phone.handshake(ws)
             queue.get(timeout=2)  # connect
             ws.recv(timeout=2)  # config (encrypted)
 

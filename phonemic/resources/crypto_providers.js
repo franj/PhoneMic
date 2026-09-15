@@ -12,7 +12,8 @@
  * - makeAuthData(): 用 PC 公钥 SealedBox 密封 {"algo","pk"} JSON——
  *   algo 在密文内部，不再明文传输。握手内层刻意用 JSON：它不依赖上层
  *   编解码器（见 crypto-design.md §3），避免"先有解码器才能解握手"的鸡生蛋
- * - Provider 只操作原始字节；帧编解码均由上层 SecureClient 处理
+ * - Provider 只操作原始字节；帧编解码与握手帧（auth_challenge / auth_proof）的
+ *   组装、识别均由上层 SecureClient 处理，Provider 不参与握手
  */
 
 // 8 字节大端 seq 编解码（与 Python 端 _SEQ_LEN=8 / to_bytes(8,'big') 一致）
@@ -97,17 +98,6 @@ class NaClBoxProvider {
         this._rxSeq++;
         return body.slice(8);
     }
-    handleAuthAck(rawBytes) {
-        try {
-            // 首个下行帧：走统一 decrypt 路径（seq=0 校验并推进 _rxSeq）
-            const pt = this.decrypt(rawBytes);
-            const msg = MessagePack.decode(pt);
-            return msg.status === 'OK';
-        } catch (e) {
-            console.error('[SEC] auth_ack decrypt failed:', e);
-            return false;
-        }
-    }
     reset() {
         this._txSeq = 0;
         this._rxSeq = 0;
@@ -169,17 +159,6 @@ class XChaCha20Provider {
         this._rxSeq++;
         return pt;
     }
-    handleAuthAck(rawBytes) {
-        try {
-            // 首个下行帧：走统一 decrypt 路径（seq=0 校验并推进 _rxSeq）
-            const pt = this.decrypt(rawBytes);
-            const msg = MessagePack.decode(pt);
-            return msg.status === 'OK';
-        } catch (e) {
-            console.error('[SEC] auth_ack decrypt failed:', e);
-            return false;
-        }
-    }
     reset() {
         this._txSeq = 0;
         this._rxSeq = 0;
@@ -193,7 +172,6 @@ class PlainProvider {
     setPcPublicKey(rawBytes) {}
     setToken(token) { this._token = token; }
     makeAuthData() { return this._token; }
-    handleAuthAck(rawBytes) { return true; }
     encrypt(plaintextBytes) { return plaintextBytes; }
     decrypt(ciphertextBytes) { return ciphertextBytes; }
     reset() {}
