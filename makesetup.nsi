@@ -263,4 +263,20 @@ SectionEnd
 
 Function un.onInit
   SetShellVarContext Current
+
+  ; ---------- 卸载前确认 ----------
+  ; 单独运行 uninst.exe（双击，或「设置 → 应用」里的卸载）原本会立刻开始删文件，
+  ; 这里先让用户确认一次。
+  ; 静默卸载（uninst.exe /S：注册表里的 QuietUninstallString，或包管理器调用）不做任何打扰：
+  ; 一个没有 /SD 的 MessageBox 在静默模式下**依然会被显示**并永久阻塞 —— 所以用 ${Silent}
+  ; 直接跳过，并补一个 /SD IDYES 作为双保险。
+  ; 默认按钮是「否」（MB_DEFBUTTON2）：误按回车不会真的卸载。
+  ${IfNot} ${Silent}
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "确定要卸载 ${APP_NAME} 吗？$\r$\n$\r$\n安装目录：$INSTDIR$\r$\n程序文件会被删除，桌面与开始菜单的快捷方式、开机自启项也会一并移除；如果 ${APP_NAME} 正在运行，会先结束它。$\r$\n$\r$\n配置与数据保留在 $LOCALAPPDATA\PhoneMic，不会被删除。$\r$\n$\r$\nUninstall ${APP_NAME}? The program directory, its shortcuts and the auto-start entry will be removed, and a running ${APP_NAME} will be closed first. Your settings and data in %LOCALAPPDATA%\PhoneMic are kept." /SD IDYES IDNO un_confirm_cancel
+  ${EndIf}
+  Return
+
+  un_confirm_cancel:
+    Quit                                  ; 「否」→ 直接退出，什么也不做
+
 FunctionEnd
