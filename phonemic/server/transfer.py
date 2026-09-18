@@ -11,16 +11,22 @@
 
 背压
 ----
-队列按**字节**限流（不是按块数）：分块大小是动态的（256KB ~ 15MB，见
-``FilePanel.pickChunkSize``），按块计数在大块下会失控（32 块 × 15MB ≈ 480MB）。
-``enqueue()`` 在驻留字节超过 ``max_bytes`` 时 await，此时不再 ``receive()``，
-TCP 窗口关闭，手机端自然降速——不丢帧、不爆内存。
+队列按**字节**限流（不是按块数）：块大小由手机端决定（当前按体积自适应，
+夹在 256KB ~ ``FilePanel.CHUNK_MAX``，随链路取 1MB / 256KB，
+见 ``FilePanel.pickChunkSize``），一旦将来重新调大，按块计数
+就会失控（32 块 × 15MB ≈ 480MB）。``enqueue()`` 在驻留字节超过 ``max_bytes`` 时
+await，此时不再 ``receive()``，TCP 窗口关闭，手机端自然降速——不丢帧、不爆内存。
 
 ack 语义
 --------
 保持"落盘才回"：ack 由消费者在写盘成功后发出，因此 ack 回来的速率恰好等于
 真实落盘速率，背压信号不会失真。若改成"入队即回"，数据只是从网络挪进内存，
 进度条会跑到实际落盘前面。
+
+ack 分三级：``data`` 逐块回（带累计 ``received``），``end`` 收齐后再回一帧，
+``cancel`` 丢弃会话后回一帧。手机端只有拿到 ``end`` 才算发送成功，``data``
+用来把进度条从"本地估算"升级为"PC 已收到"，``cancel`` 用来确认取消真的生效
+（否则界面只能靠 hello 探活兜底，见 §9）。
 """
 
 from __future__ import annotations
@@ -31,7 +37,9 @@ from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# 队列驻留上限（字节）。约等于 2 个最大块，足以吸收写盘抖动，又不占内存。
+# 队列驻留上限（字节）。按字节而非块数限流（见模块 docstring）；32MB 远大于
+# 手机端自身的 4MB 发送缓冲高水位，正常情况下队列很浅（网络才是瓶颈），
+# 这个上限只用来把最坏情况下的内存占用钉死。
 DEFAULT_MAX_BYTES = 32 * 1024 * 1024
 
 # data 帧携带二进制块的字段名（file / photo 一致，见 wire-protocol.md §9）

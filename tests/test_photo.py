@@ -53,9 +53,13 @@ class TestReceiver:
         # 两块 15 字节 + 尾块 15 字节（模拟任意切块，不需要 256KB）
         chunks = [payload[0:15], payload[15:30]]
         assert r.handle({"a": "start", "id": 7, "name": "shot.png", "size": len(payload), "chunks": 2}) == (None, None)
-        # data 块不再逐块回 ack（协议 §9）
-        assert r.handle({"a": "data", "id": 7, "n": 0, "chunk": chunks[0]}) == (None, None)
-        assert r.handle({"a": "data", "id": 7, "n": 1, "chunk": chunks[1]}) == (None, None)
+        # data 块逐块回 ack（协议 §9），received 为累计值
+        assert r.handle({"a": "data", "id": 7, "n": 0, "chunk": chunks[0]}) == (
+            {"type": "ack", "ref": "photo", "id": 7, "a": "data",
+             "n": 0, "received": 15}, None)
+        assert r.handle({"a": "data", "id": 7, "n": 1, "chunk": chunks[1]}) == (
+            {"type": "ack", "ref": "photo", "id": 7, "a": "data",
+             "n": 1, "received": 30}, None)
         ack_end, err = r.handle({"a": "end", "id": 7})
         assert err is None and ack_end == {
             "type": "ack", "ref": "photo", "id": 7, "a": "end", "received": 30,
@@ -115,9 +119,12 @@ class TestReceiver:
     def test_cancel_discards_and_idempotent(self):
         r = PhotoReceiver()
         assert r.handle({"a": "start", "id": 1, "size": 10, "chunks": 1})[1] is None
-        assert r.handle({"a": "cancel", "id": 1}) == (None, None)
+        # 取消也有回执（协议 §9），且幂等路径同样回执（与 file 同语义）
+        assert r.handle({"a": "cancel", "id": 1}) == (
+            {"type": "ack", "ref": "photo", "id": 1, "a": "cancel"}, None)
         # 会话已清，重复 cancel 幂等成功；end 也找不到会话
-        assert r.handle({"a": "cancel", "id": 1}) == (None, None)
+        assert r.handle({"a": "cancel", "id": 1}) == (
+            {"type": "ack", "ref": "photo", "id": 1, "a": "cancel"}, None)
         assert r.handle({"a": "end", "id": 1})[1] is not None
 
     def test_abort_all_on_disconnect(self):

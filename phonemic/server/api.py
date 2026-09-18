@@ -450,6 +450,13 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         # 应用层心跳应答（wire-protocol.md §7）。存活时间戳已在 _serve_messages
         # 的收帧处统一刷新，这里只需认下类型，避免落到 else 回一帧 malformed。
         logger.debug("Received pong")
+    elif msg_type == "hello":
+        # 取消回执的兜底探活（wire-protocol.md §9）：原样回显探活号 t。
+        # 手机端据此认定「排在 hello 之前的 cancel 帧已被服务端读出」——同一
+        # 条可靠有序通道，本函数按收帧顺序执行，能读到 hello 就说明先读到了
+        # cancel（cancel 已入队，随后必被消费者处理）。
+        await _send_frame(websocket, {"type": "hello", "t": inner.get("t")})
+        logger.debug(f"Received hello (t={inner.get('t')})")
     else:
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {

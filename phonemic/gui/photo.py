@@ -13,7 +13,7 @@ photo 与 file 线格式完全相同，唯一区别是落地方式：
 
 帧示例（手机端原样发出）：
     {"type":"photo", "a":"start",  "id":7, "name":"a.png", "size":1048576, "chunks":16}
-    {"type":"photo", "a":"data",   "id":7, "n":0, "chunk":<bin 1MB>}
+    {"type":"photo", "a":"data",   "id":7, "n":0, "chunk":<bin chunkSize>}
     {"type":"photo", "a":"end",    "id":7}
     {"type":"photo", "a":"cancel", "id":7}
 """
@@ -81,8 +81,9 @@ class PhotoReceiver:
         """处理一条 photo 帧。
 
         Returns:
-            (ack帧, None)      —— end 重组成功，ack(a:"end") 由 api.py 下发给手机端
-            (None, None)       —— start/data/cancel 正常处理，无需回帧
+            (ack帧, None)      —— data 重组成功（a:"data"）/ end 收齐成功（a:"end"）/
+                                  cancel 已生效（a:"cancel"），都由 api.py 下发给手机端
+            (None, None)       —— start 正常处理，无需回帧
             (None, 错误信息)    —— 非法/协议错误/没收齐，调用方回 error(malformed)
         """
         ok, err = validate_photo_action(frame)
@@ -153,8 +154,15 @@ class PhotoReceiver:
             return None, (f"data 帧累计字节超过声明的 size: "
                           f"id={fid} received={sess['received']} size={sess['size']}")
         sess['buf'].extend(chunk)
-        # 不再逐块回 ack（协议 §9），只在 end 重组成功后回一次确认
-        return None, None
+        # 逐块回 ack（协议 §9），语义与 file 一致：这一块已在 PC 内存里重组完成
+        return {
+            'type': 'ack',
+            'ref': 'photo',
+            'id': fid,
+            'a': 'data',
+            'n': frame['n'],
+            'received': sess['received'],
+        }, None
 
     def _on_end(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
@@ -184,13 +192,14 @@ class PhotoReceiver:
 
     def _on_cancel(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
-        if fid not in self._sessions:
-            # 会话已结束/未开始：cancel 幂等成功，不回帧不报错
-            logger.info(f"cancel 无匹配会话: id={fid}，忽略")
-            return None, None
-        self._discard(fid)
-        logger.info(f"图片传输已取消: id={fid}")
-        return None, None
+        if fid in self._sessions:
+            self._discard(fid)
+            logger.info(f"图片传输已取消: id={fid}")
+        else:
+            # 会话已结束/未开始：cancel 幂等成功，仍回执（与 file 同语义，见 file.py::_on_cancel）
+            logger.info(f"cancel 无匹配会话: id={fid}，幂等回执")
+        # 取消也有回执（协议 §9）：手机端收到它才解锁界面；收不到则靠 hello 探活兜底
+        return {'type': 'ack', 'ref': 'photo', 'id': fid, 'a': 'cancel'}, None
 
     def _discard(self, fid: int) -> None:
         """丢弃会话（释放内存 buffer）。cancel 与异常清理共用。"""

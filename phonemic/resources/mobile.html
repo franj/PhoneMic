@@ -3785,16 +3785,26 @@
     }
 
     class FilePanel {
-        // 分块策略（wire-protocol.md §9）：按文件体积动态选块，块数收敛到 ~12 块。
-        // 上限由服务端 config.max_frame_size 下发；未下发时走保守默认。
-        static get CHUNK_MIN() { return 256 * 1024; }          // 下限：再小 per-chunk 开销就吃不消
-        static get CHUNK_CAP() { return 15 * 1024 * 1024; }    // 手机端自身上限：不因服务端下发大值就吃爆内存
-        static get CHUNK_FALLBACK() { return 4 * 1024 * 1024; }// 服务端未下发 max_frame_size 时的保守上限
+        // 分块策略（wire-protocol.md §9）：按体积自适应，块数收敛到 ~12，夹在 [256KB, CHUNK_MAX]。
+        // CHUNK_MAX 随链路而定：Cloudflare 快隧道一档，其余（局域网/直连）一档。
+        // 上限同时被服务端 config.max_frame_size 收窄（见 pickChunkSize）。
+        static get CHUNK_MIN() { return 256 * 1024; }           // 下限：再小则 per-chunk 开销占比过高
+        static get CHUNK_MAX_LAN() { return 1 * 1024 * 1024; }  // 局域网/直连上限 ← 调大小改这一行
+        static get CHUNK_MAX_CF() { return 256 * 1024; }        // Cloudflare 上限   ← 调大小改这一行
+        /** 是否经 Cloudflare 快隧道：除 *.trycloudflare.com 外一律按局域网处理 */
+        static get isCloudflare() { return /\.trycloudflare\.com$/i.test(location.hostname); }
+        static get CHUNK_MAX() {
+            return FilePanel.isCloudflare ? FilePanel.CHUNK_MAX_CF : FilePanel.CHUNK_MAX_LAN;
+        }
         static get CHUNK_TARGET() { return 12; }               // 目标块数：兼顾进度粒度与 per-chunk 开销
         static get FRAME_RESERVE() { return 64 * 1024; }       // 安全边距：msgpack 头 + nonce + MAC + seq
         static get HIGH_WATER() { return 4 * 1024 * 1024; }    // 发送缓冲高水位：超过则暂停等排空
         static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
-        static get END_ACK_TIMEOUT() { return 15000; }         // 等 PC 端落盘确认的超时（ms）
+        static get MAX_INFLIGHT() { return 1; }                // 在途未确认块数上限：1 = 停等 ← 调吞吐改这一行
+        static get CHUNK_ACK_TIMEOUT() { return 15000; }       // 单块 ack 保险超时（ms）：超时放弃停等，见 _waitChunkAck
+        static get CANCEL_ACK_TIMEOUT() { return 2000; }       // 等「取消回执」的时限（ms），超时改发 hello 探活，见 _awaitCancelAck
+        static get HELLO_TIMEOUT() { return 2000; }            // 发 hello 后等回执的时限（ms），再超时就地放行，不再干等
+        static get END_ACK_TIMEOUT() { return 180000; }        // end 确认的保险超时（ms），见 _waitEndAck
         static get RECONNECT_WAIT() { return 6000; }           // 未连接时先等重连的时间（ms），1s 退避足够重试数轮
         static get PICKER_CANCEL_GRACE() { return 250; }       // 判「取消」的宽限（ms）：留给 change 追上来的余量
 
@@ -3806,12 +3816,28 @@
             FilePanel._serverMaxFrame = (Number.isFinite(n) && n >= 512 * 1024)
                 ? Math.floor(n) : 0;
         }
-        /** 按文件体积挑块：ceil(size/CHUNK_TARGET) 向上取整到 256KB 倍数，再夹到 [min, max] */
+        /**
+         * 块大小：按文件体积自适应，块数收敛到 ~12，结果夹在 [256KB, CHUNK_MAX]。
+         *
+         *   cap   = max(256KB, min(CHUNK_MAX, 服务端下发的 max_frame_size − 64KB))；未下发时取 CHUNK_MAX
+         *   chunk = clamp(ceil(size / 12) 向上取整到 256KB 倍数, 256KB, cap)
+         *
+         * **为什么要自适应**：小文件若恒定撞上限，2MB 只有 2 块、每次 ack 跳半格，进度条像在跳变；
+         * 收敛到 ~12 块后小文件也有小步可走，而大文件本来就会撞上限。
+         * **为什么上限分链路**（CHUNK_MAX_LAN / CHUNK_MAX_CF）：大块只省 per-chunk 开销，代价却是三件事
+         * 同时变糟——进度粒度粗、手机端内存峰值高、且把更多数据堆在途（`end` 的确认要等这一坨
+         * 排空才回得来，慢链路上就表现成「手机说发送成功、PC 还在写」）。Cloudflare 回源段窄且延迟高，
+         * 取 256KB；局域网带宽延迟都好，取 1MB。另外进度条「至多领先 ack 一块」的前瞻量就是块大小，
+         * 块越小前瞻越准。
+         *
+         * 注：CHUNK_MIN 与 CHUNK_MAX_CF 相等时（Cloudflare），clamp 结果恒为 256KB，无需特判。
+         */
         static pickChunkSize(size) {
             const cap = FilePanel.serverMaxFrame
-                ? Math.min(FilePanel.serverMaxFrame - FilePanel.FRAME_RESERVE, FilePanel.CHUNK_CAP)
-                : Math.min(FilePanel.CHUNK_FALLBACK, FilePanel.CHUNK_CAP);
-            const max = Math.max(FilePanel.CHUNK_MIN, cap);
+                ? FilePanel.serverMaxFrame - FilePanel.FRAME_RESERVE
+                : FilePanel.CHUNK_MAX;
+            const max = Math.max(FilePanel.CHUNK_MIN,
+                                 Math.min(FilePanel.CHUNK_MAX, cap));
             const ideal = Math.ceil(size / FilePanel.CHUNK_TARGET);
             const aligned = Math.ceil(ideal / FilePanel.CHUNK_MIN) * FilePanel.CHUNK_MIN;
             return Math.min(max, Math.max(FilePanel.CHUNK_MIN, aligned));
@@ -3947,15 +3973,21 @@
             this.ws = opts.ws;                   // 订阅下行 ack/error
             this.revealPanel = opts.revealPanel || null;  // 发送开始时切到本面板（入口注入）
             this.setTransferLock = opts.setTransferLock || null;  // 发送期间锁死其它交互
-            this._sentBytes = 0;          // 已发出字节：进度条本地推进，不再等 ack
+            this._sentBytes = 0;          // 累计交给 sendFrame 的字节：本地估算的上界
+            this._chunkSize = 0;          // 本次传输的块大小：进度只允许 ack 领先至多一块
             this._endAckResolver = null;  // end 确认等待器（PC 端 ack/error 唤醒）
             this._endTimer = null;
 
             this._id = 0;            // 传输会话 id：每连接从 1 递增（协议 §9）
-            this._state = 'idle';    // idle | sending
+            this._state = 'idle';    // idle | sending | canceling（等取消回执）
             this._kind = 'file';     // 当前传输类型：'file' 落盘 | 'photo' 到剪贴板
             this._file = null;       // 发送中的 File（取消/出错时留作重发）
             this._cancelRequested = false;
+            this._cancelPending = false;  // 已发 cancel、正在等回执（此期间界面保持锁定）
+            this._cancelAcked = false;    // 服务端已回 cancel 回执
+            this._helloSeq = 0;           // hello 探活号（自增，服务端原样回显）
+            this._helloWait = null;       // 正在等回显的那个探活号；null = 没在等
+            this._helloOk = false;        // 对应 _helloWait 的回执已到
             this._pendingKind = null;  // 选择器在飞时的传输类型：非 null 表示「等结果」
             this._cancelTimer = null;  // 「取消」判定计时器（见 _bind）
 
@@ -3963,11 +3995,35 @@
             this._buildDOM();
             this._bind();
 
-            // 下行 ack：data 块不再逐块回 ack（协议 §9），这里只处理 end 确认
+            // 下行 ack（协议 §9）：data 块逐块回，end 收齐落盘后再回一帧，cancel 回执亦然
             this.ws.on('ack', (f) => {
                 if (f.ref !== this._kind || f.id !== this._id) return;
-                if (f.a === 'end') { this._resolveEnd(true); return; }
-                if (f.received != null && this._state === 'sending') this._updateProgress(f.received);
+                if (f.a === 'cancel') {
+                    // 服务端已丢弃会话 —— 取消生效的唯一依据（见 _awaitCancelAck）
+                    this._cancelAcked = true;
+                    return;
+                }
+                if (f.a === 'end') {
+                    // 唯一能报成功的依据：PC 已落盘改名。先把进度补满再收尾
+                    this._endConfirmed = true;
+                    if (this._file) this._updateProgress(this._file.size);
+                    this._resolveEnd(true);
+                    return;
+                }
+                // data 级 ack：补上本端观测不到的那一段——数据真的到 PC 了
+                if (typeof f.received === 'number') {
+                    this._ackedBytes = Math.max(this._ackedBytes, f.received);
+                }
+                // 停等闸门的放行依据是**块序号**：尾块不满，received 推不出块号
+                if (typeof f.n === 'number') {
+                    this._ackedChunkN = Math.max(this._ackedChunkN, f.n);
+                }
+                this._progressTick();
+            });
+            // 下行 hello：取消回执超时后的探活回执（协议 §9）。认号不认帧——
+            // 只有 t 与当前在等的探活号一致才算数，迟到的回执不会满足下一次等待。
+            this.ws.on('hello', (f) => {
+                if (this._helloWait !== null && f.t === this._helloWait) this._helloOk = true;
             });
             // 下行 error：PC 端拒收（字段非法/已有传输占线/校验失败）→ 视为失败收尾
             this.ws.on('error', () => {
@@ -4016,6 +4072,7 @@
             this.nameEl = this.root.querySelector('.fp-name');
             this.fillEl = this.root.querySelector('.fp-fill');
             this.pctEl = this.root.querySelector('.fp-pct');
+            this.cancelBtn = this.root.querySelector('.fp-cancel');
         }
 
         _bind() {
@@ -4100,7 +4157,17 @@
             this._kind = kind;               // 'file' → 磁盘；'photo' → 剪贴板
             this._file = file;
             this._cancelRequested = false;
+            this._cancelPending = false; // 上一次取消的等待到此为止
+            this._cancelAcked = false;
+            this._helloWait = null;      // 丢弃上一次的探活等待（迟到的回执会因号不匹配被忽略）
+            this._helloOk = false;
             this._sentBytes = 0;
+            this._ackedBytes = 0;
+            this._ackedChunkN = -1;      // -1 = 一块都没被 ack（停等闸门基线，见 _waitChunkAck）
+            this._gateGaveUp = false;    // ack 通道失灵后退回流水线，见 _waitChunkAck
+            this._shownPct = 0;
+            this._endConfirmed = false;
+            this._awaitingAck = false;
             this._state = 'sending';
             this._setLock(true);          // 传输期间锁死面板切换与其它操作
 
@@ -4113,7 +4180,8 @@
             this.nameEl.textContent = file.name;
             this._updateProgress(0);
 
-            const chunkSize = FilePanel.pickChunkSize(file.size);
+            const chunkSize = FilePanel.pickChunkSize(file.size);   // 按体积自适应 ~12 块，上限随链路 CHUNK_MAX（§9）
+            this._chunkSize = chunkSize;   // 进度只允许 ack 领先至多一块（见 _progressTick）
             const total = Math.ceil(file.size / chunkSize);
             // 帧 type 随传输类型（wire-protocol.md §9：file/photo 线格式相同）
             this.onCommand({ type: kind, a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
@@ -4121,6 +4189,12 @@
             for (let n = 0; n < total; n++) {
                 if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾
                 if (!this.ws.getConnected()) { this._finish(false); return; }
+                // 停等闸门：在途未确认块数不得超过 MAX_INFLIGHT（=1 即「收到上一块 ack 才发下一帧」）
+                if (!(await this._waitChunkAck(n - FilePanel.MAX_INFLIGHT))) {
+                    if (this._cancelRequested) return;             // 用户已取消：_cancel 负责收尾
+                    if (this._state === 'sending') this._finish(false);   // 断连：ACK 不会再来
+                    return;
+                }
                 try {
                     const blob = file.slice(n * chunkSize, (n + 1) * chunkSize);
                     const buf = await blob.arrayBuffer();
@@ -4128,7 +4202,7 @@
                     const ok = this.onCommand({ type: kind, a: 'data', id: this._id, n, chunk: bytes });
                     if (!ok) { this._finish(false); return; }   // 连接断开，sendFrame 静默 false
                     this._sentBytes += bytes.length;
-                    this._progressTick();                       // 按真实上网字节推进，大块不假满格
+                    this._progressTick();                       // 按 ack 基准推进（本地量只做至多一块的前瞻）
                     await this._waitDrain();                    // 积压过高时背压等待（期间持续刷新进度）
                 } catch (e) {
                     console.error('[FILE] read/send chunk failed:', e);
@@ -4139,23 +4213,37 @@
             }
 
             if (this._cancelRequested) return;
-            this._updateProgress(this._sentBytes);   // 数据已全部交出，进度收尾
-            this.pctEl.textContent = t('panel_file_finalizing');
+            this._progressTick();                    // 数据已全部交出：本地量也不再增长（等 ack 收尾）
+            this._awaitingAck = true;
+            this._renderPct();                       // 文案切「等待电脑确认…」
             this.onCommand({ type: kind, a: 'end', id: this._id });
-            // 等 PC 端确认落盘再报成功，避免「发出去就算成功」的假成功
-            const okEnd = await this._waitEndAck();
-            this._finish(okEnd);
+            // 等 PC 端确认落盘再报成功：没等到就如实报「未确认」，绝不猜成功
+            const result = await this._waitEndAck();
+            this._awaitingAck = false;
+            this._finish(result);
         }
 
-        /** 真实已上网字节 = 累计 send − 仍在浏览器缓冲里排队的部分（bufferedAmount） */
+        /**
+         * 进度 = PC 已确认字节 + 至多 1 块的「乐观量」，见协议 §9。
+         *
+         * 真实交付量被有序信道夹在两个可观测边界之间：
+         *   下界 ackedBytes           —— PC 已落盘，板上钉钉
+         *   上界 sentBytes − buffered —— 已交到网络栈；再往后（手机内核、无线在途、
+         *                                CF 回源、PC 内核、uvicorn、写盘）本端全是盲区
+         * 取上界就会重演「手机→CF 快、CF→PC 慢时进度条瞬间满格」的假进度
+         * （`max()` 也只是取上界，同样不管它跑多远）。
+         * 所以取下界为基准，只允许领先至多一块——既不说谎，又能吃掉一块的在途
+         * 与 ack 回程延迟，避免 ack 未到时长时间停顿。
+         */
         _progressTick() {
             const sock = this.ws && this.ws.ws;
             const buffered = (sock && typeof sock.bufferedAmount === 'number')
                 ? sock.bufferedAmount : 0;
-            this._updateProgress(Math.max(0, this._sentBytes - buffered));
+            const backlog = Math.max(0, this._sentBytes - buffered - this._ackedBytes);
+            this._updateProgress(this._ackedBytes + Math.min(backlog, this._chunkSize));
         }
 
-        /** 发送缓冲背压：积压超 HIGH_WATER 就等它降到 LOW_WATER，避免整文件堆进浏览器缓冲 */
+        /** 兜底背压（主线是 _waitChunkAck 的停等）：积压超 HIGH_WATER 就等它降到 LOW_WATER */
         _waitDrain() {
             const sock = this.ws && this.ws.ws;
             if (!sock) return Promise.resolve();
@@ -4164,7 +4252,7 @@
             return new Promise((resolve) => {
                 const tick = () => {
                     // bufferedAmount 缺失（非标准实现/mock）时按 0 处理，避免永远等下去
-                    this._progressTick();   // 大块发送期间持续刷新，进度随网络平滑爬升
+                    this._progressTick();   // 背压等待期间持续按 ack 刷新进度
                     if (this._cancelRequested || sock.readyState !== WebSocket.OPEN ||
                         buffered() <= FilePanel.LOW_WATER) {
                         resolve();
@@ -4176,69 +4264,206 @@
             });
         }
 
-        /** 等 PC 端对 end 的确认（ack=成功 / error=失败），超时按成功处理 */
-        _waitEndAck() {
+        /**
+         * 停等闸门：等「第 k 块已被 ack」，k < 0 或已达标记立即放行。
+         *
+         * **为什么必须有它**：`_waitDrain` 只看 `bufferedAmount`，而它只覆盖「浏览器 → 网络栈」
+         * 这一段。数据一旦离开浏览器，手机内核 socket 缓冲、无线在途、CF 回源、PC 内核、
+         * uvicorn、写盘全是本端盲区 —— 于是浏览器侧可以一路「发得出去」而链路早已积压，
+         * 表现为 `bufferedAmount ≈ 0` 却传得极慢、且取消后很久才停。等对端 ack 才是真正
+         * **端到端**的节流：在途量被钉死在 MAX_INFLIGHT 块以内（=1 时即「收到上一块的 ack
+         * 才允许发下一帧」）。副作用是取消延迟从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」。
+         *
+         * **代价**：吞吐上限 ≈ MAX_INFLIGHT × 块大小 ÷ RTT。局域网几乎无感（1MB ÷ 5ms），
+         * Cloudflare 上 256KB ÷ 120ms ≈ 2MB/s —— 想要更快就调大 MAX_INFLIGHT（那仍是
+         * 「在途 ≤ N 块」的滑动窗口，不是退回无节制流水线）。
+         *
+         * 返回 true（已放行，含超时降级）/ false（已取消或断连，交给收尾路径）。
+         * 超时**只降级一次**：ack 通道若失灵，整体退回流水线，而不是把传输拖成「1 块 / 超时」。
+         */
+        _waitChunkAck(k) {
+            if (k < 0 || this._gateGaveUp || this._ackedChunkN >= k) return Promise.resolve(true);
             return new Promise((resolve) => {
-                this._endAckResolver = resolve;
-                this._endTimer = setTimeout(() => this._resolveEnd(true), FilePanel.END_ACK_TIMEOUT);
+                const started = performance.now();
+                const tick = () => {
+                    this._progressTick();       // 等 ack 期间进度条照常刷新，不至于看着像卡死
+                    if (this._cancelRequested || !this.ws.getConnected()) { resolve(false); return; }
+                    if (this._ackedChunkN >= k) { resolve(true); return; }
+                    if (performance.now() - started >= FilePanel.CHUNK_ACK_TIMEOUT) {
+                        console.warn('[FILE] 等块 ack 超时，停等降级为流水线（ack 通道疑似失灵）');
+                        this._gateGaveUp = true;
+                        resolve(true);
+                        return;
+                    }
+                    setTimeout(tick, 20);
+                };
+                setTimeout(tick, 20);
             });
         }
 
-        _resolveEnd(ok) {
+        /**
+         * 等 PC 端对 end 的确认。出口只有三个，**永远不会把「没等到」当成成功**：
+         *   true      —— 收到 ack(a:"end")：PC 已落盘改名，板上钉钉
+         *   false     —— 收到 error 帧，或等待期间连接断开（ACK 不会再来了）
+         *   'unknown' —— 保险超时：连接还在，但 PC 一直没表态，如实报「未确认」
+         *
+         * 等待期间不判「卡死」：逐块 ack 还在持续刷新进度条，用户看得见它在动。
+         * 保险超时只用来兜「PC 压根不回」这种异常——正常落盘远快于它。
+         */
+        _waitEndAck() {
+            return new Promise((resolve) => {
+                this._endAckResolver = resolve;
+                // 连接断开即失败：ACK 不会再来，早报比让用户干等好
+                this._endPollTimer = setInterval(() => {
+                    if (!this.ws.getConnected()) this._resolveEnd(false);
+                }, 250);
+                this._endTimer = setTimeout(
+                    () => this._resolveEnd('unknown'), FilePanel.END_ACK_TIMEOUT);
+            });
+        }
+
+        _resolveEnd(result) {
             const r = this._endAckResolver;
             this._endAckResolver = null;
             if (this._endTimer) { clearTimeout(this._endTimer); this._endTimer = null; }
-            if (r) r(ok);
+            if (this._endPollTimer) { clearInterval(this._endPollTimer); this._endPollTimer = null; }
+            if (r) r(result);
         }
 
         _setLock(locked) {
             if (this.setTransferLock) this.setTransferLock(locked);
         }
 
+        /**
+         * 用户点「取消」。**界面不立刻解锁**——等服务端回执（见 _awaitCancelAck）
+         * 才恢复可用：本地停发只说明「我不再发了」，服务端那边可能还在收队列里
+         * 的残留块、还在写 .part，此时解锁会让用户以为已经干净了。
+         */
         _cancel() {
-            if (this._state !== 'sending') return;
-            this._cancelRequested = true;
+            if (this._state !== 'sending' || this._cancelPending) return;
+            this._cancelRequested = true;     // 立刻停发：发送循环与各处等待都据此退出
+            this._cancelPending = true;
+            this._cancelAcked = false;
+            this._helloWait = null;
+            this._helloOk = false;
             const kind = this._kind;
-            this.onCommand({ type: kind, a: 'cancel', id: this._id });   // file 删 .part、photo 丢 buffer（§9）
+            const id = this._id;
             const file = this._file;
-            this._resolveEnd(false);
-            this._resetUI();
-            this._state = 'idle';
-            this._setLock(false);
-            // 灰色气泡入聊天记录：file 可点重发；photo 纯结果展示不可重发
-            const ref = kind === 'file' ? file : null;
-            this.chat.addFileMessage(t(this._bubbleKey('canceled'), { name: file.name }), 'cancel', ref, kind);
+
+            this.onCommand({ type: kind, a: 'cancel', id });   // file 删 .part、photo 丢 buffer（§9）
+            this._resolveEnd(false);   // 唤醒可能卡在 end ack 的 _start
+            this._file = null;         // 摘掉：_start 的 _finish 见 file 为空则直接退出，不重复收尾
+            this._state = 'canceling';
+            this._renderCancelPending();
+
+            this._awaitCancelAck().then(() => {
+                this._cancelPending = false;
+                this._resetUI();
+                this._state = 'idle';
+                this._setLock(false);   // 到这里界面才恢复可用
+                // 灰色气泡入聊天记录：file 可点重发；photo 纯结果展示不可重发
+                const ref = kind === 'file' ? file : null;
+                this.chat.addFileMessage(t(this._bubbleKey('canceled'), { name: file.name }), 'cancel', ref, kind);
+            });
         }
 
-        _finish(success) {
+        /**
+         * 等「取消已生效」的确认。三级，逐级放宽，但**一定有终点**：
+         *
+         *   ① `ack(a:"cancel")` —— 服务端已丢弃会话，板上钉钉；
+         *   ② `hello` 回执      —— ①超时后改发一帧 `hello`；回执能回来就说明排在它
+         *                          之前的 `cancel` 帧已被服务端从 socket 读出（同一条
+         *                          可靠有序通道，服务端按收帧顺序处理），据此判定取消
+         *                          已送达。回执带回探活号，迟到的旧回执不会被误认；
+         *   ③ 硬超时 / 断连      —— 不能再干等：放行界面。此时连接若已断，服务端侧的
+         *                          会话也会随连接一起清掉（`abort_all`）。
+         *
+         * 三种出口都会放行界面且有日志，不会把用户永久锁在「正在取消」里。
+         */
+        _awaitCancelAck() {
+            return new Promise((resolve) => {
+                const started = performance.now();
+                let helloSentAt = 0;
+                const tick = () => {
+                    if (this._cancelAcked) { resolve('ack'); return; }
+                    if (this._helloOk) { resolve('hello'); return; }
+                    if (!this.ws.getConnected()) { resolve('offline'); return; }
+                    const elapsed = performance.now() - started;
+                    if (!helloSentAt && elapsed >= FilePanel.CANCEL_ACK_TIMEOUT) {
+                        helloSentAt = elapsed;
+                        this._helloSeq += 1;
+                        this._helloWait = this._helloSeq;
+                        this.onCommand({ type: 'hello', t: this._helloSeq });
+                        console.warn('[FILE] cancel 回执超时，发 hello 探活 t=' + this._helloSeq);
+                    } else if (helloSentAt && elapsed - helloSentAt >= FilePanel.HELLO_TIMEOUT) {
+                        console.warn('[FILE] hello 探活也超时，取消按本地判定收尾');
+                        resolve('timeout');
+                        return;
+                    }
+                    setTimeout(tick, 50);
+                };
+                setTimeout(tick, 50);
+            });
+        }
+
+        /** 取消在飞时的进度区：文案切「正在取消…」，取消按钮置灰防重复点 */
+        _renderCancelPending() {
+            this.cancelBtn.disabled = true;
+            this.fillEl.style.width = this._shownPct + '%';
+            this.pctEl.textContent = this._shownPct + '% · ' + t('panel_file_canceling');
+        }
+
+        /**
+         * 收尾并写入结果气泡。
+         *
+         * result：true = PC 已确认落盘；false = 明确失败（error 帧 / 断连 / 发送中断）；
+         *         'unknown' = 保险超时，PC 一直没表态（既不谎报成功，也不谎报失败）。
+         */
+        _finish(result) {
             const file = this._file;
+            // 已被 _cancel 接管（它摘掉 _file 并负责解锁与气泡）：这里直接退出，
+            // 否则会把界面提前解锁，取消回执的等待就失去意义
+            if (!file) return;
             const kind = this._kind;
             this._resetUI();
             this._state = 'idle';
             this._setLock(false);
-            if (!file) return;
-            if (success) {
+            if (result === true) {
                 // 完成：file 深绿、photo 也用深绿，靠文案/图标（📄/🖼️）区分
                 this.chat.addFileMessage(t(this._bubbleKey('done'), { name: file.name }), 'done', null, kind);
-            } else {
-                // 失败：file 可点重发；photo 纯结果展示
-                const ref = kind === 'file' ? file : null;
-                this.chat.addFileMessage(t(this._bubbleKey('failed'), { name: file.name }), 'cancel', ref, kind);
+                return;
             }
+            // 失败与「未确认」共用灰色气泡样式；file 可点重发（核对后没到就重发），photo 纯结果展示
+            const ref = kind === 'file' ? file : null;
+            const key = result === 'unknown' ? 'unknown' : 'failed';
+            this.chat.addFileMessage(t(this._bubbleKey(key), { name: file.name }), 'cancel', ref, kind);
         }
 
         _resetUI() {
             this.progressBox.hidden = true;
             this.pickRow.style.display = '';
+            this.cancelBtn.disabled = false;   // 取消在飞时会置灰，收尾必须复原
             this._file = null;
+            this._awaitingAck = false;
+        }
+
+        /** 只重绘进度（百分比取自 _shownPct），文案随「是否在等 end ack」切换 */
+        _renderPct() {
+            this.fillEl.style.width = this._shownPct + '%';
+            this.pctEl.textContent = this._awaitingAck
+                ? this._shownPct + '% · ' + t('panel_file_finalizing')
+                : this._shownPct + '%';
         }
 
         _updateProgress(received) {
             const file = this._file;
             if (!file || !file.size) return;
-            const pct = Math.min(100, Math.round((received / file.size) * 100));
-            this.fillEl.style.width = pct + '%';
-            this.pctEl.textContent = pct + '%';
+            let pct = Math.round((Math.min(Math.max(0, received), file.size) / file.size) * 100);
+            // 100% 只由 end ack 解锁（见 ws.on('ack')）：数据「已发出」不等于「PC 已落盘」，
+            // 提前满格正是「手机说成功、PC 还在写」的观感来源
+            if (pct >= 100 && !this._endConfirmed) pct = 99;
+            this._shownPct = Math.max(this._shownPct, pct);   // 单调不减：背压会让本地估算回落
+            this._renderPct();
         }
     }
 
@@ -4319,7 +4544,7 @@
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.debug(t('log_config_updated') + data.mobile_max_records);
             }
-            // 服务端单帧上限 → 决定文件分块大小（未下发则走 CHUNK_FALLBACK 保守值）
+            // 服务端单帧上限 → 收紧文件分块（未下发时用 CHUNK_MAX，随链路取值）
             if (data.max_frame_size !== undefined) FilePanel.setServerMaxFrame(data.max_frame_size);
         });
         wsClient.on('send', (data) => console.debug("[WS] 收到 send 回声:", data));

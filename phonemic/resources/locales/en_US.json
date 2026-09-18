@@ -150,7 +150,8 @@
     "panel_btn_wheel_down": "Wheel↓",
     "panel_file_image": "Image",
     "panel_file_image_hint": "Copy to PC clipboard",
-    "panel_file_finalizing": "Finalizing…",
+    "panel_file_finalizing": "Waiting for PC…",
+    "panel_file_canceling": "Canceling…",
 
     "panel_file_doc": "File",
     "panel_file_doc_hint": "Docs & images, saved to PC",
@@ -161,9 +162,11 @@
     "bubble_file_done": "📄 Sent {name}",
     "bubble_file_canceled": "📄 Canceled {name} (tap to resend)",
     "bubble_file_failed": "📄 Failed to send {name} (tap to resend)",
+    "bubble_file_unknown": "📄 {name} not confirmed by PC (tap to resend)",
     "bubble_photo_done": "🖼️ {name} copied to PC clipboard",
     "bubble_photo_canceled": "🖼️ Copying {name} canceled",
     "bubble_photo_failed": "🖼️ Failed to copy {name}",
+    "bubble_photo_unknown": "🖼️ {name} not confirmed by PC",
 
     "input_placeholder_auto": "Recognition auto-send",
     "input_placeholder_manual": "Type and tap send",

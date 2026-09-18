@@ -95,9 +95,16 @@ class TestReceiverFlow:
         ack, err = rx.handle(_start(size=11))
         assert ack is None and err is None
 
-        # data 块不再逐块回 ack（协议 §9）：进度由发送端按已发字节本地推进
-        assert rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "}) == (None, None)
-        assert rx.handle({"a": "data", "id": 7, "n": 1, "chunk": b"world"}) == (None, None)
+        # data 块逐块回 ack（协议 §9）：语义是「这一块已写入 .part」，
+        # received 是累计值——手机端据此把进度条从「本地估算」升级为「PC 已收到」
+        ack, err = rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "})
+        assert err is None
+        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "data",
+                       "n": 0, "received": 6}
+        ack, err = rx.handle({"a": "data", "id": 7, "n": 1, "chunk": b"world"})
+        assert err is None
+        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "data",
+                       "n": 1, "received": 11}
 
         ack, err = rx.handle({"a": "end", "id": 7})
         assert err is None
@@ -144,16 +151,21 @@ class TestReceiverFlow:
         assert (tmp_path / "a.pdf.part").exists()
 
         ack, err = rx.handle({"a": "cancel", "id": 7})
-        assert ack is None and err is None
+        # 取消也有回执（协议 §9）：手机端拿到它才解锁界面
+        assert err is None
+        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "cancel"}
         assert not (tmp_path / "a.pdf.part").exists()
         assert not (tmp_path / "a.pdf").exists()
 
     def test_cancel_idempotent(self, tmp_path):
         rx = FileReceiver(dest_dir=tmp_path)
         rx.handle(_start())
-        rx.handle({"a": "cancel", "id": 7})
-        # 再 cancel / end 已无会话：幂等不报错
-        assert rx.handle({"a": "cancel", "id": 7}) == (None, None)
+        first, _ = rx.handle({"a": "cancel", "id": 7})
+        # 再 cancel 已无会话：幂等成功，**仍然回执**——回执语义是「取消已生效」，
+        # 不是「这个 id 我认得」，否则手机端在重复取消时会白等到超时。
+        second, err = rx.handle({"a": "cancel", "id": 7})
+        assert first == second == {"type": "ack", "ref": "file", "id": 7, "a": "cancel"}
+        assert err is None
         _, err = rx.handle({"a": "end", "id": 7})
         assert err is not None   # end 无会话算协议错误
 

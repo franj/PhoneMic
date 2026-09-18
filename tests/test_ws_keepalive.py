@@ -190,6 +190,25 @@ def test_pong_whitelisted_but_unknown_type_still_errors():
     assert frame_decode(ws.frames[0])["code"] == "malformed"
 
 
+def test_hello_whitelisted_and_echoes_token():
+    """hello 认下并原样回显探活号（协议 §9）；未知类型仍回 malformed。
+
+    手机端「取消」的回执超时后靠这帧探活兜底：回执回来了，才说明排在它
+    之前的 cancel 帧已被服务端读出。回显 t 让迟到的旧回执不会满足下一次等待。
+    """
+
+    async def main():
+        ws = _FakeWS()
+        ok = await api._handle_client_message(
+            ws, _FakeSession({"type": "hello", "t": 42}), b"x")
+        return ws, ok
+
+    ws, ok = _run(main())
+    assert ok is True
+    assert ws.types() == ["hello"], "hello 必须回一帧，且只有这一帧"
+    assert frame_decode(ws.frames[0])["t"] == 42, "探活号必须原样回显"
+
+
 # ---------- 阈值约束（防回归） ----------
 
 def test_keepalive_thresholds_stay_within_cloudflare_idle_timeout():

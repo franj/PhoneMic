@@ -151,7 +151,8 @@
     "panel_btn_wheel_down": "滾↓",
     "panel_file_image": "圖片",
     "panel_file_image_hint": "複製到電腦剪貼簿",
-    "panel_file_finalizing": "處理中…",
+    "panel_file_finalizing": "等待電腦確認…",
+    "panel_file_canceling": "正在取消…",
 
     "panel_file_doc": "檔案",
     "panel_file_doc_hint": "文件/圖片，儲存到電腦",
@@ -162,9 +163,11 @@
     "bubble_file_done": "📄 已傳送 {name}",
     "bubble_file_canceled": "📄 已取消傳送 {name}（點擊重發）",
     "bubble_file_failed": "📄 {name} 傳送失敗（點擊重發）",
+    "bubble_file_unknown": "📄 {name} 電腦未確認（點擊重發）",
     "bubble_photo_done": "🖼️ {name} 已複製到電腦剪貼簿",
     "bubble_photo_canceled": "🖼️ 已取消複製 {name}",
     "bubble_photo_failed": "🖼️ {name} 複製失敗",
+    "bubble_photo_unknown": "🖼️ {name} 電腦未確認是否已複製到剪貼簿",
 
     "input_placeholder_auto": "語音識別後自動傳送...",
     "input_placeholder_manual": "輸入後點擊傳送",

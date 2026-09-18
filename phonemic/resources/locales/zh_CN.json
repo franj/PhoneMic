@@ -151,7 +151,8 @@
     "panel_btn_wheel_down": "滚↓",
     "panel_file_image": "图片",
     "panel_file_image_hint": "复制到电脑剪贴板",
-    "panel_file_finalizing": "处理中…",
+    "panel_file_finalizing": "等待电脑确认…",
+    "panel_file_canceling": "正在取消…",
 
     "panel_file_doc": "文件",
     "panel_file_doc_hint": "文档/图片，保存到电脑",
@@ -162,9 +163,11 @@
     "bubble_file_done": "📄 已发送 {name}",
     "bubble_file_canceled": "📄 已取消发送 {name}（点击重发）",
     "bubble_file_failed": "📄 {name} 发送失败（点击重发）",
+    "bubble_file_unknown": "📄 {name} 电脑未确认（点击重发）",
     "bubble_photo_done": "🖼️ {name} 已复制到电脑剪贴板",
     "bubble_photo_canceled": "🖼️ 已取消复制 {name}",
     "bubble_photo_failed": "🖼️ {name} 复制失败",
+    "bubble_photo_unknown": "🖼️ {name} 电脑未确认是否已复制到剪贴板",
 
     "input_placeholder_auto": "语音识别后自动发送...",
     "input_placeholder_manual": "输入后点击发送",

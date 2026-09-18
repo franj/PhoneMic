@@ -212,6 +212,9 @@ def test_cancel_discards_late_chunks(tmp_path):
         assert not [f for f in rec.frames if f.get("code") == "malformed"], \
             "已取消会话的晚到块应被静默丢弃"
         assert not fr._sessions, "cancel 后会话必须已作废"
+        # 取消也要回执（协议 §9）：消费者把 ack 回给连接，手机端据此解锁界面
+        assert {"type": "ack", "ref": "file", "id": 3, "a": "cancel"} in rec.frames, \
+            "cancel 应由后台消费者回一帧 ack(a:'cancel')"
 
     _run(main())
 

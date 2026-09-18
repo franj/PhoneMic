@@ -12,7 +12,7 @@ FileReceiver（状态机）。非法帧只记日志并返回错误信息，不�
 
 帧示例（手机端原样发出）：
     {"type":"file", "a":"start",  "id":7, "name":"a.pdf", "size":1048576, "chunks":16}
-    {"type":"file", "a":"data",   "id":7, "n":0, "chunk":<bin 1MB>}
+    {"type":"file", "a":"data",   "id":7, "n":0, "chunk":<bin chunkSize>}
     {"type":"file", "a":"end",    "id":7}
     {"type":"file", "a":"cancel", "id":7}
 """
@@ -117,8 +117,9 @@ class FileReceiver:
         """处理一条 file 帧。
 
         Returns:
-            (ack帧, None)      —— end 落盘成功，ack(a:"end") 由 api.py 下发给手机端
-            (None, None)       —— start/data/cancel 正常处理，无需回帧
+            (ack帧, None)      —— data 写入 .part 成功（a:"data"）/ end 落盘成功（a:"end"）/
+                                  cancel 已生效（a:"cancel"），都由 api.py 下发给手机端
+            (None, None)       —— start 正常处理，无需回帧
             (None, 错误信息)    —— 非法/协议错误/没收齐，调用方回 error(malformed)
         """
         ok, err = validate_file_action(frame)
@@ -189,9 +190,19 @@ class FileReceiver:
         chunk = frame['chunk']
         sess['fh'].write(chunk)
         sess['received'] += len(chunk)
-        # 不再逐块回 ack（协议 §9）：进度由发送端按已发字节本地推进，
-        # 只在 end 落盘成功后回一次 ack，省掉每块的回程帧与手机端 DOM 抖动。
-        return None, None
+        # 逐块回 ack（协议 §9）：语义是「这一块已写入 .part」。
+        # 它补的正是发送端看不见的那一段——手机端的 bufferedAmount 只覆盖
+        # 「浏览器 → 网络栈」，再往后（手机内核、无线在途、CF、PC、写盘）全是盲区。
+        # 手机端据此把进度条从「本地估算」升级为「PC 已收到」，并且只有 end
+        # 的 ack 才能把进度解锁到 100%。
+        return {
+            'type': 'ack',
+            'ref': 'file',
+            'id': fid,
+            'a': 'data',
+            'n': frame['n'],
+            'received': sess['received'],
+        }, None
 
     def _on_end(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
@@ -239,13 +250,15 @@ class FileReceiver:
 
     def _on_cancel(self, frame: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         fid = frame['id']
-        if fid not in self._sessions:
-            # 会话已结束/未开始：cancel 幂等成功，不回帧不报错
-            logger.info(f"cancel 无匹配会话: id={fid}，忽略")
-            return None, None
-        self._discard(fid)
-        logger.info(f"文件传输已取消: id={fid}")
-        return None, None
+        if fid in self._sessions:
+            self._discard(fid)
+            logger.info(f"文件传输已取消: id={fid}")
+        else:
+            # 会话已结束/未开始：cancel 幂等成功。仍回执——调用方要的是
+            # 「取消已生效」的确认，而不是「这个 id 我认得」。
+            logger.info(f"cancel 无匹配会话: id={fid}，幂等回执")
+        # 取消也有回执（协议 §9）：手机端收到它才解锁界面；收不到则靠 hello 探活兜底
+        return {'type': 'ack', 'ref': 'file', 'id': fid, 'a': 'cancel'}, None
 
     def _discard(self, fid: int) -> None:
         """关闭句柄、删临时文件、丢弃会话。cancel 与异常清理共用。"""

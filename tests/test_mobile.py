@@ -33,6 +33,37 @@ window.__mockWS = {
     sentMessages: [],
     current: null,
     instances: [],
+    // 模拟「一个正常工作的 PC」：收到 data 块异步回逐块 ack、收到 cancel 回取消回执、
+    // 收到 hello 回显探活号。默认关闭——需要走到 end 的用例显式 autoAck(true)
+    //（停等生效后没有 ack 就发不出第 2 块；取消生效后没有回执就解锁不了界面）。
+    autoAckFn: null,
+    received: {},
+
+    autoAck: function(on) {
+        this.autoAckFn = on ? function(msg) {
+            var mock = window.__mockWS;
+            if (msg.type === 'hello') {          // 探活回执：原样回显 t
+                setTimeout(function() {
+                    mock.triggerMessage({ type: 'hello', t: msg.t });
+                }, 0);
+                return;
+            }
+            if (msg.a === 'cancel') {            // 取消回执（协议 §9）
+                setTimeout(function() {
+                    mock.triggerMessage(
+                        { type: 'ack', ref: msg.type, id: msg.id, a: 'cancel' });
+                }, 0);
+                return;
+            }
+            var key = msg.type + ':' + msg.id;
+            var recv = (mock.received[key] || 0) + msg.chunk.length;
+            mock.received[key] = recv;
+            setTimeout(function() {
+                mock.triggerMessage(
+                    { type: 'ack', ref: msg.type, id: msg.id, a: 'data', n: msg.n, received: recv });
+            }, 0);
+        } : null;
+    },
 
     triggerMessage: function(data) {
         if (this.current && this.current.onmessage) {
@@ -68,10 +99,15 @@ window.WebSocket = function(url) {
 
     this.send = function(data) {
         if (this.readyState !== 1) return false;
+        var msg = null;
         try {
-            var msg = MessagePack.decode(data);
+            msg = MessagePack.decode(data);
             window.__mockWS.sentMessages.push(msg);
         } catch(e) { window.__mockWS.sentMessages.push({ raw: 'undecodable' }); }
+        if (msg && window.__mockWS.autoAckFn &&
+            (msg.a === 'data' || msg.a === 'cancel' || msg.type === 'hello')) {
+            window.__mockWS.autoAckFn(msg);
+        }
         return true;
     };
 
@@ -99,8 +135,13 @@ window.WebSocket.CLOSED = 3;
 """
 
 
-@pytest.fixture
-def mobile_page(page):
+def _build_mobile_html() -> str:
+    """组装可离线运行的 mobile.html：内联依赖脚本 + 注入 mock WS / i18n。
+
+    返回 HTML 文本，由 fixture 用 ``page.set_content`` 装载——``set_content``
+    不做真实导航，页面 hostname 因此保持为调用方预先设定的值（见
+    ``cloudflare_page``）。
+    """
     html = MOBILE_HTML_PATH.read_text(encoding="utf-8")
     # 内联外部脚本（set_content 无法加载 <script src> 相对路径）
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
@@ -138,17 +179,48 @@ def mobile_page(page):
         "</script>"
     )
     html = html.replace("</body>", patch + "</body>", 1)
-    page.set_content(html)
+    return html
+
+
+def _boot_mobile(page) -> None:
+    """装载页面并等 mock WS 连上（none+LAN 模式，无需 auth）。"""
+    page.set_content(_build_mobile_html())
     page.wait_for_function(
         "() => window.__mockWS && window.__mockWS.current && window.__mockWS.current.readyState === 1"
     )
-    # none+LAN 模式：无需 auth，等待连接建立
     page.wait_for_function(
         "() => window.__wsClient && window.__wsClient.isConnected"
     )
     page.wait_for_timeout(50)
     # 模拟服务端发送 config 消息
     page.evaluate("() => window.__mockWS.triggerMessage({type: 'config', mobile_max_records: 5})")
+
+
+@pytest.fixture
+def mobile_page(page):
+    _boot_mobile(page)
+    yield page
+
+
+@pytest.fixture
+def cloudflare_page(page):
+    """在 *.trycloudflare.com 下装载同一份 mobile.html，用于验证「按链路取分块上限」。
+
+    真实隧道无法在测试里复现，这里只做路由拦截伪造域名、不真出网。
+    ``set_content`` 不改变页面 URL，所以 hostname 会一直保持为伪造域名。
+    """
+    page.context.route(
+        "https://phonemic-test.trycloudflare.com/**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<!doctype html><html><head></head><body></body></html>",
+        ),
+    )
+    page.goto("https://phonemic-test.trycloudflare.com/")
+    host = page.evaluate("() => location.hostname")
+    assert host == "phonemic-test.trycloudflare.com", f"路由拦截未生效：hostname={host!r}"
+    _boot_mobile(page)
     yield page
 
 
@@ -350,15 +422,23 @@ def test_transfer_lock_freezes_other_panels(mobile_page):
     assert page.evaluate("document.querySelectorAll('#panel-tabs .tab:disabled').length") == 0
 
 
-def test_transfer_chunk_size_is_dynamic(mobile_page):
-    """分块按体积自适应（协议 §9）：3MB 文件 → 12 块 × 256KB，块数收敛到 ~12。"""
+def test_transfer_chunk_size_follows_file_size(mobile_page):
+    """分块按体积自适应（协议 §9）：3MB → 12 块 × 256KB。
+
+    夹具页面跑在 localhost ⇒ 局域网档，上限 CHUNK_MAX_LAN = 1MB。
+    这里在 onCommand 里同步回 ack —— 停等生效后，没有 ack 就发不出第 2 块。
+    """
     page = mobile_page
     seq = page.evaluate(
         "async () => {"
         "  const panel = window._filePanel;"
         "  const saved = [];"
         "  const orig = panel.onCommand;"
+        "  let recv = 0;"
         "  panel.onCommand = (f) => { saved.push(f.a + ':' + (f.chunk ? f.chunk.length : 0));"
+        "                             if (f.a === 'data') { recv += f.chunk.length;"
+        "                               window.__mockWS.triggerMessage({ type: 'ack', ref: 'file',"
+        "                                 id: f.id, a: 'data', n: f.n, received: recv }); }"
         "                             return true; };"
         "  panel._waitEndAck = () => Promise.resolve(true);"
         "  const fake = { name: 'big.bin', size: 3 * 1024 * 1024,"
@@ -369,37 +449,80 @@ def test_transfer_chunk_size_is_dynamic(mobile_page):
         "}"
     )
     assert seq.startswith("start:0"), seq
-    # 3MB / 12 = 256KB，对齐到 256KB 粒度 → 12 块
     assert seq.count("data:262144") == 12, seq
     assert seq.endswith("end:0"), seq
 
 
-def test_pick_chunk_size_matrix(mobile_page):
-    """pickChunkSize：块数收敛 ~12，受服务端下发上限与手机端 15MB 自身上限双重夹逼。"""
+def test_pick_chunk_size_converges_to_12_chunks_within_bounds(mobile_page):
+    """pickChunkSize：块数收敛 ~12、对齐 256KB，并夹在 [256KB, 1MB] 内。"""
     page = mobile_page
     r = page.evaluate(
         "() => {"
         "  const F = window._filePanel.constructor;"
+        "  const MB = 1024 * 1024;"
         "  const out = {};"
         "  F.setServerMaxFrame(16 * 1024 * 1024);"
-        "  out.s30 = F.pickChunkSize(30 * 1024 * 1024);"
-        "  out.s100 = F.pickChunkSize(100 * 1024 * 1024);"
-        "  out.s500 = F.pickChunkSize(500 * 1024 * 1024);"
-        "  out.tiny = F.pickChunkSize(100 * 1024);"
-        "  F.setServerMaxFrame(1 * 1024 * 1024);"
-        "  out.capped1m = F.pickChunkSize(500 * 1024 * 1024);"
+        "  out.s100k = F.pickChunkSize(100 * 1024);"
+        "  out.s2 = F.pickChunkSize(2 * MB);"
+        "  out.s3 = F.pickChunkSize(3 * MB);"
+        "  out.s3p = F.pickChunkSize(3 * MB + 1);"
+        "  out.s6 = F.pickChunkSize(6 * MB);"
+        "  out.s12 = F.pickChunkSize(12 * MB);"
+        "  out.s1g = F.pickChunkSize(1024 * MB);"
+        "  F.setServerMaxFrame(512 * 1024);"
+        "  out.capped = F.pickChunkSize(1024 * MB);"
         "  F.setServerMaxFrame(0);"
-        "  out.fallback = F.pickChunkSize(500 * 1024 * 1024);"
+        "  out.fallback = F.pickChunkSize(1024 * MB);"
         "  return out;"
         "}"
     )
+    KB = 1024
     MB = 1024 * 1024
-    assert r["s30"] == 2621440, r                    # 30MB/12 → 2.5MB，12 块
-    assert r["s100"] == 8912896, r                   # 8.5MB（向上取整到 256KB 倍数）
-    assert r["s500"] == 15 * MB, r                   # 撞手机端自身上限
-    assert r["tiny"] == 256 * 1024, r                # 小文件也不低于下限
-    assert r["capped1m"] == 1 * MB - 64 * 1024, r    # 服务端只给 1MB → 扣 64KB 边距
-    assert r["fallback"] == 4 * MB, r                # 未下发 → 保守默认 4MB
+    assert r["s100k"] == 256 * KB, r                # 小文件也不低于下限（1 块）
+    assert r["s2"] == 256 * KB, r                   # 2MB / 12 → 256KB（8 块）
+    assert r["s3"] == 256 * KB, r                   # 3MB / 12 正好 256KB（12 块）
+    assert r["s3p"] == 512 * KB, r                  # 刚过 3MB → 对齐到 512KB（7 块）
+    assert r["s6"] == 512 * KB, r                   # 6MB / 12 → 512KB（12 块）
+    assert r["s12"] == MB, r                        # 12MB / 12 → 1MB（12 块）
+    assert r["s1g"] == MB, r                        # 大文件撞 1MB 上限，不再放大
+    assert r["capped"] == 512 * KB - 64 * KB, r     # 服务端只给 512KB → 扣 64KB 边距
+    assert r["fallback"] == MB, r                   # 未下发 → 上限 1MB
+
+
+class TestLinkAwareChunkCap:
+    """分块上限按链路取值（协议 §9）：*.trycloudflare.com 一档，其余一律一档。
+
+    判定只看 hostname——非 trycloudflare 一律按局域网处理（含局域网 IP、localhost、
+    以及将来可能出现的自定义域名反代）。两个档位各自独立成常量，调大小只改一行。
+    """
+
+    def test_lan_page_uses_lan_cap(self, mobile_page):
+        r = mobile_page.evaluate(
+            "() => { const F = window._filePanel.constructor;"
+            "        return {host: location.hostname, cf: F.isCloudflare, max: F.CHUNK_MAX,"
+            "                lan: F.CHUNK_MAX_LAN, cfMax: F.CHUNK_MAX_CF}; }"
+        )
+        assert r["cf"] is False, r
+        assert r["max"] == r["lan"] == 1024 * 1024, r
+
+    def test_cloudflare_page_uses_cf_cap(self, cloudflare_page):
+        r = cloudflare_page.evaluate(
+            "() => { const F = window._filePanel.constructor;"
+            "        return {host: location.hostname, cf: F.isCloudflare, max: F.CHUNK_MAX,"
+            "                lan: F.CHUNK_MAX_LAN, cfMax: F.CHUNK_MAX_CF}; }"
+        )
+        assert r["cf"] is True, r
+        assert r["max"] == r["cfMax"] == 256 * 1024, r
+
+    def test_cloudflare_chunk_size_is_always_256kb(self, cloudflare_page):
+        """CF 档 min == max == 256KB，clamp 恒取 256KB，与文件大小及服务端下发值无关。"""
+        r = cloudflare_page.evaluate(
+            "() => { const F = window._filePanel.constructor; const MB = 1024 * 1024;"
+            "        F.setServerMaxFrame(16 * 1024 * 1024);"
+            "        return {tiny: F.pickChunkSize(1024), small: F.pickChunkSize(512 * 1024),"
+            "                mid: F.pickChunkSize(10 * MB), big: F.pickChunkSize(500 * MB)}; }"
+        )
+        assert set(r.values()) == {256 * 1024}, r
 
 
 def test_config_message_sets_max_frame_size(mobile_page):
@@ -419,6 +542,360 @@ def test_config_message_sets_max_frame_size(mobile_page):
     page.evaluate("() => window.__mockWS.triggerMessage({type:'config', max_frame_size: 'abc'})")
     page.wait_for_timeout(100)
     assert page.evaluate("() => window._filePanel.constructor.serverMaxFrame") == 0
+
+
+class TestStopAndWait:
+    """停等闸门：没收到上一块的 ack 就不发下一帧（协议 §9）。
+
+    动机：`bufferedAmount` 只覆盖「浏览器 → 网络栈」，数据一旦离开浏览器（手机内核、
+    无线在途、CF 回源、PC 内核、写盘）全是本端盲区 ⇒ 浏览器侧能一路「发得出去」而链路
+    早已积压，表现为「bufferedAmount ≈ 0 却传得极慢、取消后很久才停」。等对端 ack 才是
+    真正端到端的节流：在途量被钉死在 MAX_INFLIGHT 块以内。
+    """
+
+    FAKE = ("{name: 'sw.bin', size: 3 * 1024 * 1024,"
+            " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
+    ID = 1                      # mobile_page 上首次传输的 id（_start 里自增得到）
+    CHUNK = 256 * 1024          # 3MB / 12 块
+
+    def _start_async(self, page):
+        page.evaluate(
+            "() => { window.__sendP = window._filePanel._start("
+            f"{self.FAKE}, 'file'); }}"
+        )
+
+    def _data_count(self, page):
+        return page.evaluate(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length")
+
+    def _ack(self, page, n):
+        """模拟 PC 对第 n 块的逐块 ack（累计 received 取前 n+1 块）。"""
+        page.evaluate(
+            "() => window.__mockWS.triggerMessage("
+            f"{{type:'ack', ref:'file', id:{self.ID}, a:'data', n:{n},"
+            f" received:{(n + 1) * self.CHUNK}}})"
+        )
+
+    def test_no_ack_no_next_chunk(self, mobile_page):
+        """核心断言：一个 ack 都不回时只发得出第 0 块（停在闸门上）。"""
+        page = mobile_page
+        self._start_async(page)
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+        page.wait_for_timeout(400)      # 若无停等，这段时间够把 12 块全推出去
+        assert self._data_count(page) == 1
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.some(m => m.a === 'end')") is False
+
+    def test_one_ack_releases_exactly_one_chunk(self, mobile_page):
+        """放行一块 ack 只多发一块 —— 严格「在途 ≤ 1 块」。"""
+        page = mobile_page
+        self._start_async(page)
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+
+        self._ack(page, 0)
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 2")
+        page.wait_for_timeout(200)      # 再等等：不该冒出第 3 块（第 1 块还没 ack）
+        assert self._data_count(page) == 2
+
+    def test_disconnect_while_waiting_for_chunk_ack_finishes(self, mobile_page):
+        """等块 ack 期间断连：ACK 不会再来，必须收尾，不能卡死在闸门上。"""
+        page = mobile_page
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")   # 掐掉重连
+        self._start_async(page)
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=3000)
+        assert self._data_count(page) == 1          # 没有继续把剩余块推出去
+        assert page.evaluate("() => window._filePanel._gateGaveUp") is False  # 是断连，不是超时降级
+
+    def test_ack_timeout_degrades_to_pipeline(self, mobile_page):
+        """ack 通道失灵（超时）→ 退回流水线，而不是把传输拖成「1 块 / 超时」。"""
+        page = mobile_page
+        page.evaluate(
+            "() => Object.defineProperty(window._filePanel.constructor,"
+            " 'CHUNK_ACK_TIMEOUT', { value: 200 })"
+        )
+        self._start_async(page)
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.some(m => m.a === 'end')")
+        assert self._data_count(page) == 12
+        assert page.evaluate("() => window._filePanel._gateGaveUp") is True
+
+
+class TestEndAck:
+    """「发送成功」必须由 PC 的 end ack 判定——等不到就如实报「未确认」，绝不猜成功。
+
+    这是「手机显示发送成功、PC 还要 30s+ 才打完『文件接收完成』」那个现象的根治点：
+    数据离开浏览器 ≠ PC 已落盘，所以进度条封顶 99%，气泡也只认 end ack。
+    """
+
+    FAKE = ("{name: 'x.bin', size: 3 * 1024 * 1024,"
+            " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
+
+    def _send_async(self, page, auto_ack=True):
+        """起一次发送但不 await：返回时数据已全部交出，正卡在等 end ack。
+
+        auto_ack=True 让 mock 对每个 data 块回逐块 ack —— 停等生效后，
+        没有 ack 就发不出第 2 块，也就永远走不到 end。
+        """
+        page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
+        page.evaluate(
+            "() => {"
+            "  const panel = window._filePanel;"
+            f"  window.__sendP = panel._start({self.FAKE}, 'file');"
+            "}"
+        )
+        page.wait_for_function("() => window.__mockWS.sentMessages.some(m => m.a === 'end')")
+
+    def _bubbles(self, page):
+        return page.evaluate(
+            "() => Array.from(document.querySelectorAll('.message')).map(m => m.textContent)")
+
+    def test_success_requires_end_ack(self, mobile_page):
+        page = mobile_page
+        self._send_async(page)
+
+        # 数据已全部交出、块 ack 也全部回来了（停等保证在途 ≤ 1 块），但 end ack 未到
+        # ⇒ 封顶 99% + 文案「等待电脑确认」，**绝不放行 100% 与成功气泡**。
+        assert page.evaluate("() => window._filePanel._shownPct") == 99
+        assert page.evaluate("() => window._filePanel._endConfirmed") is False
+        assert "等待电脑确认" in page.evaluate(
+            "() => document.querySelector('#view-file .fp-pct').textContent")
+
+        page.evaluate(
+            "() => window.__mockWS.triggerMessage("
+            "{type:'ack', ref:'file', id:1, a:'end', received: 3*1024*1024})")
+        page.wait_for_function("() => window._filePanel._state === 'idle'")
+
+        assert page.evaluate("() => window._filePanel._shownPct") == 100
+        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") in self._bubbles(page)
+
+    def test_local_estimate_cannot_outrun_ack_by_more_than_one_chunk(self, mobile_page):
+        """真机实测回归：10.1MB 的 jpg，手机已全部交出，PC 只 ack 了 2MB。
+
+        旧算法 `max(本地估算, ack)` 会让本地估算（≈100%）胜出 → 假 99%。
+        新算法 `ack + min(在途量, 1 块)` = 2MB + 1MB = 31%，与 PC 实际进度同量级。
+        """
+        page = mobile_page
+        page.evaluate(
+            "() => {"
+            "  const p = window._filePanel;"
+            "  const size = 10102935;"                     # 真机那份 MVIMG_*.jpg
+            "  p._file = { name: 'x.jpg', size };"
+            "  p._chunkSize = 1024 * 1024;"
+            "  p._sentBytes = size; p._ackedBytes = 2 * 1024 * 1024;"
+            "  p._shownPct = 0; p._endConfirmed = false;"
+            "  p._progressTick();"
+            "}"
+        )
+        assert page.evaluate("() => window._filePanel._shownPct") == 31
+
+    def test_progress_caps_at_99_until_end_ack(self, mobile_page):
+        """ack 推进到只剩尾巴时仍封顶 99%：100% 只由 end ack 解锁。"""
+        page = mobile_page
+        page.evaluate(
+            "() => {"
+            "  const p = window._filePanel;"
+            "  const size = 10102935;"
+            "  p._file = { name: 'x.jpg', size };"
+            "  p._chunkSize = 1024 * 1024;"
+            "  p._sentBytes = size; p._ackedBytes = 9 * 1024 * 1024;"
+            "  p._shownPct = 0; p._endConfirmed = false;"
+            "  p._progressTick();"
+            "}"
+        )
+        assert page.evaluate("() => window._filePanel._shownPct") == 99
+
+    def test_chunk_ack_moves_progress_without_end_ack(self, mobile_page):
+        """逐块 ack 让进度条反映「PC 已收到」——本地估算看不见那一段。"""
+        page = mobile_page
+        self._send_async(page)
+        page.evaluate(
+            "() => {"
+            "  const p = window._filePanel;"
+            "  p._sentBytes = 0; p._ackedBytes = 0; p._shownPct = 0;"
+            "  p._endConfirmed = false;"
+            "  p._chunkSize = 1024 * 1024;"          # 前瞻上限固定成 1 块，断言只看语义
+            "  window.__prog = [p._shownPct];"
+            "  p._progressTick();            window.__prog.push(p._shownPct);"   # 无任何信号 → 0
+            "  p._ackedBytes = 2 * 1024 * 1024; p._progressTick();"
+            "  window.__prog.push(p._shownPct);"                                 # PC 已收 2/3 → 67
+            "  p._sentBytes = 2 * 1024 * 1024 + 512 * 1024; p._progressTick();"
+            "  window.__prog.push(p._shownPct);"                                 # 在途 0.5MB → 前瞻 0.5MB → 83
+            "  p._sentBytes = 3 * 1024 * 1024; p._progressTick();"
+            "  window.__prog.push(p._shownPct);"                                 # 在途 1MB → 前瞻封顶 1 块 → 99
+            "  p._sentBytes = 0; p._ackedBytes = 0; p._progressTick();"
+            "  window.__prog.push(p._shownPct);"                                 # 信号消失 → 不倒退
+            "}"
+        )
+        assert page.evaluate("() => window.__prog") == [0, 0, 67, 83, 99, 99]
+
+    def test_end_ack_timeout_reports_unknown_not_success(self, mobile_page):
+        """保险超时只报「未确认」：既不谎报成功，也不谎报失败。"""
+        page = mobile_page
+        page.evaluate(
+            "() => Object.defineProperty(window._filePanel.constructor,"
+            " 'END_ACK_TIMEOUT', { value: 200 })"
+        )
+        self._send_async(page)
+        page.wait_for_function("() => window._filePanel._state === 'idle'")
+
+        bubbles = self._bubbles(page)
+        assert MOBILE_I18N["bubble_file_unknown"].replace("{name}", "x.bin") in bubbles
+        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") not in bubbles
+
+    def test_disconnect_while_awaiting_ack_reports_failure(self, mobile_page):
+        """等 ack 期间连接断了：ACK 不会再来，立刻报失败，不让用户干等。"""
+        page = mobile_page
+        self._send_async(page)
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")   # 掐掉重连
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+
+        bubbles = self._bubbles(page)
+        assert MOBILE_I18N["bubble_file_failed"].replace("{name}", "x.bin") in bubbles
+        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") not in bubbles
+
+
+class TestCancelAck:
+    """取消也有回执：收到服务端 `ack(a:"cancel")` 才解锁界面（协议 §9）。
+
+    动机：本地停发只说明「我不再发了」，服务端那边可能还在收队列里的残留块、
+    还在写 `.part`；此前手机上一点取消就立刻解锁并弹「已取消」，与服务端的真实
+    状态无关。回执超时后退一步发 `hello` 探活——同一有序通道，回执能回来就说明
+    排在它前面的 `cancel` 帧已被服务端读出。两条路都超时就地放行，绝不干等。
+    """
+
+    FAKE = ("{name: 'cx.bin', size: 3 * 1024 * 1024,"
+            " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
+    ID = 1                      # mobile_page 上首次传输的 id（_start 里自增得到）
+    CANCELED = MOBILE_I18N["bubble_file_canceled"].replace("{name}", "cx.bin")
+
+    def _start_async(self, page, auto_ack, until="data"):
+        """起一次发送。until="data" 停在「第 0 块已发出、闸门未放行」处；
+        until="end" 一路发到 end（需 auto_ack=True，否则停等发不出第 2 块）。"""
+        page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
+        page.evaluate(
+            "() => { window.__sendP = window._filePanel._start("
+            f"{self.FAKE}, 'file'); }}"
+        )
+        if until == "end":
+            page.wait_for_function(
+                "() => window.__mockWS.sentMessages.some(m => m.a === 'end')")
+        else:
+            page.wait_for_function(
+                "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+
+    def _short_timeouts(self, page, cancel_ms, hello_ms):
+        page.evaluate(
+            "() => {"
+            "  const C = window._filePanel.constructor;"
+            f"  Object.defineProperty(C, 'CANCEL_ACK_TIMEOUT', {{ value: {cancel_ms} }});"
+            f"  Object.defineProperty(C, 'HELLO_TIMEOUT', {{ value: {hello_ms} }});"
+            "}"
+        )
+
+    def _locked(self, page):
+        return page.evaluate(
+            "() => document.body.classList.contains('file-transferring')")
+
+    def _sent(self, page):
+        return page.evaluate("() => window.__mockWS.sentMessages")
+
+    def _bubbles(self, page):
+        return page.evaluate(
+            "() => Array.from(document.querySelectorAll('.message')).map(m => m.textContent)")
+
+    def _cancel_ack(self, page):
+        page.evaluate(
+            "() => window.__mockWS.triggerMessage("
+            f"{{type:'ack', ref:'file', id:{self.ID}, a:'cancel'}})")
+
+    def test_ui_stays_locked_until_cancel_ack(self, mobile_page):
+        """点取消后界面**仍锁定**；回执到达才解锁 + 落「已取消」气泡。"""
+        page = mobile_page
+        self._start_async(page, auto_ack=False)     # 先不给回执，专看「不放行」
+        page.evaluate("() => window._filePanel._cancel()")
+
+        page.wait_for_function("() => window._filePanel._state === 'canceling'")
+        page.wait_for_timeout(150)
+        assert self._locked(page) is True, "回执未到就不该解锁界面"
+        assert page.evaluate("() => window._filePanel._cancelRequested") is True
+        assert any(m.get("a") == "cancel" for m in self._sent(page)), \
+            "取消帧必须已发出，否则服务端不知道要停"
+
+        self._cancel_ack(page)
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        assert self._locked(page) is False
+        bubbles = self._bubbles(page)
+        assert self.CANCELED in bubbles
+        # 取消不是失败：_cancel 摘掉 _file 后，_start 的 _finish 不该再补一条失败气泡
+        assert MOBILE_I18N["bubble_file_failed"].replace("{name}", "cx.bin") not in bubbles
+
+    def test_cancel_ack_timeout_probes_with_hello(self, mobile_page):
+        """回执超时 → 发 hello 探活；收到回执即判定取消已送达并解锁。"""
+        page = mobile_page
+        self._short_timeouts(page, cancel_ms=100, hello_ms=5000)
+        self._start_async(page, auto_ack=False)
+        page.evaluate("() => window._filePanel._cancel()")
+
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.some(m => m.type === 'hello')", timeout=3000)
+        # 设计前提：cancel 必须排在 hello **之前** —— 同一有序通道，能读到后者
+        # 才说明先读到了前者，探活回执才有证明力
+        kinds = [(m.get("type"), m.get("a")) for m in self._sent(page)]
+        assert kinds.index(("file", "cancel")) < kinds.index(("hello", None))
+        assert self._locked(page) is True, "探活回执还没回来，仍不该解锁"
+
+        token = page.evaluate(
+            "() => window.__mockWS.sentMessages.find(m => m.type === 'hello').t")
+        page.evaluate(f"() => window.__mockWS.triggerMessage({{type:'hello', t:{token}}})")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        assert self._locked(page) is False
+        assert self.CANCELED in self._bubbles(page)
+
+    def test_cancel_hard_timeout_unlocks_anyway(self, mobile_page):
+        """两条路都超时：就地放行界面，绝不把用户永久锁在「正在取消」。"""
+        page = mobile_page
+        self._short_timeouts(page, cancel_ms=100, hello_ms=100)
+        self._start_async(page, auto_ack=False)
+        page.evaluate("() => window._filePanel._cancel()")
+
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=3000)
+        assert self._locked(page) is False
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.some(m => m.type === 'hello')") is True
+        assert self.CANCELED in self._bubbles(page)
+
+    def test_healthy_server_ack_needs_no_probe(self, mobile_page):
+        """正常 PC：回执立刻回来，不浪费一次探活。"""
+        page = mobile_page
+        self._start_async(page, auto_ack=True)
+        page.evaluate("() => window._filePanel._cancel()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+
+        assert self._locked(page) is False
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.some(m => m.type === 'hello')") is False
+        assert self.CANCELED in self._bubbles(page)
+
+    def test_cancel_while_awaiting_end_ack_does_not_double_finish(self, mobile_page):
+        """数据已全交出、正等 end ack 时点取消：收尾只发生一次（不重复解锁/不重复气泡）。"""
+        page = mobile_page
+        self._start_async(page, auto_ack=True, until="end")
+        page.evaluate("() => window._filePanel._cancel()")
+
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        bubbles = self._bubbles(page)
+        assert [b for b in bubbles if b == self.CANCELED] == [self.CANCELED], \
+            "「已取消」气泡只该出现一次"
+        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "cx.bin") not in bubbles
+        assert self._locked(page) is False
 
 
 class TestDisconnectRecovery:
