@@ -1839,7 +1839,9 @@
                     // 关闭码是判断「谁断的、为什么断」的唯一可靠线索，必须留痕：
                     //   1000 = 服务端主动 close（如加密模式解密/seq 失步、配置变更）
                     //   1006 = 网络层断开，没收到关闭帧（Wi-Fi/蜂窝切换、代理掐断）
-                    //   1011 = 服务端心跳(ping)超时（15s 发一次，30s 收不到 pong 就掐）
+                    //   1011 = 服务端应用层保活超时（空闲 60s 无任何消息才判死；
+                    //          传输中数据帧会刷新时间戳，故上传大文件不会触发）
+                    //          见 wire-protocol.md §7 ping/pong
                     // stale=true 表示这是「旧 socket 的迟到事件」，它会污染新连接的状态
                     const code = ev && ev.code;
                     const reason = (ev && ev.reason) || '';
@@ -4321,6 +4323,10 @@
             if (data.max_frame_size !== undefined) FilePanel.setServerMaxFrame(data.max_frame_size);
         });
         wsClient.on('send', (data) => console.debug("[WS] 收到 send 回声:", data));
+        // 应用层心跳应答（wire-protocol.md §7）：服务端只在「空闲」时才发 ping，
+        // 传输中数据帧本身就在刷新它的存活时间戳，因此不会打扰上传。
+        // 回一帧 pong 即证明本端仍在线；sendFrame 自带断连 guard，无需额外保护。
+        wsClient.on('ping', () => wsClient.sendFrame({ type: 'pong' }));
         // PC 端配置变更（如切换加密开关）：URL 已变化，停止自动重连并提示重新扫码
         wsClient.on('reconnect', (data) => {
             if (data && data.reason === 'config_changed') {

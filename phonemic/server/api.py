@@ -446,6 +446,10 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         # 后台任务串行执行——收帧循环立刻回去处理 mouse/key/preview，
         # 不再被写盘堵住。队列满时这里 await，形成背压。
         await _get_transfer_queue().enqueue(msg_type, inner, websocket)
+    elif msg_type == "pong":
+        # 应用层心跳应答（wire-protocol.md §7）。存活时间戳已在 _serve_messages
+        # 的收帧处统一刷新，这里只需认下类型，避免落到 else 回一帧 malformed。
+        logger.debug("Received pong")
     else:
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {
@@ -456,6 +460,65 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
     return True
 
 
+# ---------- 应用层保活（wire-protocol.md §7 ping / pong） ----------
+# 原生心跳的 pong 会排在文件数据之后（见 uvicorn.Config 处的注释），故整体改为
+# 应用层判活：依据是「最近一次收到对端消息的时刻」，而文件数据块本身就在刷新它
+# ⇒ 传输期间永远不会触发心跳，也就不存在与业务数据争抢同一条有序通道的问题。
+# 三个阈值集中在这里，要调整只改这一处。
+_KEEPALIVE_IDLE_BEFORE_PING = 45.0   # 空闲多久后发一帧 ping 促对端应答
+_KEEPALIVE_TIMEOUT = 60.0            # 空闲多久后判死
+_KEEPALIVE_CHECK_INTERVAL = 5.0      # 检查周期
+
+
+class _ConnectionLiveness:
+    """单条连接的应用层保活状态：只维护「最近一次收到对端消息的时刻」。"""
+
+    def __init__(self) -> None:
+        self.touch()
+
+    def touch(self) -> None:
+        """收到任意帧（含文件数据块）时调用。"""
+        self.last_msg_ts = asyncio.get_running_loop().time()
+
+    def idle_seconds(self) -> float:
+        return asyncio.get_running_loop().time() - self.last_msg_ts
+
+
+async def _app_keepalive(websocket, liveness: _ConnectionLiveness) -> None:
+    """后台保活：空闲达阈值时探活，长时间无消息则判死并关闭连接。
+
+    由 _serve_messages 按连接创建、在其结束时取消，因此天然按连接隔离，
+    不需要全局连接表。异常一律在此收口（只把 CancelledError 交回去），
+    调用方的清理路径就只剩 cancel 一种情况。
+
+    _KEEPALIVE_TIMEOUT 必须小于 Cloudflare 的 WebSocket idle 超时（约 100s
+    无数据即掐断），否则会出现「CF 已掐断、服务端还以为连着」的窗口期。
+    """
+    try:
+        while True:
+            await asyncio.sleep(_KEEPALIVE_CHECK_INTERVAL)
+            idle = liveness.idle_seconds()
+            if idle >= _KEEPALIVE_TIMEOUT:
+                logger.info(
+                    "Application keepalive timeout: no message for %.1fs, "
+                    "closing (code=1011)",
+                    idle,
+                )
+                await websocket.close(code=1011, reason="keepalive ping timeout")
+                return
+            if idle >= _KEEPALIVE_IDLE_BEFORE_PING:
+                # 只在「真的没有业务数据」时才探活，因此不会与传输争抢通道
+                logger.debug(
+                    "Application keepalive: idle %.1fs, sending ping", idle)
+                await _send_frame(websocket, {"type": "ping"})
+    except asyncio.CancelledError:
+        # 连接结束时的正常取消路径，不记日志
+        raise
+    except Exception as e:
+        # 发送/关闭失败通常意味着连接已不可写，交给主循环的 receive 去感知
+        logger.warning(f"Application keepalive stopped: {e}")
+
+
 async def _serve_messages(websocket, session) -> None:
     """S1：循环接收并处理消息，直到连接关闭或出错。
 
@@ -463,39 +526,52 @@ async def _serve_messages(websocket, session) -> None:
       1000 = 正常关闭（本端主动 close 或对端带码关闭）
       1005 = 对端未带状态码（浏览器 close() 无参）
       1006 = 连接异常中断，没收到关闭帧（网络层掉线，也可能是本端心跳掐断）
-      1011 = 本端内部错误，典型是 keepalive ping 超时
+      1011 = 本端内部错误，含应用层保活超时（见 _app_keepalive）
       1012 = 服务端重启
     仅凭 1006 无法区分「对端掉线」与「本端心跳超时」，需配合本端是否有
     keepalive 相关日志、以及对端 onclose 的 code/reason 一起看。
     """
-    while True:
+    liveness = _ConnectionLiveness()
+    keepalive_task = asyncio.create_task(_app_keepalive(websocket, liveness))
+    try:
+        while True:
+            try:
+                message = await websocket.receive()
+            except WebSocketDisconnect as e:
+                logger.info(
+                    "WebSocket closed by client: code=%s reason=%s",
+                    getattr(e, "code", None), getattr(e, "reason", "") or "-",
+                )
+                break
+            except Exception as e:
+                logger.error(f"WebSocket receive error: {e}")
+                break
+
+            # 任意一帧都算「对端还活着」。文件数据块同样经过这里，因此
+            # 传输期间保活任务不会发 ping（wire-protocol.md §7）。
+            liveness.touch()
+
+            if message["type"] == "websocket.disconnect":
+                logger.info(
+                    "WebSocket disconnected: code=%s reason=%s",
+                    message.get("code"), message.get("reason") or "-",
+                )
+                break
+
+            text = message.get("bytes")
+            if text is None:
+                # 文本消息：协议已全 binary，忽略（旧页面未刷新）
+                logger.debug("Ignoring text WebSocket message")
+                continue
+
+            if not await _handle_client_message(websocket, session, text):
+                break
+    finally:
+        keepalive_task.cancel()
         try:
-            message = await websocket.receive()
-        except WebSocketDisconnect as e:
-            logger.info(
-                "WebSocket closed by client: code=%s reason=%s",
-                getattr(e, "code", None), getattr(e, "reason", "") or "-",
-            )
-            break
-        except Exception as e:
-            logger.error(f"WebSocket receive error: {e}")
-            break
-
-        if message["type"] == "websocket.disconnect":
-            logger.info(
-                "WebSocket disconnected: code=%s reason=%s",
-                message.get("code"), message.get("reason") or "-",
-            )
-            break
-
-        text = message.get("bytes")
-        if text is None:
-            # 文本消息：协议已全 binary，忽略（旧页面未刷新）
-            logger.debug("Ignoring text WebSocket message")
-            continue
-
-        if not await _handle_client_message(websocket, session, text):
-            break
+            await keepalive_task
+        except asyncio.CancelledError:
+            pass
 
 
 # ---------- HTTP 资源处理 ----------
@@ -925,8 +1001,9 @@ def _resolve_log_level() -> str:
     """把环境变量解析成日志档位：info（默认）/ debug / trace。
 
     - debug：把 phonemic.* 降到 DEBUG，看得到收到的 mouse/key/send 明细
-    - trace：再叠加 uvicorn 与 websockets 协议层（WS 帧 hex、keepalive ping/pong）
-      用于区分「心跳超时」与「对端掉线」——两者的关闭码都是 1006。
+    - trace：再叠加 uvicorn 与 websockets 协议层（WS 帧 hex）。
+      应用层保活超时（wire-protocol.md §7）会以 1011 + 明确日志暴露，而网络层
+      掉线只能看到 1006；两者靠这里的帧级日志区分。
 
     旧开关 PHONEMIC_WS_DEBUG=1 等价于 trace，保留以兼容既有用法。
     """
@@ -968,9 +1045,15 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
             log_config=log_config,
             log_level="debug" if log_level == "trace" else "info",
             loop="asyncio",
-            # WebSocket 心跳：15 秒 ping，30 秒无响应判定断开
-            ws_ping_interval=15.0,
-            ws_ping_timeout=30.0,
+            # 原生 WebSocket 心跳已关闭，改由应用层判活（wire-protocol.md §7）。
+            # 原因：原生心跳只等「本次 ping 匹配的那一个 pong」，而 pong 与文件
+            # 数据同向、共用一条有序 TCP 通道 ⇒ 大文件上传时 pong 排在手机端
+            # 发送缓冲（mobile.html HIGH_WATER）之后，慢链路上必然超时，
+            # 把一条正在正常传输的连接判死（close 1011）。
+            # 应用层判活看的是「有没有收到任何消息」，文件块本身就在刷时间戳，
+            # 因此天然免疫，且阈值集中在一个地方、随时可调。
+            ws_ping_interval=None,
+            ws_ping_timeout=None,
             ws_max_size=WS_MAX_FRAME_SIZE,
         )
         _server = uvicorn.Server(config)

@@ -204,6 +204,7 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 | `mouse` | 鼠标控制 | `a`、`dx`/`dy`/`btn`/`delta` |
 | `file` | 传文件（分块） | `a`、`id`、`name`、`size`、`chunks`、`n`、`chunk` |
 | `photo` | 图片写入系统剪贴板（分块，**不落盘**） | `a`、`id`、`name`、`size`、`chunks`、`n`、`chunk`（线格式同 `file`，`name` 对剪贴板无意义） |
+| `pong` | 心跳应答：回复下行的 `ping` | — |
 
 ### 下行
 
@@ -216,8 +217,9 @@ HANDLERS = {"send": on_send, "key": on_key, "mouse": on_mouse}
 | `error` | 错误通知 | `code`、`msg` | 新增 |
 | `ack` | 传输确认（仅 `end`） | `ref`、`id`、`a`、`received` | 新增 |
 | `status` | 状态同步 | `muted`、`mode` | 新增 |
+| `ping` | 应用层心跳探测（促对端回 `pong`） | — | 新增 |
 
-心跳**不进 type 表**，用 WebSocket 原生 ping/pong。
+心跳走**应用层 `ping` / `pong`**（见 §7），原生 WebSocket ping/pong **已关闭**（`uvicorn` 的 `ws_ping_interval=None`）。原方案（原生心跳）在大文件上传时会把一条健康的连接判死，机理见 §7。
 
 > 断线重连策略：**不做地址重定向**。连接断开后手机端重新扫码连接即可，因此 type 表里不需要 `redirect` 这一项。
 
@@ -356,6 +358,35 @@ c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
 | `mode` | str | 当前隧道模式（`lan` / `cloudflare` / `none`） |
 
 完整语义随阶段 5（§12）落地时细化，v1 先定字段。
+
+### ping / pong
+
+应用层心跳，**替代**原生 WebSocket ping/pong（后者已在服务端关闭）。
+
+```
+下行  {"type":"ping"}
+上行  {"type":"pong"}
+```
+
+无 payload 字段。方向**单向**：服务端发 `ping`，手机端收到即回 `pong`。手机端**从不主动发** `ping`。
+
+**为什么放弃原生心跳**：原生心跳由 websockets 库的 `keepalive_ping` 实现，它只等**与本次 ping 匹配的那一个 pong 帧**——业务数据到达对它"一票都不投"。而 pong 与文件数据**同向**（手机 → 服务端）、共用同一条 TCP 有序通道 ⇒ 大文件上传时 pong 只能排在客户端发送缓冲之后。客户端水位 `HIGH_WATER` 为 4MB，链路低于约 130KB/s 时该队列排空即超过 30s 超时，服务端会把一条**正在正常传输的**连接判死（close 1011）。现象就是"链路健康、数据哗哗地传，看门狗却判死"的假死。
+
+**应用层判活为什么能根治**：判活依据从"pong 回来了吗"换成"**有没有收到任何对端消息**"。文件数据块本身就是最强的存活证据 ⇒ 传输期间服务端**根本不发 ping**（时间戳一直被数据块刷新），不存在与业务数据争抢同一条有序通道的问题。
+
+服务端判活规则（阈值定义在 `phonemic/server/api.py` 模块级常量）：
+
+| 状态 | 动作 |
+|---|---|
+| 收到任意帧（含每个文件块） | 刷新 `last_msg_ts`，不做任何心跳动作 |
+| 空闲 ≥ 45s | 发一帧 `{"type":"ping"}`；此后每轮检查都重发，直到收到消息或判死 |
+| 空闲 ≥ 60s | 判死，`close(code=1011, reason="keepalive ping timeout")` |
+
+- **阈值取 45s / 60s 的原因**：必须**小于 Cloudflare 的 WebSocket idle 超时**（约 100s 无数据即掐断），否则会出现"CF 已掐断、服务端还以为连着"的窗口期。45s 发探测、60s 判死，留足余量；同时也必须小于手机端可能的最长静默期。
+- **关闭码沿用 1011**：与原生心跳超时的码保持一致，手机端既有日志解析（`1011 = 服务端心跳超时`）无需改动。
+- **`pong` 必须进服务端白名单**（`_handle_client_message`）：否则每收到一次心跳应答都会回一帧 `error: malformed`，两端互刷告警。
+- **对手机端的最低要求**：注册 `on('ping')` 并回一帧 `pong`。缺这一步，空闲连接会在 60s 后被服务端判死。
+- **待补（0.6.2）**：手机端目前没有任何自己的判活逻辑（只依赖 `onclose` / `onerror`），静默断网且连接空闲时可能长时间显示"已连接"。原生心跳关闭后这层感知更弱，需补"多久没收到服务端消息即自判重连"。
 
 ---
 
