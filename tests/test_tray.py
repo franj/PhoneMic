@@ -9,8 +9,11 @@ _create_tray_menu() 构建菜单，验证菜单结构与「上屏方式」勾选
 from unittest.mock import patch
 
 import pytest
+from PySide6.QtWidgets import QWidget
 
+from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.gui.dashboard import Dashboard
+from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.tray import SystemTray
 from phonemic.tunnel.mode import TunnelMode
 from phonemic.utils.settings_manager import SettingsManager
@@ -31,6 +34,21 @@ def tray(qtbot, tmp_path, monkeypatch):
             yield t
     finally:
         SettingsManager._instance = None
+
+
+@pytest.fixture
+def isolated_commands_dir(tmp_path, monkeypatch):
+    """把 CommandsManager 的配置目录指向 tmp_path 并复位单例。
+
+    CommandsDialog 真实构造时会读 commands.json，不隔离就会写进真实用户配置。
+    """
+    from phonemic.utils import commands_manager as cm_mod
+    from phonemic.utils import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_get_local_app_data", lambda: tmp_path)
+    cm_mod.CommandsManager._instance = None
+    yield tmp_path
+    cm_mod.CommandsManager._instance = None
 
 
 def _item_labels(menu):
@@ -134,3 +152,62 @@ class TestTrayDirectInputMenu:
         tray.sm.set("text_input_mode", "direct")
         assert tray._act_input_direct.isChecked() is True
         assert tray._act_input_paste.isChecked() is False
+
+
+class TestTrayDialogEntries:
+    """托盘菜单里的两个对话框入口：parent 必须是 QWidget。
+
+    回归：_open_commands_dialog 曾把 SystemTray（QObject）当 parent 传给
+    QDialog —— QDialog.__init__(parent) 只接受 QWidget | None，于是**从托盘
+    右键点「命令配置」必抛 TypeError**；从主窗口菜单进入则正常（那里 self 是
+    QMainWindow），所以这条路径长期没人碰到。
+    """
+
+    @staticmethod
+    def _spy_on(dialog_cls, mocker):
+        """记录 parent 但走**真实** __init__，并让 exec 不进入事件循环。"""
+        recorded = []
+        real_init = dialog_cls.__init__
+
+        def recording_init(self, parent=None, *args, **kwargs):
+            recorded.append(parent)
+            real_init(self, parent, *args, **kwargs)
+
+        mocker.patch.object(dialog_cls, "__init__", recording_init)
+        mocker.patch.object(dialog_cls, "exec", return_value=0)
+        return recorded
+
+    def test_open_commands_dialog_passes_dashboard(self, tray, isolated_commands_dir, mocker):
+        recorded = self._spy_on(CommandsDialog, mocker)
+
+        tray._open_commands_dialog()
+
+        assert recorded == [tray.dashboard]
+
+    def test_open_settings_dialog_passes_dashboard(self, tray, isolated_commands_dir, mocker):
+        recorded = self._spy_on(SettingsDialog, mocker)
+
+        tray._open_settings()
+
+        assert recorded == [tray.dashboard]
+
+    def test_dialog_parent_must_be_qwidget(self, tray, mocker):
+        """用替身锁住类型契约：即便将来 Qt 放宽构造签名，也不该传 QObject。"""
+        seen = []
+
+        class _FakeDialog:
+            def __init__(self, parent=None, *args, **kwargs):
+                seen.append(parent)
+
+            def exec(self, *args, **kwargs):
+                return 0
+
+        mocker.patch("phonemic.gui.tray.CommandsDialog", _FakeDialog)
+        mocker.patch("phonemic.gui.tray.SettingsDialog", _FakeDialog)
+
+        tray._open_commands_dialog()
+        tray._open_settings()
+
+        assert len(seen) == 2
+        for parent in seen:
+            assert isinstance(parent, QWidget)

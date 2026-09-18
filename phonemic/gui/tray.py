@@ -126,12 +126,14 @@ class SystemTray(QObject):
         self.tray_icon.setToolTip(tooltip)
 
     def _open_settings(self):
-        # 修复 parent 问题，使用 self.dashboard 作为父窗口
+        # parent 必须是 QWidget，SystemTray 自己是 QObject
         dialog = SettingsDialog(self.dashboard)
         dialog.exec()
+
     def _open_commands_dialog(self):
-        dlg = CommandsDialog(self)
-        dlg.exec_()
+        # 同上：QDialog(parent) 只接受 QWidget | None，传 self 会抛 TypeError
+        dlg = CommandsDialog(self.dashboard)
+        dlg.exec()
 
     def _set_input_mode(self, mode: str) -> None:
         """托盘菜单切换上屏方式，立即持久化生效。"""
