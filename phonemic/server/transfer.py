@@ -90,8 +90,12 @@ class TransferQueue:
 
         用于跨线程场景（``stop_server``）。在事件循环内请用 ``aclose()``，
         它会把取消真正跑完，不留悬空任务。
+
+        先 ``abort_all()`` 再取消：``asyncio.to_thread`` 里的写盘线程**无法被
+        取消**，只 cancel worker 的话，退出瞬间正在传的文件会留下打开着的
+        ``.part`` 半成品。
         """
-        self._cancelled_ids.clear()
+        self.abort_all()
         if self._worker is not None and not self._worker.done():
             try:
                 self._loop.call_soon_threadsafe(self._worker.cancel)
@@ -104,7 +108,11 @@ class TransferQueue:
         self._queued_bytes = 0
 
     async def aclose(self) -> None:
-        """关闭后台消费者并等待其真正结束（需在事件循环内调用）。"""
+        """关闭后台消费者并等待其真正结束（需在事件循环内调用）。
+
+        与 ``close()`` 同样先 ``abort_all()``，理由见该方法。
+        """
+        self.abort_all()
         worker = self._worker
         if worker is not None and not worker.done():
             worker.cancel()
@@ -196,6 +204,9 @@ class TransferQueue:
                 elif ack is not None:
                     await self._sender(websocket, ack)
             except asyncio.CancelledError:
+                # close() 是「先 abort_all() 再调度 cancel」，中间那一小段里
+                # worker 可能正好把残留的 start 帧处理掉、新建了会话，这里再兜一次。
+                self.abort_all()
                 raise
             except Exception:
                 logger.exception("传输后台任务失败")

@@ -300,6 +300,50 @@ def test_abort_all_clears_state(tmp_path):
     _run(main())
 
 
+async def _inflight(tmp_path, fid=9, name="half.bin"):
+    """造一个「已 start + 已收一块」的在途会话，返回 (q, fr, .part 列表)。"""
+    q, fr, pr, rec = _make(tmp_path)
+    ws = _FakeWS()
+    await q.enqueue("file", {"a": "start", "id": fid, "name": name,
+                             "size": 8, "chunks": 2}, ws)
+    await q.enqueue("file", {"a": "data", "id": fid, "n": 0, "chunk": b"abcd"}, ws)
+    await asyncio.sleep(0.05)
+    return q, fr
+
+
+def test_close_aborts_inflight_transfer(tmp_path):
+    """回归：退出瞬间在传文件不能留下 .part 半成品。
+
+    ``asyncio.to_thread`` 里的写盘线程**无法被取消**，所以只 cancel worker
+    不够 —— 必须显式 abort_all()。
+    """
+    async def main():
+        q, fr = await _inflight(tmp_path)
+        assert list(tmp_path.glob("*.part")), "前置条件：应已产生 .part"
+
+        q.close()                      # 跨线程路径（stop_server）
+        await asyncio.sleep(0.05)      # 让跨线程调度的 cancel 落地
+
+        assert list(tmp_path.glob("*.part")) == [], "close() 后不应残留 .part"
+        assert not fr._sessions
+
+    _run(main())
+
+
+def test_aclose_aborts_inflight_transfer(tmp_path):
+    """事件循环内路径（服务重启）同样不能留下 .part。"""
+    async def main():
+        q, fr = await _inflight(tmp_path, fid=10, name="half2.bin")
+        assert list(tmp_path.glob("*.part"))
+
+        await q.aclose()
+
+        assert list(tmp_path.glob("*.part")) == []
+        assert not fr._sessions
+
+    _run(main())
+
+
 def test_close_resets_and_allows_restart(tmp_path):
     async def main():
         q, fr, pr, rec = _make(tmp_path)
