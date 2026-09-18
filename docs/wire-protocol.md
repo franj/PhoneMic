@@ -433,9 +433,9 @@ c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
   `chunk = clamp(ceil(size / 12) 向上取整到 256KB 倍数, 256KB, cap)`，
   其中 `cap = max(256KB, min(CHUNK_MAX, config.max_frame_size − 64KB))`；服务端未下发 `max_frame_size` 时 `cap = CHUNK_MAX`。
   - **CHUNK_MAX 按链路取两档，判定只看 hostname**（`FilePanel.isCloudflare`，正则 `\.trycloudflare\.com$`，不区分大小写）：
-    - `*.trycloudflare.com` → `CHUNK_MAX_CF = 256KB`。此时**上下限相等 ⇒ clamp 恒取 256KB**，与文件大小无关。
-    - 其余一律按局域网 → `CHUNK_MAX_LAN = 1MB`（含局域网 IP、`localhost`、以及将来可能出现的自定义域名反代）。
-    - 两档各自独立成常量，**调大小只改那一行**；`pickChunkSize` 本身不需要知道链路。
+    - `*.trycloudflare.com` → CF 档 256KB。此时**上下限相等 ⇒ clamp 恒取 256KB**，与文件大小无关。
+    - 其余一律按局域网 → LAN 档 1MB（含局域网 IP、`localhost`、以及将来可能出现的自定义域名反代）。
+    - 两档写成 `FilePanel.LINK_LAN` / `LINK_CF` 两份**链路档案**（`chunkMax` / `chunkAck` / `cancelAck` / `hello` 四个随链路变化的量都在里面），`CHUNK_MAX` / `CHUNK_ACK_TIMEOUT` / `CANCEL_ACK_TIMEOUT` / `HELLO_TIMEOUT` 都只是从档案取值的派生 getter。**加档或调值只动档案那一处**；`pickChunkSize` 与两个等待函数本身都不需要知道链路。
   - **为什么 CF 档压到 256KB**（2026-09-18 定稿）：CF 回源段窄、延迟高，大块只省 per-chunk 开销，代价却是进度粒度变粗、手机端内存峰值变高，**且把更多数据堆在途**——`end` 的确认要等这一坨全部排空才回得来（慢链路上这正是「手机报成功、PC 还在写」的直接来源）。局域网两段都短，取 1MB 即可。
   - **为什么要自适应而不是恒定上限**：恒定上限时 2MB 文件只有 2 块，每次 ack 跳半格，进度条像在跳变；收敛到 ~12 块后小文件也有小步可走，而大文件本来就会撞上限。
   - **上限可由服务端收紧**（见 §5 `config`）：下发值就是服务端 `uvicorn ws_max_size`（当前 16MB），扣掉边距后仍高于两档上限，所以只有服务端显式调小才生效。
@@ -450,9 +450,10 @@ c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
 - 接收端状态机：`start` 建 buffer → 每个 `data` 执行 `buf.extend(chunk)` → `end` 触发落盘（file）或写剪贴板（photo）。
 - **`a:"cancel"`**：发送端主动中止。手机端发送期间 UI 锁定为「仅取消可点」，点取消即发此帧（同时本地立刻停发）；接收端关闭半成品文件、删除临时文件、丢弃会话状态，并发回 `ack(a:"cancel")`。
 - **取消的回执**（`FilePanel._cancel` / `_awaitCancelAck`）：**界面不立刻解锁**，要等服务端回执才恢复可用——本地停发只说明「我不再发了」，服务端那边可能还在收队列里的残留块、还在写 `.part`，此时解锁会让用户以为已经干净了。三级等待，逐级放宽但**一定有终点**：
-  1. `ack(a:"cancel")` —— 服务端已丢弃会话，板上钉钉（`CANCEL_ACK_TIMEOUT = 2s`）。
-  2. `hello` 回执 —— ①超时后发一帧 `{"type":"hello", "t":N}`；回执带同一个号回来，即判定取消已送达（`HELLO_TIMEOUT = 2s`）。
+  1. `ack(a:"cancel")` —— 服务端已丢弃会话，板上钉钉（`LINK.cancelAck`：局域网 3s / CF 20s）。
+  2. `hello` 回执 —— ①超时后发一帧 `{"type":"hello", "t":N}`；回执带同一个号回来，即判定取消已送达（`LINK.hello`：局域网 2s / CF 10s）。
   3. 硬超时 / 断连 —— 就地放行界面，绝不把用户永久锁在「正在取消」里；此时若连接已断，服务端侧的会话也会随连接一起被 `abort_all` 清掉。
+  - **①的时限必须分链路**（2026-09-18 真机实测）：CF 档 256KB 块下，点取消后要 **8~10s** 服务端才读到 `cancel` 帧、回执才回来。这不是异常，而是慢链路的物理下限——取消帧排在已交出去的字节后面，停等把在途压到 1 块之后，这 8~10s 就是「那一块排空」的时间。所以 CF 档取 20s（约 2 倍余量）；局域网上取消帧最多排在一块后面且带宽充足，等 3s 都嫌多。**用 2s 通吃两档的后果**：CF 上每次取消都白白走一遍 `hello` 探活，用户还多等一个来回。
   - 第 ② 步成立的前提是**同一有序通道**：`cancel` 先入队、`hello` 后被读出，能读到后者就说明先读到了前者；`cancel` 入队后必被后台消费者处理（若连接在中途断掉，`abort_all` 与取消等价）。
   - ②③ 只影响「多快解锁」，不影响「是否声称已取消」——三种出口落的是同一条气泡（`bubble_file_canceled` / `bubble_photo_canceled`），都带 `[FILE]` 日志。
   - **幂等**：`cancel` 落到不存在的会话（已 `end` / 已取消 / 从未 `start`）时同样回 `ack(a:"cancel")`。回执的语义是「取消已生效」，不是「这个 id 我认得」——这也是该路径此前只有一行 `cancel 无匹配会话` 日志、手机端无从判断的修复。
@@ -477,9 +478,9 @@ c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
   - 保险超时（3min，正常落盘远快于它）→ 如实报「未确认」——既不谎报成功，也不谎报失败，由用户核对 PC 后自行决定是否重发。
 - **发送端节流：停等（stop-and-wait）为主，`bufferedAmount` 为兜底**。
   - **主线是停等**：发第 `n` 块之前，必须等到第 `n − MAX_INFLIGHT` 块已被 ack（`FilePanel._waitChunkAck`；`MAX_INFLIGHT = 1` 即严格「收到上一块 ack 才发下一帧」）。理由：`bufferedAmount` 只覆盖「浏览器 → 网络栈」，数据一旦离开浏览器（手机内核、无线在途、CF 回源、PC 内核、写盘）全是盲区 ⇒ 只看它会让浏览器侧一路「发得出去」而链路早已积压（表现为 `bufferedAmount ≈ 0` 却传得极慢、取消后很久才停）。等 ack 才是**端到端**节流：在途量被钉死在 `MAX_INFLIGHT` 块以内，取消延迟也从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」。
-  - **代价**：吞吐上限 ≈ `MAX_INFLIGHT × 块大小 ÷ RTT`。局域网几乎无感（1MB ÷ 5ms）；Cloudflare 上 256KB ÷ 120ms ≈ 2MB/s。想更快就调大 `MAX_INFLIGHT` —— 那仍是「在途 ≤ N 块」的滑动窗口，不是退回无节制流水线。
+  - **代价**：吞吐上限 ≈ `MAX_INFLIGHT × 块大小 ÷ (单向传输时间 + RTT)`。局域网上 1MB 一块几乎无感；Cloudflare 上瓶颈其实是**上行带宽**而不是 RTT——2026-09-18 真机实测 256KB 一块要 8~10s（≈30KB/s），此时停等**并不吃亏**（链路本身就是瓶颈，把在途压到 1 块不影响吞吐），而且取消延迟已经从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」，正是这 8~10s。只有链路快到「RTT 成为瓶颈」时，调大 `MAX_INFLIGHT` 才有收益 —— 那仍是「在途 ≤ N 块」的滑动窗口，不是退回无节制流水线。
   - **兜底仍是 `bufferedAmount`**：超过 `HIGH_WATER`（4MB）暂停发送、降到 `LOW_WATER`（1MB）再继续（`FilePanel._waitDrain`，每 20ms 采样）。停等生效时它基本不会被触发。
-  - **ack 超时必须降级**（`CHUNK_ACK_TIMEOUT = 15s`，且**只降级一次**）：ack 通道若失灵，整体退回流水线并置 `_gateGaveUp`，而不是把传输拖成「1 块 / 超时」。协议层面 ack 走同一条可靠有序通道，正常不会丢，这条纯粹是防死锁。
+  - **ack 超时必须降级**（`LINK.chunkAck`：局域网 15s / CF 45s，且**只降级一次**）：ack 通道若失灵，整体退回流水线并置 `_gateGaveUp`，而不是把传输拖成「1 块 / 超时」。协议层面 ack 走同一条可靠有序通道，正常不会丢，这条纯粹是防死锁。**超时值同样要分链路**：CF 上一块本身就要 8~10s 才走完，套用局域网的 15s 会在**正常等待**里误降级，那等于白丢了停等带来的节流（比不降级更糟）。
 - **发送期间 WS 单会话单文件**：一次连接同时只进行一次 `file` 传输（`start` 后未 `end`/`cancel` 前收到新 `start` 视为协议错误，回 `error(malformed)`）。v1 不做队列。
 
 ### 9.1 两个 sink：file 落盘、photo 剪贴板

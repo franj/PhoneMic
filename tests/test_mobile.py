@@ -425,7 +425,7 @@ def test_transfer_lock_freezes_other_panels(mobile_page):
 def test_transfer_chunk_size_follows_file_size(mobile_page):
     """分块按体积自适应（协议 §9）：3MB → 12 块 × 256KB。
 
-    夹具页面跑在 localhost ⇒ 局域网档，上限 CHUNK_MAX_LAN = 1MB。
+    夹具页面跑在 localhost ⇒ 局域网档，上限 LINK_LAN.chunkMax = 1MB。
     这里在 onCommand 里同步回 ack —— 停等生效后，没有 ack 就发不出第 2 块。
     """
     page = mobile_page
@@ -493,14 +493,15 @@ class TestLinkAwareChunkCap:
     """分块上限按链路取值（协议 §9）：*.trycloudflare.com 一档，其余一律一档。
 
     判定只看 hostname——非 trycloudflare 一律按局域网处理（含局域网 IP、localhost、
-    以及将来可能出现的自定义域名反代）。两个档位各自独立成常量，调大小只改一行。
+    以及将来可能出现的自定义域名反代）。两档的随链路参数集中在 LINK_LAN / LINK_CF
+    两份档案里，调值只改那一处。
     """
 
     def test_lan_page_uses_lan_cap(self, mobile_page):
         r = mobile_page.evaluate(
             "() => { const F = window._filePanel.constructor;"
             "        return {host: location.hostname, cf: F.isCloudflare, max: F.CHUNK_MAX,"
-            "                lan: F.CHUNK_MAX_LAN, cfMax: F.CHUNK_MAX_CF}; }"
+            "                lan: F.LINK_LAN.chunkMax, cfMax: F.LINK_CF.chunkMax}; }"
         )
         assert r["cf"] is False, r
         assert r["max"] == r["lan"] == 1024 * 1024, r
@@ -509,7 +510,7 @@ class TestLinkAwareChunkCap:
         r = cloudflare_page.evaluate(
             "() => { const F = window._filePanel.constructor;"
             "        return {host: location.hostname, cf: F.isCloudflare, max: F.CHUNK_MAX,"
-            "                lan: F.CHUNK_MAX_LAN, cfMax: F.CHUNK_MAX_CF}; }"
+            "                lan: F.LINK_LAN.chunkMax, cfMax: F.LINK_CF.chunkMax}; }"
         )
         assert r["cf"] is True, r
         assert r["max"] == r["cfMax"] == 256 * 1024, r
@@ -523,6 +524,72 @@ class TestLinkAwareChunkCap:
             "                mid: F.pickChunkSize(10 * MB), big: F.pickChunkSize(500 * MB)}; }"
         )
         assert set(r.values()) == {256 * 1024}, r
+
+
+class TestLinkAwareTimeouts:
+    """超时也按链路取值（协议 §9）：CF 上行窄、排队深，实测一块 256KB 连回执要 8~10s。
+
+    拿局域网的短超时去等它，正常等待会被误判成超时——白白发探活、白白把停等降级；
+    反过来把 CF 的宽超时套在局域网上，则「PC 真卡死了」这种异常迟迟发现不了。
+
+    断言的是**关系**与**来源**，不是具体数字：数字是留给人的调参旋钮，改它不该挂测试；
+    但「CF 档必须更宽」和「getter 必须真的从档案取值」是设计约束，改坏了必须挂。
+    """
+
+    # 派生 getter ← 档案字段
+    FIELDS = {
+        "CHUNK_ACK_TIMEOUT": "chunkAck",
+        "CANCEL_ACK_TIMEOUT": "cancelAck",
+        "HELLO_TIMEOUT": "hello",
+    }
+
+    # 「改档案里的值 ⇒ 派生 getter 跟着变」，两个档位各测一次。
+    # 注意不能把 mobile_page 与 cloudflare_page 放进同一个用例：两者共用同一个 page
+    # fixture 实例，后装的那个会把页面导航走。
+    OVERRIDE = (
+        "() => { const F = window._filePanel.constructor;"
+        "        Object.defineProperty(F, 'LINK_LAN',"
+        "          {value: Object.assign({}, F.LINK_LAN, {chunkAck: 11111})});"
+        "        Object.defineProperty(F, 'LINK_CF',"
+        "          {value: Object.assign({}, F.LINK_CF, {chunkAck: 22222})});"
+        "        return F.CHUNK_ACK_TIMEOUT; }"
+    )
+
+    def _read(self, page):
+        return page.evaluate(
+            "() => { const F = window._filePanel.constructor; const used = {};"
+            "        for (const k of ['CHUNK_ACK_TIMEOUT', 'CANCEL_ACK_TIMEOUT', 'HELLO_TIMEOUT']) {"
+            "            used[k] = F[k]; }"
+            "        return {isCF: F.isCloudflare, lan: F.LINK_LAN, cf: F.LINK_CF, used: used}; }"
+        )
+
+    def _expected(self, profile):
+        return {k: profile[field] for k, field in self.FIELDS.items()}
+
+    def test_lan_page_uses_lan_timeouts(self, mobile_page):
+        r = self._read(mobile_page)
+        assert r["isCF"] is False, r
+        assert r["used"] == self._expected(r["lan"]), r
+
+    def test_cloudflare_page_uses_cf_timeouts(self, cloudflare_page):
+        r = self._read(cloudflare_page)
+        assert r["isCF"] is True, r
+        assert r["used"] == self._expected(r["cf"]), r
+
+    def test_cf_timeouts_are_wider_than_lan(self, cloudflare_page):
+        r = self._read(cloudflare_page)
+        for key, field in self.FIELDS.items():
+            assert r["cf"][field] > r["lan"][field], (key, r["cf"][field], r["lan"][field])
+        # 实测（2026-09-18 真机，CF + 256KB 块）：取消帧要 8~10s 才被服务端读到。
+        # 超时若落在这个量级以内，正常等待就会被误判成超时 ⇒ 必须留出余量。
+        assert r["cf"]["cancelAck"] > 10_000, r["cf"]
+        assert r["cf"]["chunkAck"] > 10_000, r["cf"]
+
+    def test_derived_getter_follows_profile_lan(self, mobile_page):
+        assert mobile_page.evaluate(self.OVERRIDE) == 11111
+
+    def test_derived_getter_follows_profile_cf(self, cloudflare_page):
+        assert cloudflare_page.evaluate(self.OVERRIDE) == 22222
 
 
 def test_config_message_sets_max_frame_size(mobile_page):

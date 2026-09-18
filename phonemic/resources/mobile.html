@@ -3785,25 +3785,62 @@
     }
 
     class FilePanel {
-        // 分块策略（wire-protocol.md §9）：按体积自适应，块数收敛到 ~12，夹在 [256KB, CHUNK_MAX]。
-        // CHUNK_MAX 随链路而定：Cloudflare 快隧道一档，其余（局域网/直连）一档。
-        // 上限同时被服务端 config.max_frame_size 收窄（见 pickChunkSize）。
+        // 分块策略（wire-protocol.md §9）：按体积自适应，块数收敛到 ~12，夹在 [CHUNK_MIN, CHUNK_MAX]。
+        // 分块上限与三个超时都随链路取（见 LINK 档案）；上限还会被服务端 config.max_frame_size 收窄。
         static get CHUNK_MIN() { return 256 * 1024; }           // 下限：再小则 per-chunk 开销占比过高
-        static get CHUNK_MAX_LAN() { return 1 * 1024 * 1024; }  // 局域网/直连上限 ← 调大小改这一行
-        static get CHUNK_MAX_CF() { return 256 * 1024; }        // Cloudflare 上限   ← 调大小改这一行
+
+        /**
+         * 链路档案：**所有随链路变化的量都集中在这里，加档 / 调值只动这一处**。
+         *
+         * 判据只有 hostname 一条（见 isCloudflare），目前两档：
+         *   LINK_LAN —— 局域网 / 直连：带宽足、RTT 低 ⇒ 分块可以大、超时可以短
+         *   LINK_CF  —— Cloudflare 快隧道：上行窄且排队深 ⇒ 分块必须小、超时必须宽
+         *
+         * **为什么超时也要分档**：超时兜的是「已经交出去的字节排空 + 回执回来」这一段，
+         * 而这一段的长短完全由链路决定。实测（2026-09-18，CF 快隧道 + 256KB 块）：点取消后
+         * 要 8~10s 服务端才读到 cancel 帧、回执才回来 —— 这还只是「一块在途」的量级。
+         * 拿局域网的 2s 去等它，正常等待会被误判成超时，于是白白发探活、白白把停等降级成
+         * 流水线；反过来把 CF 的宽超时套在局域网上，则「PC 真卡死了」这种异常会迟迟不被
+         * 发现。所以两档各取各的。
+         *
+         * 字段（chunkMax 单位字节，其余单位毫秒）：
+         *   chunkMax   分块上限（同时被服务端 max_frame_size 收窄，取两者小值）
+         *   chunkAck   等单块 ack 的保险超时：超时放弃停等，见 _waitChunkAck
+         *   cancelAck  等「取消回执」的时限：超时改发 hello 探活，见 _awaitCancelAck
+         *   hello      发 hello 后等回执的时限：再超时就地放行，不再干等
+         */
+        static get LINK_LAN() {
+            return {
+                name: 'lan',
+                chunkMax: 1 * 1024 * 1024,   // 1MB   ← 调分块上限改这一行
+                chunkAck: 15000,             // 局域网一个来回是毫秒级，15s 已是极大的保险
+                cancelAck: 3000,             // 取消帧最多排在一块后面（1MB ÷ 局域网带宽 ≪ 1s）
+                hello: 2000,
+            };
+        }
+        static get LINK_CF() {
+            return {
+                name: 'cf',
+                chunkMax: 256 * 1024,        // 256KB ← 调分块上限改这一行
+                chunkAck: 45000,             // 实测一块要 8~10s 才走完，取约 4 倍余量
+                cancelAck: 20000,            // 实测 8~10s，取约 2 倍余量
+                hello: 10000,                // 走到这步时发送队列多半已排空，留够 RTT 余量即可
+            };
+        }
         /** 是否经 Cloudflare 快隧道：除 *.trycloudflare.com 外一律按局域网处理 */
         static get isCloudflare() { return /\.trycloudflare\.com$/i.test(location.hostname); }
-        static get CHUNK_MAX() {
-            return FilePanel.isCloudflare ? FilePanel.CHUNK_MAX_CF : FilePanel.CHUNK_MAX_LAN;
-        }
+        /** 当前链路档案。要临时改值请覆写下面那四个派生的 getter（测试就是这么干的） */
+        static get LINK() { return FilePanel.isCloudflare ? FilePanel.LINK_CF : FilePanel.LINK_LAN; }
+        static get CHUNK_MAX() { return FilePanel.LINK.chunkMax; }
+        static get CHUNK_ACK_TIMEOUT() { return FilePanel.LINK.chunkAck; }
+        static get CANCEL_ACK_TIMEOUT() { return FilePanel.LINK.cancelAck; }
+        static get HELLO_TIMEOUT() { return FilePanel.LINK.hello; }
         static get CHUNK_TARGET() { return 12; }               // 目标块数：兼顾进度粒度与 per-chunk 开销
         static get FRAME_RESERVE() { return 64 * 1024; }       // 安全边距：msgpack 头 + nonce + MAC + seq
         static get HIGH_WATER() { return 4 * 1024 * 1024; }    // 发送缓冲高水位：超过则暂停等排空
         static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
         static get MAX_INFLIGHT() { return 1; }                // 在途未确认块数上限：1 = 停等 ← 调吞吐改这一行
-        static get CHUNK_ACK_TIMEOUT() { return 15000; }       // 单块 ack 保险超时（ms）：超时放弃停等，见 _waitChunkAck
-        static get CANCEL_ACK_TIMEOUT() { return 2000; }       // 等「取消回执」的时限（ms），超时改发 hello 探活，见 _awaitCancelAck
-        static get HELLO_TIMEOUT() { return 2000; }            // 发 hello 后等回执的时限（ms），再超时就地放行，不再干等
+        // 三个超时（CHUNK_ACK / CANCEL_ACK / HELLO）随链路取，见上面的 LINK_LAN / LINK_CF
         static get END_ACK_TIMEOUT() { return 180000; }        // end 确认的保险超时（ms），见 _waitEndAck
         static get RECONNECT_WAIT() { return 6000; }           // 未连接时先等重连的时间（ms），1s 退避足够重试数轮
         static get PICKER_CANCEL_GRACE() { return 250; }       // 判「取消」的宽限（ms）：留给 change 追上来的余量
@@ -3824,13 +3861,13 @@
          *
          * **为什么要自适应**：小文件若恒定撞上限，2MB 只有 2 块、每次 ack 跳半格，进度条像在跳变；
          * 收敛到 ~12 块后小文件也有小步可走，而大文件本来就会撞上限。
-         * **为什么上限分链路**（CHUNK_MAX_LAN / CHUNK_MAX_CF）：大块只省 per-chunk 开销，代价却是三件事
+         * **为什么上限分链路**（`LINK.chunkMax`）：大块只省 per-chunk 开销，代价却是三件事
          * 同时变糟——进度粒度粗、手机端内存峰值高、且把更多数据堆在途（`end` 的确认要等这一坨
          * 排空才回得来，慢链路上就表现成「手机说发送成功、PC 还在写」）。Cloudflare 回源段窄且延迟高，
          * 取 256KB；局域网带宽延迟都好，取 1MB。另外进度条「至多领先 ack 一块」的前瞻量就是块大小，
          * 块越小前瞻越准。
          *
-         * 注：CHUNK_MIN 与 CHUNK_MAX_CF 相等时（Cloudflare），clamp 结果恒为 256KB，无需特判。
+         * 注：CHUNK_MIN 与 CF 档的 chunkMax 相等（都是 256KB）时，clamp 结果恒为 256KB，无需特判。
          */
         static pickChunkSize(size) {
             const cap = FilePanel.serverMaxFrame
@@ -4157,10 +4194,6 @@
             this._kind = kind;               // 'file' → 磁盘；'photo' → 剪贴板
             this._file = file;
             this._cancelRequested = false;
-            this._cancelPending = false; // 上一次取消的等待到此为止
-            this._cancelAcked = false;
-            this._helloWait = null;      // 丢弃上一次的探活等待（迟到的回执会因号不匹配被忽略）
-            this._helloOk = false;
             this._sentBytes = 0;
             this._ackedBytes = 0;
             this._ackedChunkN = -1;      // -1 = 一块都没被 ack（停等闸门基线，见 _waitChunkAck）
@@ -4272,24 +4305,29 @@
          * uvicorn、写盘全是本端盲区 —— 于是浏览器侧可以一路「发得出去」而链路早已积压，
          * 表现为 `bufferedAmount ≈ 0` 却传得极慢、且取消后很久才停。等对端 ack 才是真正
          * **端到端**的节流：在途量被钉死在 MAX_INFLIGHT 块以内（=1 时即「收到上一块的 ack
-         * 才允许发下一帧」）。副作用是取消延迟从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」。
+         * 才允许发下一帧」）。副作用是取消延迟从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」
+         * ——CF 上实测就是 8~10s，这个量级直接决定了 CANCEL_ACK_TIMEOUT 该取多大（见 LINK）。
          *
-         * **代价**：吞吐上限 ≈ MAX_INFLIGHT × 块大小 ÷ RTT。局域网几乎无感（1MB ÷ 5ms），
-         * Cloudflare 上 256KB ÷ 120ms ≈ 2MB/s —— 想要更快就调大 MAX_INFLIGHT（那仍是
+         * **代价**：吞吐上限 ≈ MAX_INFLIGHT × 块大小 ÷ (单向传输 + RTT)。局域网上 1MB 一块
+         * 几乎无感；Cloudflare 上瓶颈是**上行带宽**而非 RTT（实测 256KB 一块要 8~10s），
+         * 那时停等并不吃亏——链路本身就是瓶颈。想更快就调大 MAX_INFLIGHT（那仍是
          * 「在途 ≤ N 块」的滑动窗口，不是退回无节制流水线）。
          *
          * 返回 true（已放行，含超时降级）/ false（已取消或断连，交给收尾路径）。
          * 超时**只降级一次**：ack 通道若失灵，整体退回流水线，而不是把传输拖成「1 块 / 超时」。
+         * 超时值随链路取（`LINK.chunkAck`）：CF 上一块本身就要 8~10s 才走完，用局域网的
+         * 15s 会在正常等待里误降级 —— 那等于白丢了停等带来的节流。
          */
         _waitChunkAck(k) {
             if (k < 0 || this._gateGaveUp || this._ackedChunkN >= k) return Promise.resolve(true);
+            const limit = FilePanel.CHUNK_ACK_TIMEOUT;   // 起等时定死：超时随链路取，见 LINK
             return new Promise((resolve) => {
                 const started = performance.now();
                 const tick = () => {
                     this._progressTick();       // 等 ack 期间进度条照常刷新，不至于看着像卡死
                     if (this._cancelRequested || !this.ws.getConnected()) { resolve(false); return; }
                     if (this._ackedChunkN >= k) { resolve(true); return; }
-                    if (performance.now() - started >= FilePanel.CHUNK_ACK_TIMEOUT) {
+                    if (performance.now() - started >= limit) {
                         console.warn('[FILE] 等块 ack 超时，停等降级为流水线（ack 通道疑似失灵）');
                         this._gateGaveUp = true;
                         resolve(true);
@@ -4379,8 +4417,14 @@
          *                          会话也会随连接一起清掉（`abort_all`）。
          *
          * 三种出口都会放行界面且有日志，不会把用户永久锁在「正在取消」里。
+         *
+         * ①② 的时限随链路取（`LINK.cancelAck` / `LINK.hello`）。CF 上这一步**注定要等**：
+         * 取消帧排在已交出去的字节后面（停等把在途压到 1 块，256KB 实测也要 8~10s 才排空），
+         * 所以该等 15~20s；局域网最多几毫秒，等 3s 都嫌多。
          */
         _awaitCancelAck() {
+            const ackLimit = FilePanel.CANCEL_ACK_TIMEOUT;   // 起等时定死，见 LINK
+            const helloLimit = FilePanel.HELLO_TIMEOUT;
             return new Promise((resolve) => {
                 const started = performance.now();
                 let helloSentAt = 0;
@@ -4389,13 +4433,13 @@
                     if (this._helloOk) { resolve('hello'); return; }
                     if (!this.ws.getConnected()) { resolve('offline'); return; }
                     const elapsed = performance.now() - started;
-                    if (!helloSentAt && elapsed >= FilePanel.CANCEL_ACK_TIMEOUT) {
+                    if (!helloSentAt && elapsed >= ackLimit) {
                         helloSentAt = elapsed;
                         this._helloSeq += 1;
                         this._helloWait = this._helloSeq;
                         this.onCommand({ type: 'hello', t: this._helloSeq });
                         console.warn('[FILE] cancel 回执超时，发 hello 探活 t=' + this._helloSeq);
-                    } else if (helloSentAt && elapsed - helloSentAt >= FilePanel.HELLO_TIMEOUT) {
+                    } else if (helloSentAt && elapsed - helloSentAt >= helloLimit) {
                         console.warn('[FILE] hello 探活也超时，取消按本地判定收尾');
                         resolve('timeout');
                         return;
