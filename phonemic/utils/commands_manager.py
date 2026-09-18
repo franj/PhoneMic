@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -101,10 +102,17 @@ class CommandsManager(QObject):
             if need_save:
                 self.save()   # 将修复后的数据写回文件
         except Exception as e:
-            # 备份损坏文件
+            # 备份损坏文件后用 os.replace 而非 Path.rename：Windows 上 rename
+            # 目标已存在会抛 FileExistsError，而这个调用就在 except 块里——
+            # 第二次损坏时异常会直接冒出去把 __init__ 带崩。
             backup = file_path.with_suffix(".json.bak")
-            file_path.rename(backup)
-            print(f"[CommandsManager] Failed to load commands.json, backup created: {backup}, error: {e}")
+            try:
+                os.replace(file_path, backup)
+                print(f"[CommandsManager] Failed to load commands.json, backup created: {backup}, error: {e}")
+            except OSError as be:
+                # 备份失败也要能把服务拉起来（杀软扫描期文件可能被短暂锁住）：
+                # 损坏文件留在原地即可，紧随其后的 save() 会覆写它。
+                print(f"[CommandsManager] Failed to load commands.json and backup failed: {be}, error: {e}")
             self._commands = []
             self.save()
 

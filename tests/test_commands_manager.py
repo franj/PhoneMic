@@ -272,6 +272,32 @@ class TestCommandsManagerPersistence:
         assert backup_path.exists()
         assert backup_path.read_text(encoding="utf-8") == "这不是合法的json"
 
+    def test_load_malformed_json_twice(self, isolated_mgr):
+        """回归：第二次损坏时备份目标已存在，不能把构造带崩。
+
+        旧实现用 file_path.rename(backup)，Windows 上目标已存在会抛
+        FileExistsError —— 而这个调用就在 except 块里，异常直接冒出去，
+        CommandsManager() 构造失败（表现为启动即崩 / 命令列表空）。
+        """
+        mgr, tmp_path = isolated_mgr
+        backup_path = tmp_path / "PhoneMic/config/commands.json.bak"
+
+        # 第一次损坏：正常生成备份
+        _write_malformed_json(tmp_path)
+        CommandsManager._instance = None
+        assert CommandsManager().get_commands() == []
+        assert backup_path.exists()
+
+        # 第二次损坏：备份路径已被上一轮占用
+        _write_malformed_json(tmp_path)
+        (tmp_path / "PhoneMic/config/commands.json").write_text(
+            "第二次损坏", encoding="utf-8")
+        CommandsManager._instance = None
+        mgr2 = CommandsManager()          # 修复前这里抛 FileExistsError
+
+        assert mgr2.get_commands() == []
+        assert backup_path.read_text(encoding="utf-8") == "第二次损坏"
+
     def test_load_extra_fields_ignored(self, isolated_mgr):
         mgr, tmp_path = isolated_mgr
         _write_with_unknown_fields(tmp_path)
