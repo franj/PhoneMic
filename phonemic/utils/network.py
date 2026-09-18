@@ -7,6 +7,9 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import socket
 
+# psutil 只导出了 AF_LINK（Mac 地址那一类），IPv4 的地址族要用 socket 里的
+_AF_INET = socket.AF_INET
+
 @dataclass
 class IpCandidate:
     ip: str                # 例如 "192.168.1.100"
@@ -53,20 +56,36 @@ def _get_interface_info(iface_name: str) -> Dict[str, Any]:
 
 
 def _is_virtual_interface(desc: str) -> bool:
-    """根据网卡描述判断是否为虚拟网卡"""
-    pattern = r"(VMware|VirtualBox|Hyper-V|Virtual|VBox|VMnet)"
+    """根据网卡名判断是否为虚拟网卡（只用于降权，不排除）。
+
+    比对的是 psutil 的友好名，Windows 上可能是中文（「本地连接* 1」）或
+    「vEthernet (Default Switch)」这类，所以关键词要覆盖中英两套写法。
+    """
+    pattern = (
+        r"(VMware|VirtualBox|Hyper-V|vEthernet|Virtual|VBox|VMnet|"
+        r"Npcap|TAP-Windows|Wintun|WireGuard|OpenVPN|Tailscale|ZeroTier|Radmin|"
+        r"Loopback|Bluetooth|蓝牙|虚拟|"
+        r"本地连接\s*\*|Local Area Connection\s*\*)"
+    )
     return bool(re.search(pattern, desc, re.IGNORECASE))
 
 
-def _guess_interface_type(name: str, desc: str) -> str:
+def _guess_interface_type(name: str, desc: str = "") -> str:
     """
-    猜测网卡类型：wifi / ethernet / other
-    基于名称或描述中的关键词。
+    猜测网卡类型：wifi / ethernet / other，只影响优先级。
+
+    同样比对 psutil 的友好名：Windows 中文系统上是「WLAN」「以太网」，
+    英文系统上是「Wi-Fi」「Ethernet」，所以中英关键词都要有，且 Wi-Fi 的
+    英文名带连字符（「Wi-Fi」），不能只匹配 "wifi"。
     """
     combined = f"{name} {desc}".lower()
-    if re.search(r"(wifi|wireless|wlan)", combined):
+    if re.search(r"(wi-?fi|wireless|wlan|无线)", combined):
         return "wifi"
-    if re.search(r"(ethernet|gigabit|pcie|realtek|intel.*ether)", combined):
+    if re.search(
+        r"(ethernet|gigabit|pcie|realtek|intel.*ether|以太网|"
+        r"本地连接(?!\s*\*)|Local Area Connection(?!\s*\*))",
+        combined,
+    ):
         return "ethernet"
     return "other"
 
@@ -98,6 +117,7 @@ def _is_same_subnet(ip: str, gateway_ip: str, netmask: str) -> bool:
         return False
 
 def get_network_interface_name_by_ip(ip_address: str) -> Optional[str]:
+    """按 IP 反查 psutil 的网卡友好名（get_all_lan_ips 已不再依赖它）。"""
     ip_address = ip_address.strip()  # 去除多余空格
     for interface_name, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
@@ -107,63 +127,75 @@ def get_network_interface_name_by_ip(ip_address: str) -> Optional[str]:
     return None
 
 def get_all_lan_ips() -> List[IpCandidate]:
-    candidates = []
+    """枚举本机可用的局域网 IPv4 候选，按 priority 升序（越小越优先）。
+
+    网卡枚举**只用 psutil 一套命名空间**：netifaces 在 Windows 上返回适配器
+    GUID（``{DE30760F-...}``），psutil 返回友好名（``WLAN`` / ``以太网``），
+    两者**没有交集**。原实现拿 netifaces 的名字去查 psutil 的表，导致：
+
+    - MAC 恒为空 → ``last`` 网络选择模式永远匹配不上、只能回退 ``auto``；
+    - ``net_if_stats`` 查不到 → 未启用的网卡判不出来；
+    - 网卡类型猜不出来（GUID 里没有 wifi/ethernet 关键词）→ 优先级全凭运气。
+
+    netifaces 现在只保留给 ``_get_default_gateway_ip()``（psutil 没有网关 API）。
+
+    虚拟网卡只**降权不排除**：用户可能只有一块虚拟网卡可用，排在后面总比
+    直接选不出来强。
+    """
     default_gateway = _get_default_gateway_ip()
-    
-    for iface_name in netifaces.interfaces():
-        addrs = netifaces.ifaddresses(iface_name)
-        if netifaces.AF_INET not in addrs:
-            continue
-        # 获取网卡描述（Windows 下 netifaces 可能不直接提供，需用 cc）
-        try:
-            description = get_network_interface_name_by_ip(addrs[netifaces.AF_INET][0]['addr'])  # psutil 返回的是友好名称
-            if_stats = psutil.net_if_stats().get(description)
-            if not if_stats.isup:
-                continue   # 跳过未启用的网卡
-        except:
-            description = iface_name
-        
-        # 判断接口类型和是否虚拟
-        iface_type = _guess_interface_type(iface_name, description)
-        is_virtual = _is_virtual_interface(description)
-        
-        # 获取 MAC 地址
+    stats = psutil.net_if_stats()
+    candidates = []
+
+    for iface_name, addrs in psutil.net_if_addrs().items():
+        iface_stats = stats.get(iface_name)
+        if iface_stats is not None and not iface_stats.isup:
+            continue   # 跳过未启用的网卡
+
+        # MAC 与 IP 取自同一张表（同一个键），命名空间天然一致
         mac = ""
-        try:
-            addrs_mac = psutil.net_if_addrs().get(iface_name, [])
-            for addr in addrs_mac:
-                if addr.family == psutil.AF_LINK:
-                    mac = addr.address
-                    break
-        except Exception:
-            pass  # 保持为空
-        
-        for addr in addrs[netifaces.AF_INET]:
-            ip = addr['addr']
-            netmask = addr.get('netmask')
-            # 过滤回环和链路本地
-            if ip.startswith('127.') or ip.startswith('169.254.'):
+        for addr in addrs:
+            if addr.family == psutil.AF_LINK:
+                mac = addr.address or ""
+                break
+
+        # 判断接口类型和是否虚拟
+        iface_type = _guess_interface_type(iface_name)
+        is_virtual = _is_virtual_interface(iface_name)
+
+        for addr in addrs:
+            if addr.family != _AF_INET:
                 continue
+            ip = addr.address
+            # 过滤回环和链路本地（169.254.x.x 是自动私有地址，连不上对端）
+            if not ip or ip.startswith('127.') or ip.startswith('169.254.'):
+                continue
+
+            netmask = addr.netmask
+            gateway_match = bool(
+                default_gateway and netmask
+                and _is_same_subnet(ip, default_gateway, netmask)
+            )
+
             # 计算优先级权重
             weight = 0
             if not is_virtual:
                 weight += 100
-            if default_gateway and netmask and _is_same_subnet(ip, default_gateway, netmask):
+            if gateway_match:
                 weight += 50
             if iface_type == 'wifi':
                 weight += 30
             elif iface_type == 'ethernet':
                 weight += 20
-            # 跃点数暂无法获取，忽略
+            # 跃点数暂无法可靠获取，忽略
             priority = -weight   # 因为 priority 越小越优先，所以取负权重
-            
+
             candidates.append(IpCandidate(
                 ip=ip,
                 interface_name=iface_name,
-                description=description,
+                description=iface_name,   # Windows 下 psutil 的键就是友好名，直接展示
                 priority=priority,
                 is_virtual=is_virtual,
-                is_default_gateway_match=(default_gateway and netmask and _is_same_subnet(ip, default_gateway, netmask)),
+                is_default_gateway_match=gateway_match,
                 interface_type=iface_type,
                 metric=0,
                 mac=mac   # 传入 MAC
