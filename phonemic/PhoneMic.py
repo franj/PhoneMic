@@ -18,7 +18,14 @@ from phonemic.bridge_queue import QueueEventBridge
 from phonemic.gui.dashboard import Dashboard
 from phonemic.gui.hud import HudWindow
 from phonemic.gui.ip_selector import select_lan_ip
-from phonemic.gui.keyboard import flash_insert, preview_text, send_keys, discard_preview
+from phonemic.gui import direct_input
+from phonemic.gui.keyboard import (
+    INPUT_MODE_DIRECT,
+    flash_insert,
+    preview_text,
+    send_keys,
+    discard_preview,
+)
 from phonemic.gui.clipboard import copy_image
 from phonemic.gui.mouse import perform_mouse, set_stats_hook
 from phonemic.gui.mouse_debug import MouseDebugWindow
@@ -279,6 +286,17 @@ def main():
     # 6. 事件处理
     command_interceptor = CommandInterceptor()
 
+    # 上屏方式变更时，若切到「模拟键盘（实时）」，先结束可能残留的上一轮 direct 会话。
+    # direct_input 是模块级单例：停在 ABANDONED 会粘住下一轮——新的一轮 update()
+    # 一直返回 False（不再打字），整轮静默退化成「预览 + 悬浮窗」。
+    # 刻意不在「切离 direct」时重置：那时输入框里可能还留着 preview 打出的文字，
+    # 重置会让随后的 discard_preview() 变成空操作，命令命中时就少删了那串字面文字。
+    def _on_input_mode_setting_changed(mode: Any) -> None:
+        if mode == INPUT_MODE_DIRECT:
+            direct_input.reset()
+
+    sm.connect_changed("text_input_mode", _on_input_mode_setting_changed)
+
     def on_backend_event(event_type: str, payload: Any):
         if event_type == "preview":
             # 直接输入模式下文字已打进目标输入框，此时不该同时弹悬浮窗预览
@@ -315,6 +333,9 @@ def main():
             dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
         elif event_type == "disconnect":
+            # 一轮会话到此为止：清掉可能停在 ABANDONED 的 direct 会话，
+            # 否则下一轮会静默退化成「预览 + 悬浮窗」（原因见上屏方式变更处）。
+            direct_input.reset()
             dashboard.update_connection_status(False)
             tray.update_connection_status(False)
         elif event_type == "tunnel_url":
