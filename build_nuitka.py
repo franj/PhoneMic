@@ -38,8 +38,8 @@ VENDOR_CACHE = PROJECT_ROOT / "build" / "vendor"
 VENDORS = [
     {
         "name": "cloudflared",
-        "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-windows-amd64.exe",
-        "sha256": "c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5",
+        "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/cloudflared-windows-amd64.exe",
+        "sha256": "2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712",
         "dest": "bin/cloudflared.exe",
     },
 ]
