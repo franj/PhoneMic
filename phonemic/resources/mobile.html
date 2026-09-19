@@ -1399,11 +1399,80 @@
         }
     }
 
+    // ========== 1.3 信号总线（一对多，Qt signal 风格） ==========
+    /**
+     * 一对多信号：数组存槽，`connect` 返回注销函数。
+     *
+     * 相比旧的「Map(type → 单个 handler)」，它解决了两件事：
+     *   1. **多订阅者互不覆盖** —— 老写法是 `set`，后者静默顶掉前者且无任何日志；
+     *   2. **注销有句柄** —— `connect` 的返回值就是注销函数，不必记住原函数引用。
+     *
+     * 三个必须写对的细节（漏一个就会出「不报错但有人收不到通知」的鬼问题）：
+     *   - `emit` 遍历**快照**：回调里 connect / 注销都不会打乱本次迭代；
+     *   - 每轮都要 `includes(e)` 复查：前一个槽可能把后面还没执行的槽摘掉；
+     *   - 每个槽单独 try/catch：一个订阅者抛异常不能吃掉排在它后面的订阅者。
+     */
+    class Signal {
+        constructor(name) { this.name = name; this.slots = []; }
+
+        /**
+         * 订阅。返回注销函数（**幂等**，可重复调用，重复调用是安全的空操作）。
+         * `opts.signal` 传入 AbortSignal 时随其 abort 自动注销（≈ Qt 的
+         * `QMetaObject::Connection`），一次等待配一个 AbortController 即可一把退订全部。
+         */
+        connect(fn, once = false, opts = null) {
+            const e = { fn, once };
+            this.slots.push(e);
+            const off = () => {
+                const i = this.slots.indexOf(e);
+                if (i !== -1) this.slots.splice(i, 1);
+            };
+            if (opts && opts.signal) {
+                if (opts.signal.aborted) { off(); return off; }
+                opts.signal.addEventListener('abort', off, { once: true });
+            }
+            return off;
+        }
+
+        once(fn, opts = null) { return this.connect(fn, true, opts); }
+
+        emit(...args) {
+            for (const e of [...this.slots]) {          // 快照：回调里的增删不影响本次迭代
+                if (!this.slots.includes(e)) continue;  // 已被前面的槽摘掉
+                if (e.once) this.slots.splice(this.slots.indexOf(e), 1);   // 先摘后调，防重入
+                try { e.fn(...args); }
+                catch (err) { console.error('[Signal] ' + (this.name || '') + ' 订阅者抛异常', err); }
+            }
+        }
+    }
+
+    /** 按 type 分发的一组 Signal */
+    class SignalHub {
+        constructor() { this.map = new Map(); }
+        _sig(type) {
+            let s = this.map.get(type);
+            if (!s) { s = new Signal(type); this.map.set(type, s); }
+            return s;
+        }
+        on(type, fn, opts = null)   { return this._sig(type).connect(fn, false, opts); }
+        once(type, fn, opts = null) { return this._sig(type).once(fn, opts); }
+        /**
+         * 返回**是否有人接住**。无人订阅时返回 false —— 「没人订阅」往往只是
+         * 「合法地不关心」，是否告警由调用方决定（WSClient 需要告警，ConfigManager 不需要）。
+         */
+        emit(type, ...args) {
+            const s = this.map.get(type);
+            if (!s || s.slots.length === 0) return false;
+            s.emit(...args);
+            return true;
+        }
+    }
+
     // ========== 2. 配置管理器 ==========
     class ConfigManager {
         constructor(defaults) {
             this.config = { ...defaults };
-            this.listeners = new Map();
+            this.hub = new SignalHub();   // 见 1.3 节：多订阅者互不覆盖、可注销、异常互相隔离
         }
         get(key) { return this.config[key]; }
         set(key, value) {
@@ -1415,14 +1484,9 @@
         updateMany(newConfig) {
             Object.entries(newConfig).forEach(([key, value]) => this.set(key, value));
         }
-        on(key, callback) {
-            if (!this.listeners.has(key)) this.listeners.set(key, []);
-            this.listeners.get(key).push(callback);
-        }
-        _notify(key, newVal, oldVal) {
-            const callbacks = this.listeners.get(key) || [];
-            callbacks.forEach(cb => cb(newVal, oldVal));
-        }
+        /** 订阅某个配置键的变更，**返回注销函数** */
+        on(key, callback, opts = null) { return this.hub.on(key, callback, opts); }
+        _notify(key, newVal, oldVal) { this.hub.emit(key, newVal, oldVal); }
     }
     const DEFAULT_CONFIG = { maxHistory: 50 };
     const appConfig = new ConfigManager(DEFAULT_CONFIG);
@@ -1645,10 +1709,17 @@
             this._skipNextDelay = false;
             this.authRejected = false;
             this._lastClose = null;   // 最近一次 onclose 的现场（code/reason/clean/stale）
-            this.messageHandlers = new Map();
+            // 下行帧分发（SignalHub：多订阅者互不覆盖，见 1.3 节）
+            this.hub = new SignalHub();
             this.secure = new SecureClient();
         }
-        on(type, handler) { this.messageHandlers.set(type, handler); }
+        /**
+         * 订阅下行帧。**返回注销函数**（幂等）——现有调用点都不接收返回值，
+         * 故与旧的「单槽 Map」写法向后兼容。需要一次性退订时传 `{ signal }`。
+         */
+        on(type, handler, opts = null) { return this.hub.on(type, handler, opts); }
+        /** 只接一帧就自动注销（等价于 on 后立即在回调里注销自己，但不会漏掉并发帧） */
+        once(type, handler, opts = null) { return this.hub.once(type, handler, opts); }
 
         _setDebugStatus(text) {
             // 静默宽限期内界面必须保持原样：重连过程的「正在发起连接…」这类中间态
@@ -1828,9 +1899,10 @@
                             this.isConnected = true;
                             this._notifyStatusChange(true);
                         }
-                        const handler = this.messageHandlers.get(inner.type);
-                        if (handler) handler(inner);
-                        else console.warn(t('log_ws_unknown_type'), inner.type);
+                        // 无人接住才告警：多订阅者之后「没注册」往往只是「合法地不关心」
+                        if (!this.hub.emit(inner.type, inner)) {
+                            console.warn(t('log_ws_unknown_type'), inner.type);
+                        }
                     } catch (err) { console.error(t('log_ws_parse_error'), err); }
                 };
                 this.ws.onclose = (ev) => {

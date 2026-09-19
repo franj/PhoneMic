@@ -1230,3 +1230,125 @@ class TestPackagedMode:
         # 未接管 console：记录一行也不会进缓冲
         page.evaluate("() => console.log('[TEST] 打包版不应留痕')")
         assert page.evaluate("() => window.PhoneLog.text()") == ""
+
+
+class TestSignalBus:
+    """WSClient.on 必须是一对多（mobile.html 1.3 节 SignalHub）。
+
+    旧实现是 ``messageHandlers.set(type, handler)`` 的**单槽 Map**：后注册者**静默顶掉**
+    前者，且一条日志都没有。FilePanel 目前是 ack/hello/error 的唯一订阅者，所以这个隐患
+    还没暴露；这几条用例把它钉死 —— 谁改回单槽，这里立刻红。
+
+    用例里的 ref 一律用 ``'probe'``：FilePanel 的 ack handler 按 ``ref !== _kind`` 过滤，
+    探针帧会被它忽略，不会污染传输状态。
+    """
+
+    PROBE = "{type:'ack', ref:'probe', id:0, a:'end'}"
+
+    def _slots(self, page, kind="ack"):
+        """某 type 当前的槽数（FilePanel 构造时已注册 ack / hello / error）。"""
+        return page.evaluate(
+            "() => { const s = window.__wsClient.hub.map.get('" + kind + "');"
+            "        return s ? s.slots.length : 0; }"
+        )
+
+    def test_two_subscribers_both_receive(self, mobile_page):
+        """同一 type 的两个订阅者都要收到 —— 旧实现只有后注册的那个收得到。"""
+        hits = mobile_page.evaluate(
+            "() => {"
+            "  const hits = [];"
+            "  const off1 = window.__wsClient.on('ack', () => hits.push('a'));"
+            "  const off2 = window.__wsClient.on('ack', () => hits.push('b'));"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  off1(); off2();"
+            "  return hits.join(',');"
+            "}"
+        )
+        assert hits == "a,b", hits
+
+    def test_new_subscriber_does_not_evict_existing(self, mobile_page):
+        """注册新订阅者后槽数应当**增加**，而不是被覆盖后仍是 1。"""
+        before = self._slots(mobile_page)          # FilePanel 自己的订阅
+        assert before >= 1, "FilePanel 构造时的订阅不该消失"
+        after = mobile_page.evaluate(
+            "() => {"
+            "  const off = window.__wsClient.on('ack', () => {});"
+            "  const n = window.__wsClient.hub.map.get('ack').slots.length;"
+            "  off();"
+            "  return n;"
+            "}"
+        )
+        assert after == before + 1, (before, after)
+        assert self._slots(mobile_page) == before, "注销后必须回到原样"
+
+    def test_unsubscribe_is_idempotent(self, mobile_page):
+        """connect 的返回值就是注销函数，重复调用是安全的空操作。"""
+        r = mobile_page.evaluate(
+            "() => {"
+            "  let n = 0;"
+            "  const off = window.__wsClient.on('ack', () => n++);"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  const before = n;"
+            "  off(); off();"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  return {before: before, after: n};"
+            "}"
+        )
+        assert r == {"before": 1, "after": 1}, r
+
+    def test_once_fires_only_once(self, mobile_page):
+        n = mobile_page.evaluate(
+            "() => {"
+            "  let n = 0;"
+            "  window.__wsClient.once('ack', () => n++);"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  return n;"
+            "}"
+        )
+        assert n == 1, n
+
+    def test_throwing_subscriber_does_not_break_others(self, mobile_page):
+        """异常隔离：一个订阅者抛异常，排在它后面的订阅者照常收到。"""
+        r = mobile_page.evaluate(
+            "() => {"
+            "  const hits = [];"
+            "  const off1 = window.__wsClient.on('ack', () => { throw new Error('boom'); });"
+            "  const off2 = window.__wsClient.on('ack', () => hits.push('after'));"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  off1(); off2();"
+            "  return hits.join(',');"
+            "}"
+        )
+        assert r == "after", r
+
+    def test_abort_signal_auto_unsubscribes(self, mobile_page):
+        """opts.signal：一个 AbortController 就是 Qt 的那个 Connection 句柄。"""
+        r = mobile_page.evaluate(
+            "() => {"
+            "  let n = 0;"
+            "  const ac = new AbortController();"
+            "  window.__wsClient.on('ack', () => n++, { signal: ac.signal });"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  const before = n;"
+            "  ac.abort();"
+            "  window.__mockWS.triggerMessage(" + self.PROBE + ");"
+            "  return {before: before, after: n};"
+            "}"
+        )
+        assert r == {"before": 1, "after": 1}, r
+
+    def test_config_manager_supports_two_subscribers(self, mobile_page):
+        """ConfigManager 也换成 SignalHub：多订阅者 + 可注销（旧写法没有 off）。"""
+        r = mobile_page.evaluate(
+            "() => {"
+            "  const cfg = window.chatManagerInstance.config;"
+            "  const hits = [];"
+            "  const off1 = cfg.on('maxHistory', (v) => hits.push('a' + v));"
+            "  const off2 = cfg.on('maxHistory', (v) => hits.push('b' + v));"
+            "  cfg.set('maxHistory', 77);"
+            "  off1(); off2();"
+            "  return hits.join(',');"
+            "}"
+        )
+        assert r == "a77,b77", r
