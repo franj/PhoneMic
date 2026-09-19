@@ -716,6 +716,53 @@ class TestStopAndWait:
         assert page.evaluate("() => window._filePanel._gateGaveUp") is True
 
 
+class TestStartFrameFailure:
+    """`start` 帧发不出去必须**就地失败收尾** —— 它是唯一没有兜底的帧出口（协议 §9）。
+
+    `_start` 开头那次 `getConnected()` 只是上一刻的快照，而那一刻还没有任何订阅能替
+    `start` 兜底（`ack` / `WS_CLOSE` 的订阅都要等下一行 `_waitChunkAck` 才挂上）。若不管
+    返回值：断连 + 重连的竞态下 data 会打到服务端已被 `abort_all()` 清掉的会话
+    （`_file_receiver` 是**模块级单例**，会话按 `id` 全局路由），服务端回
+    `error(malformed)`，用户看到一次**连 `.part` 都没建起来**的无理由失败。
+    """
+
+    FAKE = ("{name: 'sf.bin', size: 3 * 1024 * 1024,"
+            " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
+    FAILED = MOBILE_I18N["bubble_file_failed"].replace("{name}", "sf.bin")
+
+    def _start_with_dead_start_frame(self, page):
+        """只让 `start` 发不出去：模拟「就在这几行之间连接断了」。"""
+        page.evaluate(
+            "() => {"
+            "  const tr = window._filePanel.transport;"
+            "  const orig = tr.sendFrame;"
+            "  tr.sendFrame = (f) => f.a === 'start' ? false : orig.call(tr, f);"
+            "}"
+        )
+        page.evaluate(
+            f"() => {{ window.__sendP = window._filePanel._start({self.FAKE}, 'file'); }}"
+        )
+
+    def test_no_data_is_sent_when_start_never_went_out(self, mobile_page):
+        page = mobile_page
+        self._start_with_dead_start_frame(page)
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=3000)
+
+        # 核心：start 没上线 ⇒ 一块 data 都不许发（发了就是打到服务端不存在的会话上）
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length") == 0
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.some(m => m.a === 'end')") is False
+        # 就地失败收尾：界面解锁 + 失败气泡（既不卡在 sending，也不谎报成功）
+        assert page.evaluate("() => window._filePanel._file") is None
+        assert page.evaluate(
+            "() => document.body.classList.contains('file-transferring')") is False
+        bubbles = page.evaluate(
+            "() => Array.from(document.querySelectorAll('.message')).map(m => m.textContent)")
+        assert self.FAILED in bubbles
+        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "sf.bin") not in bubbles
+
+
 class TestEndAck:
     """「发送成功」必须由 PC 的 end ack 判定——等不到就如实报「未确认」，绝不猜成功。
 

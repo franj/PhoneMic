@@ -4329,7 +4329,17 @@
             this._chunkSize = chunkSize;   // 进度只允许 ack 领先至多一块（见 _progressTick）
             const total = Math.ceil(file.size / chunkSize);
             // 帧 type 随传输类型（wire-protocol.md §9：file/photo 线格式相同）
-            this.transport.sendFrame({ type: kind, a: 'start', id: this._id, name: file.name, size: file.size, chunks: total });
+            // ⚠️ start 是**唯一没有兜底**的帧出口，必须看返回值：上面那次 getConnected()
+            // 只是上一刻的快照，而此刻还没有任何订阅能替它兜底。发丢的后果不只是「服务端
+            // 收不到 start」——断连重连后 data 会打到已被 abort_all() 清掉的会话（会话按
+            // id 全局路由），服务端回 error(malformed)，用户看到一次连 .part 都没建起来的
+            // 无理由失败。就地失败收尾，不进发送循环。
+            if (!this.transport.sendFrame({ type: kind, a: 'start', id: this._id,
+                                            name: file.name, size: file.size, chunks: total })) {
+                console.warn('[FILE] start 帧未发出（连接已断），就地失败收尾');
+                this._finish(false);
+                return;
+            }
 
             for (let n = 0; n < total; n++) {
                 if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾

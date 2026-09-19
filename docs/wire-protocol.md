@@ -485,6 +485,7 @@ c→s  {"type":"auth_proof", "nonce":<bin>}           ← 加密帧
   - **代价**：吞吐上限 ≈ `MAX_INFLIGHT × 块大小 ÷ (单向传输时间 + RTT)`。局域网上 1MB 一块几乎无感；Cloudflare 上瓶颈其实是**上行带宽**而不是 RTT——2026-09-18 真机实测 256KB 一块要 8~10s（≈30KB/s），此时停等**并不吃亏**（链路本身就是瓶颈，把在途压到 1 块不影响吞吐），而且取消延迟已经从「在途积压 ÷ 吞吐」降到「1 块 ÷ 吞吐」，正是这 8~10s。只有链路快到「RTT 成为瓶颈」时，调大 `MAX_INFLIGHT` 才有收益 —— 那仍是「在途 ≤ N 块」的滑动窗口，不是退回无节制流水线。
   - **兜底仍是 `bufferedAmount`**：超过 `HIGH_WATER`（4MB）暂停发送、降到 `LOW_WATER`（1MB）再继续（`FilePanel._waitDrain`，每 20ms 采样）。停等生效时它基本不会被触发。
   - **ack 超时必须降级**（`LINK.chunkAck`：局域网 15s / CF 45s，且**只降级一次**）：ack 通道若失灵，整体退回流水线并置 `_gateGaveUp`，而不是把传输拖成「1 块 / 超时」。协议层面 ack 走同一条可靠有序通道，正常不会丢，这条纯粹是防死锁。**超时值同样要分链路**：CF 上一块本身就要 8~10s 才走完，套用局域网的 15s 会在**正常等待**里误降级，那等于白丢了停等带来的节流（比不降级更糟）。
+- **发送端每个 `sendFrame` 出口都要看返回值**（返回 false = socket 已不可写，这一帧**根本没上线**）。有别的路兜底的可以不管：data 帧当场失败收尾、`end` 有 `WS_CLOSE` + 保险超时、`hello` 有 `helloLimit`。**但 `start` 是唯一没有兜底的** —— 那一刻 `_start` 里还没有任何订阅（`ack` / `WS_CLOSE` 都要等下一行的 `_waitChunkAck` 才挂上）。若不管它，断连 + 重连的竞态下 data 会发进服务端已被 `abort_all()` 清掉的会话（`_file_receiver` 是**模块级单例**，会话按 `id` 全局路由），服务端回 `error(malformed)`，用户看到一次**连 `.part` 都没建起来**的无理由失败。所以 `start` 发送失败即 `_finish(false)`，不进发送循环。
 - **发送期间 WS 单会话单文件**：一次连接同时只进行一次 `file` 传输（`start` 后未 `end`/`cancel` 前收到新 `start` 视为协议错误，回 `error(malformed)`）。v1 不做队列。
 
 ### 9.1 两个 sink：file 落盘、photo 剪贴板
