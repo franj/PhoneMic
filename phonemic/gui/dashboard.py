@@ -1,17 +1,14 @@
 from typing import Callable, Optional
-import os
 import subprocess
 import sys
 
 import qrcode
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap, QAction, QActionGroup, QPainter, QColor
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics, QPixmap, QAction, QActionGroup, QPainter, QColor, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QMenuBar, QMessageBox, QApplication,
-    QDialog, QRadioButton, QCheckBox, QDialogButtonBox
+    QMainWindow, QWidget, QVBoxLayout, QLabel, QTextBrowser, QFrame, QMessageBox,
+    QApplication, QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
-from PySide6.QtWidgets import QSystemTrayIcon  # 新增
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
@@ -138,11 +135,19 @@ class Dashboard(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line)
 
-        # 地址栏：QLabel，居中 + 自动换行，可用鼠标选中复制
-        self.ip_label = QLabel(f"http://{ip}:{port}")
-        self.ip_label.setAlignment(Qt.AlignCenter)
-        self.ip_label.setWordWrap(True)
-        self.ip_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 地址栏：QTextBrowser —— 只读、无边框、无滚动条、按字符换行。
+        # 长 URL 保证完整显示，且高度固定，不会像 wordWrap 的 QLabel 那样
+        # 被布局压扁裁掉、也不会撑开去挤别的地方。
+        self.ip_label = QTextBrowser()
+        self.ip_label.setWordWrapMode(QTextOption.WrapAnywhere)   # 关键：不按词、按字符断
+        self.ip_label.setFrameShape(QFrame.NoFrame)
+        self.ip_label.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ip_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ip_label.setStyleSheet("QTextBrowser { background: transparent; border: none; }")
+        self.ip_label.document().setDocumentMargin(0)
+        fm = QFontMetrics(self.ip_label.font())
+        self.ip_label.setFixedHeight(fm.lineSpacing() * 3 + 4)     # 固定 3 行高，可调
+        self._set_ip_text(f"http://{ip}:{port}")
         layout.addWidget(self.ip_label)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
@@ -194,7 +199,7 @@ class Dashboard(QMainWindow):
             if self._tunnel_url:
                 self._refresh_qr()
             else:
-                self.ip_label.setText(self.i18n.tr("dashboard.cf_connecting"))
+                self._set_ip_text(self.i18n.tr("dashboard.cf_connecting"))
 
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
@@ -226,7 +231,7 @@ class Dashboard(QMainWindow):
             self._sync_menu_checks()
             return
         self._set_busy(True)
-        self.ip_label.setText(self.i18n.tr("dashboard.switching"))
+        self._set_ip_text(self.i18n.tr("dashboard.switching"))
         self._mode = target_mode
         # 换模式＝旧的保活结论作废（保活只在 Cloudflare 模式运行）
         self._reset_tunnel_reachability()
@@ -284,14 +289,25 @@ class Dashboard(QMainWindow):
         if self._secure_channel:
             url = self._secure_channel.append_to_url(url)
         return url
+    def _set_ip_text(self, text: str) -> None:
+        """更新地址栏文本。
 
+        必须用 setPlainText：URL 里的 `&`、`<`、`>` 在 QTextBrowser 里会被
+        当 HTML 解析，走 setText 会显示错乱。同时把整段设为居中，并把视图
+        拉回开头 —— 否则长 URL 会默认停在末尾，看到的是尾巴。
+        """
+        self.ip_label.setPlainText(text)
+        self.ip_label.setToolTip(text)          # 万一真被高度截断，悬停看全文
+        self.ip_label.selectAll()
+        self.ip_label.setAlignment(Qt.AlignCenter)
+        self.ip_label.moveCursor(QTextCursor.Start)   # 清选择 + 滚回开头
     def _refresh_qr(self) -> None:
         """刷新 QR 码和地址栏。"""
         if self._switching:
             return
         url = self._get_qr_url()
         self.qr_label.setPixmap(make_qr_pixmap(url))
-        self.ip_label.setText(url)
+        self._set_ip_text(url)
 
     def update_tunnel_url(self, url: Optional[str]) -> None:
         """更新隧道 URL（Cloudflare 模式下更新二维码和地址）。
@@ -308,7 +324,7 @@ class Dashboard(QMainWindow):
                 else:
                     self._refresh_qr()
             else:
-                self.ip_label.setText("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
+                self._set_ip_text("Cloudflare: " + self.i18n.tr("dashboard.status_disconnected"))
 
     def get_mode(self) -> TunnelMode:
         """返回当前模式。"""
@@ -462,7 +478,7 @@ class Dashboard(QMainWindow):
         if self._switching:
             return
         self._set_busy(True)
-        self.ip_label.setText(self.i18n.tr("dashboard.restarting"))
+        self._set_ip_text(self.i18n.tr("dashboard.restarting"))
         self._tunnel_url = None
         # 重启正是失效时的自救动作，清掉失效标记（拿到新 URL 后会再次刷新）
         self._reset_tunnel_reachability()

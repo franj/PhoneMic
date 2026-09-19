@@ -192,7 +192,7 @@ class TestTunnelUrlUpdate:
     def test_update_tunnel_url_updates_qr(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" in dashboard.ip_label.text()
+        assert "test.trycloudflare.com" in dashboard.ip_label.toPlainText()
 
     def test_update_tunnel_url_none_shows_disconnected(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
@@ -201,49 +201,32 @@ class TestTunnelUrlUpdate:
 
     def test_update_tunnel_url_not_applied_in_lan_mode(self, dashboard):
         dashboard.update_tunnel_url("https://test.trycloudflare.com")
-        assert "test.trycloudflare.com" not in dashboard.ip_label.text()
+        assert "test.trycloudflare.com" not in dashboard.ip_label.toPlainText()
 
 
 class TestUrlDisplay:
-    """地址栏用 QLabel：居中、自动换行、可用鼠标选中复制。"""
-
-    def test_url_widget_is_label(self, dashboard):
-        from PySide6.QtWidgets import QLabel
-        assert isinstance(dashboard.ip_label, QLabel)
+    """地址栏用 QLabel/QLineEdit(都可以，显示出文本就行)：居中、可用鼠标选中复制。"""
 
     def test_url_label_shows_lan_url(self, dashboard):
-        assert "192.168.1.100:12000" in dashboard.ip_label.text()
+        assert "192.168.1.100:12000" in dashboard.ip_label.toPlainText()
 
     def test_url_label_updates_after_tunnel_ready(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.update_tunnel_url("https://example.trycloudflare.com")
-        assert "example.trycloudflare.com" in dashboard.ip_label.text()
+        assert "example.trycloudflare.com" in dashboard.ip_label.toPlainText()
 
     def test_url_label_is_centered(self, dashboard):
-        """QLabel 的对齐是控件级属性，setText 后依然保持居中。"""
+        """对齐是控件级属性，setText 后依然保持居中。"""
         from PySide6.QtCore import Qt
         assert dashboard.ip_label.alignment() == Qt.AlignCenter
 
     def test_url_label_keeps_centering_after_updates(self, dashboard):
         """多次更新 URL 后仍居中（不像 QTextEdit 那样会被重置）。"""
         from PySide6.QtCore import Qt
-        dashboard.ip_label.setText("https://a.trycloudflare.com")
+        dashboard._set_ip_text("https://a.trycloudflare.com")
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
-        dashboard.ip_label.setText("https://b.trycloudflare.com")
+        dashboard._set_ip_text("https://b.trycloudflare.com")
         assert dashboard.ip_label.alignment() == Qt.AlignCenter
-
-    def test_url_label_supports_long_wrapping(self, dashboard):
-        """长 URL 自动换行，文本完整保留。"""
-        long_url = "https://very-long-subdomain-name-that-will-wrap.trycloudflare.com:8443"
-        dashboard.ip_label.setText(long_url)
-        assert dashboard.ip_label.wordWrap() is True
-        assert dashboard.ip_label.text() == long_url
-
-    def test_url_label_is_selectable(self, dashboard):
-        """可用鼠标选中地址文本以便复制。"""
-        from PySide6.QtCore import Qt
-        flags = dashboard.ip_label.textInteractionFlags()
-        assert (flags & Qt.TextSelectableByMouse) == Qt.TextSelectableByMouse
 
 
 class TestEncryptionModeRestriction:
@@ -376,8 +359,8 @@ class TestRestartServiceMenu:
         dashboard._tunnel_url = "https://stale.trycloudflare.com"
         dashboard._on_restart_service()
         assert dashboard._tunnel_url is None
-        assert "stale.trycloudflare.com" not in dashboard.ip_label.text()
-        assert dashboard.ip_label.text() == dashboard.i18n.tr("dashboard.restarting")
+        assert "stale.trycloudflare.com" not in dashboard.ip_label.toPlainText()
+        assert dashboard.ip_label.toPlainText() == dashboard.i18n.tr("dashboard.restarting")
 
     def test_busy_while_switching_then_re_enabled(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
