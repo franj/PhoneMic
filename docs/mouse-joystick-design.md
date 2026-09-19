@@ -88,6 +88,14 @@ class MouseJoystick {
 **解耦原则**：类只调用 `onCommand(frame)`，由外部接线到 `wsClient.send(frame.type, payload)`。
 类不依赖网络、可单测，与现有 `KeyboardAccessoryPanel` 同一套路（后者也不碰 WS）。
 
+> **例外：`FilePanel` 不走 `onCommand`**（2026-09-19）。上面这条原则的前提是「面板只往外发」，
+> 注入一个回调就能把网络依赖挡在门外。而文件面板还必须**收**：逐块 `ack`、取消回执
+> `ack`、`hello` 探活回显、`error`，以及连接状态；当它已经需要传输层对象的全部能力时，
+> 那个回调就退化成逐字直通，只多出一层「这帧到底去哪」的间接。故它直接持有
+> `this.transport`，收发同一个对象，不看第二处。
+>
+> 判断标准：**只发不收的面板走 `onCommand`；又发又收的面板直接持有传输层。**
+
 **`onCommand` 收到的是完整帧对象**（含 `type`），因为鼠标面板有两个出口、两个 type：
 
 ```js

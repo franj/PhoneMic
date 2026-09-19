@@ -196,6 +196,25 @@ def _boot_mobile(page) -> None:
     page.evaluate("() => window.__mockWS.triggerMessage({type: 'config', mobile_max_records: 5})")
 
 
+def _set_wait_timeouts(page, cancel_ms=None, hello_ms=None) -> None:
+    """覆写 FilePanel 的两个等待时限（都是派生 getter，见 `LINK` 档案）。
+
+    ``configurable: true`` 不能省：首次 ``defineProperty`` 出来的描述符默认不可重定义，
+    同一个用例里改第二次就会抛 TypeError。
+    """
+    js = ""
+    if cancel_ms is not None:
+        js += ("  set('CANCEL_ACK_TIMEOUT', " + str(cancel_ms) + ");")
+    if hello_ms is not None:
+        js += ("  set('HELLO_TIMEOUT', " + str(hello_ms) + ");")
+    page.evaluate(
+        "() => { const C = window._filePanel.constructor;"
+        "  const set = (n, v) => Object.defineProperty(C, n,"
+        "      { value: v, configurable: true });"
+        + js + " }"
+    )
+
+
 @pytest.fixture
 def mobile_page(page):
     _boot_mobile(page)
@@ -426,25 +445,28 @@ def test_transfer_chunk_size_follows_file_size(mobile_page):
     """分块按体积自适应（协议 §9）：3MB → 12 块 × 256KB。
 
     夹具页面跑在 localhost ⇒ 局域网档，上限 LINK_LAN.chunkMax = 1MB。
-    这里在 onCommand 里同步回 ack —— 停等生效后，没有 ack 就发不出第 2 块。
+    这里接管 ``transport.sendFrame`` 同步回 ack —— 停等生效后，没有 ack 就发不出第 2 块。
+    （FilePanel 不走 onCommand 回调注入，帧出口就是 ``panel.transport.sendFrame``。）
     """
     page = mobile_page
     seq = page.evaluate(
         "async () => {"
         "  const panel = window._filePanel;"
+        "  const tr = panel.transport;"
         "  const saved = [];"
-        "  const orig = panel.onCommand;"
         "  let recv = 0;"
-        "  panel.onCommand = (f) => { saved.push(f.a + ':' + (f.chunk ? f.chunk.length : 0));"
-        "                             if (f.a === 'data') { recv += f.chunk.length;"
-        "                               window.__mockWS.triggerMessage({ type: 'ack', ref: 'file',"
-        "                                 id: f.id, a: 'data', n: f.n, received: recv }); }"
-        "                             return true; };"
+        "  tr.sendFrame = (f) => { saved.push(f.a + ':' + (f.chunk ? f.chunk.length : 0));"
+        "                          if (f.a === 'data') { recv += f.chunk.length;"
+        "                            window.__mockWS.triggerMessage({ type: 'ack', ref: 'file',"
+        "                              id: f.id, a: 'data', n: f.n, received: recv }); }"
+        "                          return true; };"
         "  panel._waitEndAck = () => Promise.resolve(true);"
         "  const fake = { name: 'big.bin', size: 3 * 1024 * 1024,"
         "                 slice: (a, b) => new Blob([new Uint8Array(b - a)]) };"
         "  await panel._start(fake, 'file');"
-        "  panel.onCommand = orig;"
+        # 复原成原型上的方法。注意 evaluate 的字符串被隐式拼接成**一行**，
+        # 里面绝不能写 `//` 行注释 —— 它会把后面所有代码一起吃光。
+        "  delete tr.sendFrame;"
         "  return saved.join(',');"
         "}"
     )
@@ -855,17 +877,12 @@ class TestCancelAck:
             page.wait_for_function(
                 "() => window.__mockWS.sentMessages.some(m => m.a === 'end')")
         else:
+            # ⚠️ 这里**不能**写 `=== 1`。auto_ack=True 时 mock 会逐块回 ack，闸门一路放行、
+            # 块数一路涨，「恰好 1 块」只是个极短的瞬态：轮询撞上才过，撞不上就 30s 超时
+            # （同一条用例、同一份实现，上一轮过这一轮挂，就是这么来的）。
+            # 这一步要的只是「发送已经开始」，所以用 `>= 1`。
             page.wait_for_function(
-                "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
-
-    def _short_timeouts(self, page, cancel_ms, hello_ms):
-        page.evaluate(
-            "() => {"
-            "  const C = window._filePanel.constructor;"
-            f"  Object.defineProperty(C, 'CANCEL_ACK_TIMEOUT', {{ value: {cancel_ms} }});"
-            f"  Object.defineProperty(C, 'HELLO_TIMEOUT', {{ value: {hello_ms} }});"
-            "}"
-        )
+                "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length >= 1")
 
     def _locked(self, page):
         return page.evaluate(
@@ -907,7 +924,7 @@ class TestCancelAck:
     def test_cancel_ack_timeout_probes_with_hello(self, mobile_page):
         """回执超时 → 发 hello 探活；收到回执即判定取消已送达并解锁。"""
         page = mobile_page
-        self._short_timeouts(page, cancel_ms=100, hello_ms=5000)
+        _set_wait_timeouts(page, cancel_ms=100, hello_ms=5000)
         self._start_async(page, auto_ack=False)
         page.evaluate("() => window._filePanel._cancel()")
 
@@ -926,10 +943,62 @@ class TestCancelAck:
         assert self._locked(page) is False
         assert self.CANCELED in self._bubbles(page)
 
+    def test_stale_probe_ack_does_not_unlock_a_later_cancel(self, mobile_page):
+        """上一次取消留下的探活回执，不能满足**这一次**的等待。
+
+        取消会在同一条连接上反复发生。探活号取自本次传输的 `id`，所以每一次的
+        号都不同；若它退化成「每次从 1 重数」的计数器，旧回执就会冒充本次的，
+        解锁一个其实还没被服务端确认的取消 —— 而旧回执证明的只是**上一次**的
+        `cancel` 已被读出。
+        """
+        page = mobile_page
+        # 第一次：探活也超时，快速放行，留下一个已经作废的号
+        _set_wait_timeouts(page, cancel_ms=100, hello_ms=100)
+        self._start_async(page, auto_ack=False)
+        page.evaluate("() => window._filePanel._cancel()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=3000)
+        stale = page.evaluate(
+            "() => window.__mockWS.sentMessages.find(m => m.type === 'hello').t")
+
+        # 第二次：探活窗口留宽，让「冒充」这一步有充裕的操作时间。
+        # 不借 _start_async —— 它等的是「data 帧总数 == 1」，只对首次传输成立。
+        _set_wait_timeouts(page, cancel_ms=100, hello_ms=5000)
+        page.evaluate("() => window.__mockWS.autoAck(false)")
+        page.evaluate(
+            "() => { window.__sendP = window._filePanel._start("
+            f"{self.FAKE}, 'file'); }}"
+        )
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.type === 'file'"
+            "        && m.a === 'start').length === 2", timeout=3000)
+        second_id = page.evaluate(
+            "() => window.__mockWS.sentMessages.filter(m => m.type === 'file'"
+            "        && m.a === 'start').pop().id")
+        page.evaluate("() => window._filePanel._cancel()")
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.type === 'hello').length === 2",
+            timeout=3000)
+        fresh = page.evaluate(
+            "() => window.__mockWS.sentMessages.filter(m => m.type === 'hello').pop().t")
+        assert second_id != self.ID, "两次传输各有各的 id"
+        assert stale != fresh, "探活号必须跨次不重复（号源 = 本次传输的 id）"
+
+        # 拿上一次的号冒充 → 不算数
+        page.evaluate(f"() => window.__mockWS.triggerMessage({{type:'hello', t:{stale}}})")
+        page.wait_for_timeout(150)
+        assert page.evaluate("() => window._filePanel._state") == "canceling", \
+            "旧号的回执不该结束本次等待"
+        assert self._locked(page) is True, "本次取消仍未确认，界面不该解锁"
+
+        # 本次的号 → 正常放行
+        page.evaluate(f"() => window.__mockWS.triggerMessage({{type:'hello', t:{fresh}}})")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        assert self._locked(page) is False
+
     def test_cancel_hard_timeout_unlocks_anyway(self, mobile_page):
         """两条路都超时：就地放行界面，绝不把用户永久锁在「正在取消」。"""
         page = mobile_page
-        self._short_timeouts(page, cancel_ms=100, hello_ms=100)
+        _set_wait_timeouts(page, cancel_ms=100, hello_ms=100)
         self._start_async(page, auto_ack=False)
         page.evaluate("() => window._filePanel._cancel()")
 
@@ -1236,8 +1305,10 @@ class TestSignalBus:
     """WSClient.on 必须是一对多（mobile.html 1.3 节 SignalHub）。
 
     旧实现是 ``messageHandlers.set(type, handler)`` 的**单槽 Map**：后注册者**静默顶掉**
-    前者，且一条日志都没有。FilePanel 目前是 ack/hello/error 的唯一订阅者，所以这个隐患
-    还没暴露；这几条用例把它钉死 —— 谁改回单槽，这里立刻红。
+    前者，且一条日志都没有。FilePanel 常驻订阅 ack/error，在「等取消回执」那段时间里
+    又会额外订阅 ack/hello（见 ``_awaitCancelAck``）—— 同一 type 上并存两个订阅者正是
+    现在的常态，旧写法会让先注册的那个永远收不到帧。这几条用例把它钉死：谁改回单槽，
+    这里立刻红。
 
     用例里的 ref 一律用 ``'probe'``：FilePanel 的 ack handler 按 ``ref !== _kind`` 过滤，
     探针帧会被它忽略，不会污染传输状态。
@@ -1246,7 +1317,7 @@ class TestSignalBus:
     PROBE = "{type:'ack', ref:'probe', id:0, a:'end'}"
 
     def _slots(self, page, kind="ack"):
-        """某 type 当前的槽数（FilePanel 构造时已注册 ack / hello / error）。"""
+        """某 type 当前的槽数（FilePanel 构造时已注册 ack / error）。"""
         return page.evaluate(
             "() => { const s = window.__wsClient.hub.map.get('" + kind + "');"
             "        return s ? s.slots.length : 0; }"
@@ -1352,3 +1423,147 @@ class TestSignalBus:
             "}"
         )
         assert r == "a77,b77", r
+
+
+class TestLocalizedWaits:
+    """等待局部化 / 信号化后新增的保证（mobile.html §6.5）。
+
+    这批用例守的不是「功能还能用」（那些老用例已经守着了），而是这次重构**换来的性质**：
+    订阅先于发帧、订阅用完即退、断连通知不被静默宽限期吞掉 —— 三条都极易在后续改动里
+    悄悄退化，且退化了功能「看起来还是对的」，只是偶尔慢/偶尔漏。
+    """
+
+    FAKE = ("{name: 'lw.bin', size: 3 * 1024 * 1024,"
+            " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
+    ID = 1
+
+    SLOTS = (
+        "() => { const m = window.__wsClient.hub.map;"
+        "  const n = (t) => (m.get(t) ? m.get(t).slots.length : 0);"
+        "  return {ack: n('ack'), hello: n('hello')}; }"
+    )
+
+    def _start_at_gate(self, page, auto_ack=False):
+        """起一次发送，停在「第 0 块已发出、停等闸门未放行」处。"""
+        page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
+        page.evaluate(
+            "() => { window.__sendP = window._filePanel._start("
+            f"{self.FAKE}, 'file'); }}"
+        )
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+
+    def _cancel_ack(self, page):
+        page.evaluate(
+            "() => window.__mockWS.triggerMessage("
+            f"{{type:'ack', ref:'file', id:{self.ID}, a:'cancel'}})")
+
+    def test_cancel_subscription_is_live_before_the_frame_goes_out(self, mobile_page):
+        """**先挂订阅、再发 cancel 帧**：回执同步回来也不能漏（漏了界面就白锁到超时）。
+
+        这条能红的前提正是「订阅先于发帧」：把 ``_cancel`` 里的两行调换顺序，回执会在
+        还没有任何订阅者的时候到达并丢掉，界面只能等探活超时才解锁。
+        """
+        page = mobile_page
+        self._start_at_gate(page)
+        page.evaluate(
+            "() => {"
+            "  const panel = window._filePanel;"
+            "  panel.transport.sendFrame = (f) => {"
+            "    if (f.a === 'cancel') {"
+            "      window.__mockWS.triggerMessage("
+            "        {type: 'ack', ref: f.type, id: f.id, a: 'cancel'});"
+            "    }"
+            "    return true;"
+            "  };"
+            "}"
+        )
+        page.evaluate("() => window._filePanel._cancel()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        assert page.evaluate(
+            "() => window.__mockWS.sentMessages.some(m => m.type === 'hello')") is False, \
+            "回执已同步回来，不该再走 hello 探活那条路"
+
+    def test_cancel_wait_subscriptions_are_released(self, mobile_page):
+        """取消等待的订阅只活它那一段，等完必须回到常驻数（否则每次取消漏一份）。
+
+        等待分两段：先等 `ack(a:"cancel")`；超时才挂 `hello` 的订阅。后者是**就地挂在
+        探活发帧之前**的（`_awaitCancelAck::probe`），所以那一步之前 `hello` 槽数为 0
+        ——这正是「探活发出去没有」不必另记标志位的原因：订阅存在本身即等价。
+        """
+        page = mobile_page
+        _set_wait_timeouts(page, cancel_ms=200, hello_ms=5000)
+        self._start_at_gate(page)
+        before = page.evaluate(self.SLOTS)
+        assert before == {"ack": 2, "hello": 0}, before   # 常驻 1 + 停等闸门 1
+
+        page.evaluate("() => window._filePanel._cancel()")
+        during = page.evaluate(self.SLOTS)
+        # 闸门的订阅随 _tx.abort() 退掉，取消等待挂上 ack；探活尚未发出 ⇒ hello 仍为 0
+        assert during == {"ack": 2, "hello": 0}, during
+
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.some(m => m.type === 'hello')",
+            timeout=2000)
+        probing = page.evaluate(self.SLOTS)
+        assert probing == {"ack": 2, "hello": 1}, probing   # 探活已发出 ⇒ 订阅就位
+
+        self._cancel_ack(page)
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        after = page.evaluate(self.SLOTS)
+        assert after == {"ack": 1, "hello": 0}, after
+
+    def test_probe_subscription_is_live_before_the_probe_goes_out(self, mobile_page):
+        """探活订阅同样**就地挂在发帧之前**：回执同步回来也不能漏。
+
+        把 `probe()` 里「挂订阅」与「发帧」两行调换，回执会在还没有订阅者时到达并丢掉，
+        等待只能走到硬超时 —— 下面把 hello 时限设成 5000ms，而只等 2000ms，正是为了让
+        这种退化表现为超时失败，而不是「慢一点但还是过」。
+        """
+        page = mobile_page
+        _set_wait_timeouts(page, cancel_ms=100, hello_ms=5000)
+        self._start_at_gate(page)
+        page.evaluate(
+            "() => {"
+            "  const panel = window._filePanel;"
+            "  panel.transport.sendFrame = (f) => {"
+            "    if (f.type === 'hello') {"
+            "      window.__mockWS.triggerMessage({type: 'hello', t: f.t});"
+            "    }"
+            "    return true;"
+            "  };"
+            "}"
+        )
+        page.evaluate("() => window._filePanel._cancel()")
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=2000)
+        assert page.evaluate("() => window._filePanel._state") == "idle"
+
+    def test_close_signal_beats_the_silent_grace_window(self, mobile_page):
+        """WS_CLOSE **不受静默宽限期影响**：等 ack 的传输必须立刻收尾。
+
+        宽限期（_startGrace）只决定「界面表不表态」，它是给「唤起文件选择器顺带被掐了
+        socket、回前台 1s 内自愈」那种抖动用的；但「这条连接确实断了」是个事实，正在等
+        ack 的传输必须马上据此收尾，不能陪它耗完 3s 宽限。若有人把断连检测改挂到
+        WS_STATUS 上（那条会被宽限期吞掉），这条立刻红。
+        """
+        page = mobile_page
+        page.evaluate("() => { window.__wsClient.connect = () => {}; }")   # 掐掉重连
+        page.evaluate("() => window.__wsClient.beginPickerContext()")       # 之后的断连都进静默窗口
+        self._start_at_gate(page)
+        page.evaluate("window.__mockWS.triggerClose()")
+        # 宽限期是 3000ms：这里 1500ms 内收尾，就说明没在等它
+        page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=1500)
+        assert page.evaluate("() => window._filePanel._gateGaveUp") is False, \
+            "是断连，不该被当成 ack 通道失灵"
+
+    def test_connection_status_travels_through_the_hub(self, mobile_page):
+        """连接状态从 hub 走（WS_STATUS），不再是 document 上的 'ws-status' CustomEvent。"""
+        page = mobile_page
+        page.evaluate(
+            "() => { window.__st = [];"
+            "  window.__wsClient.on('_status', (st) => window.__st.push(st.connected)); }"
+        )
+        page.evaluate("window.__mockWS.triggerClose()")
+        page.wait_for_function("() => window.__st.includes(false)", timeout=2000)
+        # 断连会排上 1s 退避重连（connect 没被掐），连上后应当再收一个 true
+        page.wait_for_function("() => window.__st.includes(true)", timeout=5000)
