@@ -4,7 +4,6 @@
 """
 
 import json
-import locale
 from pathlib import Path
 from unittest.mock import patch, mock_open
 
@@ -53,45 +52,175 @@ def isolate_singletons(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------
-# 测试目标：phonemic.utils.system_lang.detect_system_language
+# 测试目标：phonemic.utils.system_lang
 # ------------------------------------------------------------
-def test_detect_system_language():
-    from phonemic.utils.system_lang import detect_system_language
-    
-    # 测试用例： (getdefaultlocale返回值, getlocale返回值, 期望结果)
-    test_cases = [
-        (("zh_CN", "UTF-8"), None, "zh_CN"),
-        (("zh-CN", "UTF-8"), None, "zh_CN"),   # 短横线转下划线
-        (("zh_TW", "UTF-8"), None, "zh_TW"),
-        (("zh-HK", "UTF-8"), None, "zh_HK"),
-        (("zh", "UTF-8"), None, "zh"),
-        (("en_US", "UTF-8"), None, "en_US"),
-        (("en-US", "UTF-8"), None, "en_US"),
-        (("en_GB", "UTF-8"), None, "en_GB"),
-        (("fr_FR", "UTF-8"), None, "fr_FR"),
-        (None, ("zh_CN", "UTF-8"), "zh_CN"),
-        (None, ("en_US", "UTF-8"), "en_US"),
-        (None, ("de_DE", "UTF-8"), "de_DE"),
-        (None, None, "en_US"),  # 完全无法检测，回退
+def test_normalize_language_code():
+    """格式规整：只改分隔符、剥编码/修饰符，不做语言变体归一化"""
+    from phonemic.utils.system_lang import _normalize_language_code as norm
+
+    cases = [
+        ("zh_CN", "zh_CN"),
+        ("zh-CN", "zh_CN"),             # 短横线转下划线
+        ("zh_TW", "zh_TW"),
+        ("zh-HK", "zh_HK"),
+        ("en_US", "en_US"),
+        ("en-US", "en_US"),
+        ("en_GB", "en_GB"),
+        ("fr_FR", "fr_FR"),
+        ("zh", "zh"),                   # 只有语言、没有地区
+        ("zh_Hans_CN", "zh_Hans_CN"),   # 多段（BCP-47 带 script）
+        ("zh_CN.UTF-8", "zh_CN"),       # 剥编码
+        ("zh_CN.GB18030", "zh_CN"),
+        ("sr_RS@latin", "sr_RS"),       # 剥修饰符
+        ("sr_RS.UTF-8@latin", "sr_RS"),
+        ("C", None),                    # C/POSIX 只表示「没有语言偏好」
+        ("C.UTF-8", None),
+        ("POSIX", None),
+        ("c", None),
+        ("", None),
+        ("   ", None),
+        (None, None),
     ]
+    for raw, expected in cases:
+        assert norm(raw) == expected, f"{raw!r} -> {norm(raw)!r}, 期望 {expected!r}"
 
-    for default_tuple, lc_tuple, expected in test_cases:
-        with patch("locale.getdefaultlocale", return_value=default_tuple):
-            if lc_tuple is not None and hasattr(locale, 'LC_MESSAGES'):
-                with patch("locale.getlocale", return_value=lc_tuple):
-                    result = detect_system_language()
-                    assert result == expected, f"default={default_tuple}, lc={lc_tuple} -> {result}, expected {expected}"
 
-    # 特殊：Windows 返回 ("Chinese (Simplified)_China.936", "cp936")
-    with patch("locale.getdefaultlocale", return_value=("Chinese (Simplified)_China.936", "cp936")):
+class _FakeKernel32:
+    """替掉 kernel32：Windows 分支只用到 GetUserDefaultUILanguage 一个入口"""
+
+    def __init__(self, langid, exc=None):
+        self._langid = langid
+        self._exc = exc
+
+    def GetUserDefaultUILanguage(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._langid
+
+
+def _fake_windll(monkeypatch, langid, exc=None):
+    """把 ctypes.windll 换成假的，让 Windows 分支在任意平台上都能测"""
+    import ctypes
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        ctypes, "windll", SimpleNamespace(kernel32=_FakeKernel32(langid, exc)), raising=False
+    )
+
+
+@pytest.mark.parametrize(
+    "langid,expected",
+    [
+        (0x0804, "zh_CN"),   # 简体中文（中国）
+        (0x0404, "zh_TW"),   # 繁体中文（台湾）
+        (0x0C04, "zh_HK"),   # 繁体中文（中国香港）
+        (0x0409, "en_US"),   # 英语（美国）
+        (0x0411, "ja_JP"),   # 日语（日本）
+    ],
+)
+def test_detect_windows_ui_language(monkeypatch, langid, expected):
+    """Windows 分支：取 UI 语言的 LANGID，翻成与语言包文件名一致的 POSIX 代码"""
+    import phonemic.utils.system_lang as sl
+
+    _fake_windll(monkeypatch, langid)
+    assert sl._detect_on_windows() == expected
+
+
+def test_detect_windows_unknown_langid(monkeypatch):
+    """0x1000 = LOCALE_CUSTOM_UI_DEFAULT（UI 语言来自语言包）：表里没有，返回 None"""
+    import phonemic.utils.system_lang as sl
+
+    _fake_windll(monkeypatch, 0x1000)
+    assert sl._detect_on_windows() is None
+
+
+def test_detect_system_language_posix(monkeypatch):
+    """POSIX 分支：只认第一个有值的语言环境变量，LC_ALL 优先级最高"""
+    import phonemic.utils.system_lang as sl
+
+    def _set_env(**kv):
+        for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+            monkeypatch.delenv(var, raising=False)
+        for key, value in kv.items():
+            monkeypatch.setenv(key, value)
+
+    _set_env(LANG="zh_TW.UTF-8")
+    assert sl._detect_on_posix() == "zh_TW"
+
+    _set_env(LANG="en_US.UTF-8", LC_MESSAGES="zh_CN.UTF-8")
+    assert sl._detect_on_posix() == "zh_CN"      # LC_MESSAGES 压过 LANG
+
+    _set_env(LANG="en_US.UTF-8", LC_MESSAGES="en_US.UTF-8", LC_ALL="zh_HK.UTF-8")
+    assert sl._detect_on_posix() == "zh_HK"      # LC_ALL 压过一切
+
+    # LC_ALL=C 表示「不要本地化」：此时 LANG 不作数，视为检测不出来
+    _set_env(LANG="zh_CN.UTF-8", LC_ALL="C.UTF-8")
+    assert sl._detect_on_posix() is None
+
+    _set_env()                                   # 三个都没设
+    assert sl._detect_on_posix() is None
+
+
+def test_detect_system_language_routes_by_platform(monkeypatch):
+    """按平台分流：win32 走 Win32 API，其余（含 macOS）走 POSIX 环境变量"""
+    import sys
+    import phonemic.utils.system_lang as sl
+
+    calls = []
+
+    def _win():
+        calls.append("windows")
+        return "zh_HK"
+
+    def _posix():
+        calls.append("posix")
+        return "zh_TW"
+
+    monkeypatch.setattr(sl, "_detect_on_windows", _win)
+    monkeypatch.setattr(sl, "_detect_on_posix", _posix)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert sl.detect_system_language() == "zh_HK"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert sl.detect_system_language() == "zh_TW"
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert sl.detect_system_language() == "zh_TW"
+
+    assert calls == ["windows", "posix", "posix"]
+
+
+def test_detect_system_language_falls_back(monkeypatch):
+    """检测抛异常时回落 en_US，不把异常抛给调用方（不能因为检测失败起不来）"""
+    import phonemic.utils.system_lang as sl
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sl, "_detect_on_windows", _boom)
+    monkeypatch.setattr(sl, "_detect_on_posix", _boom)
+    assert sl.detect_system_language() == "en_US"
+
+
+def test_detect_uses_no_deprecated_locale_api():
+    """
+    改造动机守卫：整条检测路径不得再调用 locale.getdefaultlocale()。
+
+    用 record=True 而不是把警告升级成异常：老代码把调用包在 try/except 里，
+    升级成异常会被它自己吞掉，只有「有没有发出过警告」才靠得住。
+    （3.15 已收回该弃用，届时本条会自然失效，靠上面几条用例继续兜底。）
+    """
+    import warnings
+    from phonemic.utils.system_lang import detect_system_language
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
         result = detect_system_language()
-        assert result == "Chinese (Simplified)_China.936"
 
-    # 异常情况
-    with patch("locale.getdefaultlocale", side_effect=Exception("error")):
-        with patch("locale.getlocale", return_value=("en_US", "UTF-8")):
-            result = detect_system_language()
-            assert result == "en_US"
+    assert isinstance(result, str) and result
+    deprecated = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert not deprecated, f"检测路径用到了已弃用的 API: {[str(w.message) for w in deprecated]}"
 
 
 # ------------------------------------------------------------

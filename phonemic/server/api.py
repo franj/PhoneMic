@@ -15,7 +15,7 @@ import time
 from typing import Optional
 
 from starlette.applications import Starlette
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.datastructures import MutableHeaders
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -642,7 +642,48 @@ _CLIENT_LOG_MAX_BODY = 256 * 1024
 _CLIENT_LOG_MAX_ENTRIES = 200
 _CLIENT_LOG_MAX_TEXT = 400
 
+# 未读请求体的排空上限。
+#
+# 只服务于「不消费 body 就返回响应」的分支（405、打包版的 404）：urllib 这类客户端
+# 会发 Connection: close，uvicorn 收到就在响应写完的那一刻立刻 close；此时内核接收
+# 缓冲里若还压着没被读走的请求体，Windows 发的是 RST 而不是 FIN，而 RST 会丢弃客户端
+# 「已到达但应用还没读走」的响应 ⇒ 客户端拿到 WinError 10053，看到的不是 405 而是
+# 连接被中止（概率复现，机器越忙越容易撞，见
+# tests/test_backend.py::test_post_to_readonly_path_is_405）。
+#
+# 排空只做「把字节读掉」：不解析、不留存，超限或超时就放弃。它的目的是让关闭干净，
+# 不是为了收数据，所以宁可放弃，也不让一个只声明 Content-Length 却不发 body 的
+# 客户端把 handler 吊住。
+_DRAIN_MAX_BODY = 64 * 1024
+_DRAIN_TIMEOUT = 2.0
+
 _last_client_ua: str = ""
+
+
+async def _drain_request_body(request: Request) -> None:
+    """把请求体读掉并丢弃，保证响应写出后服务端能干净地关闭连接。
+
+    只在「不消费 body 就返回响应」的分支里调用。已经读过 body 的路径
+    （_receive_client_log）不需要也不该再读——重复读会撞 Starlette 的
+    RuntimeError("Stream consumed")。
+    路由层直接给出的 405（非 GET/HEAD/POST 方法）不经过这里：那条路径只有扫描器
+    会走，客户端读不读得到响应都无所谓。
+    """
+    remaining = _DRAIN_MAX_BODY
+    deadline = time.monotonic() + _DRAIN_TIMEOUT
+    stream = request.stream()
+    while remaining > 0:
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            return
+        try:
+            chunk = await asyncio.wait_for(stream.__anext__(), timeout=budget)
+        except StopAsyncIteration:
+            return  # 读完了：正常出口
+        except (asyncio.TimeoutError, ClientDisconnect):
+            return  # 对端不发或已经走了：照样把响应发出去
+        remaining -= len(chunk)
+    logger.debug(f"请求体超过 {_DRAIN_MAX_BODY} 字节，放弃继续排空")
 
 
 async def _receive_client_log(request: Request) -> Response:
@@ -658,6 +699,9 @@ async def _receive_client_log(request: Request) -> Response:
     # 打包版不接收手机端日志：页面侧根本不会启动日志模块（见 _serve_mobile），
     # 这里同时兜住旧缓存页面与伪造请求。返回 404，与「路径不存在」一致。
     if is_frozen():
+        # body 也得读掉再返回，否则和 405 同一个坑：Connection: close 下未读数据
+        # 会让关闭变成 RST，客户端读不到这个 404（见 _drain_request_body）。
+        await _drain_request_body(request)
         return Response(status_code=404)
 
     raw = await request.body()
@@ -833,6 +877,9 @@ async def _dispatch_http(request: Request, path: str) -> Response:
     if request.method == "POST":
         if normalized == "/api/client-log":
             return await _receive_client_log(request)
+        # 405 是「不消费 body 就返回」的分支，必须先排空再返回，否则带 body 的 POST
+        # 会以 RST 收场（原因见 _drain_request_body）。
+        await _drain_request_body(request)
         return Response(status_code=405)
 
     if normalized is None:
@@ -1062,6 +1109,14 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
             ws_ping_interval=None,
             ws_ping_timeout=None,
             ws_max_size=WS_MAX_FRAME_SIZE,
+            # WS 协议栈显式选新实现。默认的 ws="auto" 会优先挑
+            # uvicorn.protocols.websockets.websockets_impl，那条路 import 的是
+            # websockets.legacy.*：在 websockets 16 下启动即抛三个 DeprecationWarning
+            # （websockets.legacy / WebSocketServerProtocol / remove second argument of
+            # ws_handler），且 legacy 栈终将被移除。新实现（websockets 14+ 的 sansio 栈）
+            # 能力对齐：ws_max_size 同样生效，1008/1011/1012 关闭码照常送达，帧级日志的
+            # logger 仍挂在 uvicorn.error 上 ⇒ PHONEMIC_LOG=trace 不受影响。
+            ws="websockets-sansio",
         )
         _server = uvicorn.Server(config)
         try:

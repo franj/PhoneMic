@@ -750,6 +750,21 @@ def test_real_server_with_websocket_client():
 
 
 # ---------- 服务器生命周期测试 ----------
+def test_ws_protocol_impl_is_not_legacy(server_no_sc):
+    """服务端实际加载的 WS 协议栈必须是 websockets 的新实现（非 legacy）。
+
+    api.py 的 uvicorn.Config 显式传 ws="websockets-sansio"。uvicorn 默认的
+    ws="auto" 会挑 websockets_impl —— 它建在 websockets.legacy 上，websockets 16
+    下启动即抛三个 DeprecationWarning，且 legacy 栈终将被移除。
+    这条断言读的是运行中服务端的真实配置，因此「删掉 ws= 参数」会确定性变红。
+    """
+    # 局部导入：uvicorn 内部模块若改名/迁移，只失败这一条，不拖垮整个文件
+    from uvicorn.protocols.websockets.websockets_sansio_impl import WebSocketsSansIOProtocol
+
+    assert api_mod._server is not None, "server 未启动，配置无从校验"
+    assert api_mod._server.config.ws_protocol_class is WebSocketsSansIOProtocol
+
+
 def test_server_start_stop():
     """验证 start_server / stop_server 能正常启停且释放端口"""
     host = "127.0.0.1"
@@ -1004,6 +1019,15 @@ class TestClientLogEndpoint:
         monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
 
         class _FakeRequest:
+            """伪 Request：打包版分支会先把请求体排空再回 404（理由见 api.py），
+            所以桩必须提供 stream()——真实 Request 由 starlette 提供。"""
+
+            def stream(self):
+                async def _iter():
+                    yield b'{"entries": [[0, "info", "x"]]}'
+
+                return _iter()
+
             async def body(self):
                 return b'{"entries": [[0, "info", "x"]]}'
 

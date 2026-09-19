@@ -4,12 +4,14 @@ dispatcher 统一入口路由测试。
 验证加密/明文模式的路径校验：
 - 加密模式：根路由 404，仅 /{secret} 前缀放行（含尾斜杠归一化），防扫描
 - 明文模式：仅白名单根路径放行，未知路径 404
-- POST 等非 GET 方法一律 405（唯一写入口是手机端日志回传 /api/client-log）
+- POST 等非 GET 方法一律 405（唯一写入口是手机端日志回传 /api/client-log），
+  且 405 之前必须把请求体读掉（见 test_post_405_drains_body_before_reply）
 - 运行中替换 SecureChannel（算法切换）→ 新 secret 即时生效，无需重启
 """
 
 import json
 import multiprocessing
+import socket
 import time
 import urllib.request
 import urllib.error
@@ -149,6 +151,50 @@ class TestEncryptedPathGuard:
         assert _post(host, port, "/") == 405
         assert _post(host, port, "/wrongsecret/") == 405
         assert _post(host, port, "/some/random/path") == 405
+
+    def test_post_405_drains_body_before_reply(self, enc_server):
+        """405 之前必须先把请求体读掉，否则 405 本身都可能读不到。
+
+        客户端（urllib 就是）会发 Connection: close，uvicorn 在响应写完的那一刻就关
+        连接；此时内核接收缓冲里若还压着没读走的请求体，Windows 发的是 RST 而不是
+        FIN，而 RST 会丢弃客户端「已到达但还没读走」的响应 ⇒ 客户端拿到的是连接被
+        中止（WinError 10053），而不是 405。
+
+        这里用「只发请求头、不发 body」把这件事变成可观测的：真排空了，服务端必须等
+        body 到齐才回；没排空则会立刻回 405 并关连接。真机路径上的表现见
+        tests/test_backend.py::test_post_to_readonly_path_is_405。
+        """
+        host, port, sc, _ = enc_server
+        body = b"{}"
+        head = (
+            f"POST /{sc.secret_path}/api/lang.json HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+
+        with socket.create_connection((host, port), timeout=2) as sock:
+            sock.sendall(head)
+            # body 还没发：排空了就一个字节都不该回（超时或 EOF 都算失败）
+            sock.settimeout(0.3)
+            with pytest.raises(socket.timeout):
+                sock.recv(1024)
+
+            sock.sendall(body)
+            sock.settimeout(2)
+            reply = b""
+            while True:
+                try:
+                    chunk = sock.recv(1024)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break  # Connection: close ⇒ 服务端关连接，读到 EOF 收工
+                reply += chunk
+
+        assert reply.startswith(b"HTTP/1.1 405"), reply[:80]
 
     def test_secret_keepalive_200_uncached(self, enc_server):
         """隧道保活端点：加密模式下受 secret 前缀保护，禁缓存，且回显 nonce。"""

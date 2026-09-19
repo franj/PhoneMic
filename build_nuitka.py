@@ -152,6 +152,13 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--include-data-files=./NOTICE.txt=NOTICE.txt",
         "--include-data-files=./README.md=README.md",
         "--include-data-files=./USER_GUIDE.md=USER_GUIDE.md",
+        # uvicorn 的 ws 协议类是字符串动态导入（uvicorn.config.load → import_from_string），
+        # Nuitka 静态分析看不到；Nuitka 自带的 uvicorn 包规则只硬编码了 auto /
+        # websockets_impl / wsproto_impl 三个（standard.nuitka-package.config.yml），
+        # 不含新版才有的 websockets_sansio_impl。api.py 传的是 ws="websockets-sansio"，
+        # 不显式包含的话打包版启动即 ImportError（--windows-console-mode=disable 下
+        # 无声无息），GUI 只能报「服务器启动超时，请检查端口是否可用」——端口是背锅的。
+        "--include-module=uvicorn.protocols.websockets.websockets_sansio_impl",
         "--noinclude-default-mode=error",
         "--nofollow-import-to=tkinter,unittest,pydoc,test,distutils,setuptools,pdb",
         "--nofollow-import-to=PIL",
