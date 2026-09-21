@@ -4,10 +4,14 @@ JS CryptoProvider 单元测试
 使用 Playwright 在真实浏览器中测试 crypto_providers.js 的加密提供者。
 参考 test_mobile.py 的模式：page.set_content + page.evaluate。
 
+新架构（e2ee-always-on-design.md）：
+- 加密永远开启，不存在明文模式
+- 认证方式：URL fragment（扫码）或 TOFU（手动审批）
+
 测试覆盖：
-- PlainProvider: 明文往返
 - NaClBoxProvider: XSalsa20-Poly1305 加解密往返、auth 握手
 - XChaCha20Provider: XChaCha20-Poly1305 AEAD 加解密往返、auth 握手
+- TOFU 辅助函数: unsealTofuChallenge 与 Python 端互操作
 - 跨平台互操作: JS ↔ Python（PyNaCl 模拟 PC 端）
 - 跨算法隔离: 不同算法之间无法互通
 """
@@ -61,52 +65,57 @@ def crypto_page(page):
     yield page
 
 
-# ---------- PlainProvider ----------
+# ---------- TOFU 辅助函数 ----------
 
-class TestPlainProvider:
-    def test_algorithm_name(self, crypto_page):
-        result = crypto_page.evaluate("() => PlainProvider.algorithmName")
-        assert result == "none"
+class TestTofuHelpers:
+    """TOFU 首次连接相关的 sealedAuthData / unsealTofuChallenge 测试。"""
 
-    def test_encrypt_decrypt_roundtrip(self, crypto_page):
+    def test_unseal_tofu_challenge_matches_python(self, crypto_page):
+        """Python 端 SealedBox 加密的 challenge → JS 端可正确解封。"""
+        phone_priv = PrivateKey.generate()
+        phone_pub_b64 = _to_b64(bytes(phone_priv.public_key))
+        pc_priv = PrivateKey.generate()
+        nonce = bytes(range(16))
+
+        # Python 端：SealedBox(phone_public) 加密 challenge
+        inner = json.dumps({
+            "pk": _to_b64(bytes(pc_priv.public_key)),
+            "nonce": _to_b64(nonce),
+        }).encode("utf-8")
+        sealed = SealedBox(phone_priv.public_key).encrypt(inner)
+
+        result = crypto_page.evaluate("""
+            ({ phonePrivB64, sealedB64 }) => {
+                const phonePriv = sodium.from_base64(phonePrivB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const sealed = sodium.from_base64(sealedB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const result = unsealTofuChallenge(sealed, phonePriv);
+                return {
+                    pcPubB64: sodium.to_base64(result.pcPublicKey, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+                    nonceB64: sodium.to_base64(result.nonce, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+                };
+            }
+        """, {
+            "phonePrivB64": _to_b64(bytes(phone_priv)),
+            "sealedB64": _to_b64(sealed),
+        })
+
+        assert result["pcPubB64"] == _to_b64(bytes(pc_priv.public_key))
+        assert result["nonceB64"] == _to_b64(nonce)
+
+    def test_phone_public_key_getter(self, crypto_page):
+        """Provider 暴露 phonePublicKey 供 TOFU 明文 auth 使用。"""
         result = crypto_page.evaluate("""
             () => {
-                const p = new PlainProvider();
-                const data = new Uint8Array([1, 2, 3, 4, 5]);
-                const encrypted = p.encrypt(data);
-                const decrypted = p.decrypt(encrypted);
-                return Array.from(decrypted);
+                const p = new XChaCha20Provider();
+                p.initKeypair();
+                return {
+                    hasGetter: typeof p.phonePublicKey !== 'undefined',
+                    length: p.phonePublicKey.length,
+                };
             }
         """)
-        assert result == [1, 2, 3, 4, 5]
-
-    def test_make_auth_data_returns_none_without_token(self, crypto_page):
-        result = crypto_page.evaluate("() => new PlainProvider().makeAuthData()")
-        assert result is None
-
-    def test_set_token_make_auth_data(self, crypto_page):
-        """setToken 后 makeAuthData 返回 token（CF 模式）。"""
-        result = crypto_page.evaluate("""
-            () => {
-                const p = new PlainProvider();
-                p.setToken('my_test_token');
-                return p.makeAuthData();
-            }
-        """)
-        assert result == "my_test_token"
-
-    def test_init_keypair_noop(self, crypto_page):
-        """initKeypair 是空操作，不报错。"""
-        crypto_page.evaluate("() => new PlainProvider().initKeypair()")
-
-    def test_set_pc_public_key_noop(self, crypto_page):
-        """setPcPublicKey 是空操作，不报错。"""
-        crypto_page.evaluate("""
-            () => {
-                const p = new PlainProvider();
-                p.setPcPublicKey(new Uint8Array(32));
-            }
-        """)
+        assert result["hasGetter"] is True
+        assert result["length"] == 32
 
 
 # ---------- NaClBoxProvider ----------

@@ -4,16 +4,21 @@
  * 依赖全局 sodium 对象（libsodium.js）与 MessagePack（msgpack.min.js），
  * 需在 sodium.ready 后使用。
  *
+ * 新架构（e2ee-always-on-design.md）：
+ * - 加密永远开启，不存在明文模式
+ * - 认证方式：URL fragment（扫码）或 TOFU（手动审批）
+ *
  * 接口约定（与 Python 端 phonemic/tunnel/crypto/ 一一对应）：
  * - encrypt(plaintextBytes) → nonce+ciphertext 拼接的 Uint8Array
  * - decrypt(ciphertextBytes) → plaintext Uint8Array
  * - 防重放 seq 由 Provider 内部承载（AAD 优先 / 8 字节前缀兜底），
  *   不进应用层报文，调用方不可见
- * - makeAuthData(): 用 PC 公钥 SealedBox 密封 {"algo","pk"} JSON——
- *   algo 在密文内部，不再明文传输。握手内层刻意用 JSON：它不依赖上层
- *   编解码器（见 crypto-design.md §3），避免"先有解码器才能解握手"的鸡生蛋
+ * - makeAuthData(pcPublicKey): 用 PC 公钥 SealedBox 密封 {"algo","pk"} JSON——
+ *   algo 在密文内部，不再明文传输（URL fragment 认证 / TOFU 重连路径）
  * - Provider 只操作原始字节；帧编解码与握手帧（auth_challenge / auth_proof）的
  *   组装、识别均由上层 SecureClient 处理，Provider 不参与握手
+ *
+ * TOFU 首次连接（明文 auth）由 SecureClient 直接组装，不走 Provider。
  */
 
 // 8 字节大端 seq 编解码（与 Python 端 _SEQ_LEN=8 / to_bytes(8,'big') 一致）
@@ -28,14 +33,35 @@ function seqFromBytes(b) {
     return n;
 }
 
-// 密封 auth 数据：{"algo": <算法名>, "pk": <手机公钥 base64url>}，
-// algo 只出现在密文内部（与 Python 端 KeyExchange.handle_auth 约定一致）
+/**
+ * 密封 auth 数据（URL fragment 认证 / TOFU 重连路径）：
+ * {"algo": <算法名>, "pk": <手机公钥 base64url>}
+ * algo 只出现在密文内部（与 Python 端 KeyExchange.handle_auth 约定一致）
+ */
 function sealedAuthData(providerName, phonePublicKey, pcPublicKey) {
     const inner = JSON.stringify({
         algo: providerName,
         pk: sodium.to_base64(phonePublicKey, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
     });
     return sodium.crypto_box_seal(sodium.from_string(inner), pcPublicKey);
+}
+
+/**
+ * 解密 TOFU 首次连接的 auth_challenge（SealedBox 加密）。
+ * 返回 { pcPublicKey, nonce }，用于后续 ECDH + auth_proof。
+ *
+ * @param {Uint8Array} sealedBytes - SealedBox 密文
+ * @param {Uint8Array} phonePrivateKey - 手机私钥原始字节
+ */
+function unsealTofuChallenge(sealedBytes, phonePrivateKey) {
+    const phonePublicKey = sodium.crypto_scalarmult_base(phonePrivateKey);
+    const inner = sodium.crypto_box_seal_open(
+        sealedBytes, phonePublicKey, phonePrivateKey);
+    const obj = JSON.parse(sodium.to_string(inner));
+    return {
+        pcPublicKey: sodium.from_base64(obj.pk, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+        nonce: sodium.from_base64(obj.nonce, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+    };
 }
 
 class NaClBoxProvider {
@@ -54,6 +80,10 @@ class NaClBoxProvider {
         this._phonePrivate = kp.privateKey;
         this._phonePublicKey = kp.publicKey;
     }
+    /** 获取手机公钥原始字节（TOFU 首次明文 auth 用）。 */
+    get phonePublicKey() { return this._phonePublicKey; }
+    /** 获取手机私钥原始字节（TOFU 首次解密 challenge 用）。 */
+    get phonePrivateKey() { return this._phonePrivate; }
     setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
@@ -119,6 +149,10 @@ class XChaCha20Provider {
         this._phonePrivate = kp.privateKey;
         this._phonePublicKey = kp.publicKey;
     }
+    /** 获取手机公钥原始字节（TOFU 首次明文 auth 用）。 */
+    get phonePublicKey() { return this._phonePublicKey; }
+    /** 获取手机私钥原始字节（TOFU 首次解密 challenge 用）。 */
+    get phonePrivateKey() { return this._phonePrivate; }
     setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
@@ -165,20 +199,7 @@ class XChaCha20Provider {
     }
 }
 
-class PlainProvider {
-    static get algorithmName() { return 'none'; }
-    constructor() { this._token = null; }
-    initKeypair() {}
-    setPcPublicKey(rawBytes) {}
-    setToken(token) { this._token = token; }
-    makeAuthData() { return this._token; }
-    encrypt(plaintextBytes) { return plaintextBytes; }
-    decrypt(ciphertextBytes) { return ciphertextBytes; }
-    reset() {}
-}
-
 const PROVIDER_CLASSES = {
-    'none': PlainProvider,
     'xsalsa20': NaClBoxProvider,
     'xchacha20': XChaCha20Provider,
 };

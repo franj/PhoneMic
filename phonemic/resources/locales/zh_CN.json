@@ -199,6 +199,7 @@
     "auth_nokey_text": "页面缺少密钥，请重新扫码",
     "auth_reconfig_text": "PC 端配置已变更，请重新扫码",
     "auth_wechat_hint": "微信浏览器可能无法保留密钥，请用系统浏览器打开此页面",
+    "auth_tofu_rejected_text": "认证请求被拒绝或超时，请重试",
     "dbg_connect_start": "正在发起 WebSocket 连接...",
     "dbg_handshake_wait": "WebSocket 已创建，等待握手...",
     "dbg_handshake_ok": "握手成功({ms}ms)，正在认证...",

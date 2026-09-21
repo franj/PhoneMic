@@ -198,6 +198,7 @@
     "auth_nokey_text": "Key missing from this page. Please scan the QR code again",
     "auth_reconfig_text": "PC settings changed. Please scan the QR code again",
     "auth_wechat_hint": "WeChat built-in browser may lose the key. Please open this page in a system browser",
+    "auth_tofu_rejected_text": "Authentication request rejected or timed out, please retry",
     "dbg_connect_start": "Initiating WebSocket connection...",
     "dbg_handshake_wait": "WebSocket created, waiting for handshake...",
     "dbg_handshake_ok": "Handshake OK ({ms}ms), authenticating...",
