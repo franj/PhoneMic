@@ -19,7 +19,6 @@ from phonemic.tunnel.crypto import (
     OFFERED_ALGORITHMS,
     KeyExchange,
     NaClBoxProvider,
-    PlainProvider,
     XChaCha20Provider,
     create_provider,
 )
@@ -103,6 +102,71 @@ class TestKeyExchange:
         b64 = kx.public_key_b64
         assert "=" not in b64
         assert _from_b64(b64) == bytes(pc_private.public_key)
+
+
+# ---------- KeyExchange: TOFU 路径 ----------
+
+class TestKeyExchangeTofu:
+    """handle_tofu_auth / public_key_bytes 测试。"""
+
+    def test_handle_tofu_auth_succeeds_for_each_algo(self):
+        """明文 algo + 手机公钥直接 ECDH，返回正确 algo 和 session_key。"""
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        for algo in OFFERED_ALGORITHMS:
+            phone_private = PrivateKey.generate()
+            phone_public_bytes = bytes(phone_private.public_key)
+            got_algo, session_key = kx.handle_tofu_auth(algo, phone_public_bytes)
+            assert got_algo == algo
+            assert len(session_key) == 32
+
+    def test_tofu_session_key_matches_phone_side(self):
+        """TOFU 路径的 session_key 与手机端独立推导一致。"""
+        pc_private = PrivateKey.generate()
+        phone_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        _, session_key = kx.handle_tofu_auth("xchacha20", bytes(phone_private.public_key))
+        shared = crypto_scalarmult(
+            bytes(phone_private), bytes(pc_private.public_key)
+        )
+        expected = blake2b(shared, digest_size=32).digest()
+        assert session_key == expected
+
+    def test_tofu_unsupported_algo_rejected(self):
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        phone_private = PrivateKey.generate()
+        with pytest.raises(CryptoError):
+            kx.handle_tofu_auth("aes-256-gcm", bytes(phone_private.public_key))
+
+    def test_tofu_invalid_public_key_rejected(self):
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        with pytest.raises(CryptoError):
+            kx.handle_tofu_auth("xchacha20", b"not-a-public-key")
+
+    def test_public_key_bytes_matches_public_key(self):
+        """public_key_bytes 返回 32B 原始公钥。"""
+        pc_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+        pk_bytes = kx.public_key_bytes
+        assert len(pk_bytes) == 32
+        assert pk_bytes == bytes(pc_private.public_key)
+
+    def test_tofu_and_sealed_paths_produce_same_key(self):
+        """同一对密钥，TOFU 明文路径和 SealedBox 路径推导出相同 session_key。"""
+        pc_private = PrivateKey.generate()
+        phone_private = PrivateKey.generate()
+        kx = KeyExchange(pc_private, OFFERED_ALGORITHMS)
+
+        # TOFU 路径
+        _, tofu_key = kx.handle_tofu_auth("xchacha20", bytes(phone_private.public_key))
+
+        # SealedBox 路径
+        sealed, _ = make_phone_auth_blob("xchacha20", pc_private.public_key, phone_private)
+        _, sealed_key = kx.handle_auth(sealed)
+
+        assert tofu_key == sealed_key
 
 
 # ---------- 对称 Provider：往返与防篡改 ----------
@@ -226,23 +290,6 @@ class TestAadPathReplayFolded:
         assert not isinstance(exc_info.value, ReplayError)
 
 
-# ---------- PlainProvider ----------
-
-class TestPlainProvider:
-    def test_algorithm_name(self):
-        assert PlainProvider.algorithm_name() == "none"
-
-    def test_encrypt_decrypt_roundtrip(self):
-        p = PlainProvider()
-        assert p.decrypt(p.encrypt(b"hello")) == b"hello"
-
-    def test_reset_noop(self):
-        PlainProvider().reset()  # 不应抛异常
-
-    def test_accepts_none_session_key(self):
-        PlainProvider(None).encrypt(b"x")  # 明文模式无密钥也可用
-
-
 # ---------- create_provider ----------
 
 class TestCreateProvider:
@@ -250,10 +297,6 @@ class TestCreateProvider:
     def test_creates_each_offered_algo(self, algo):
         p = create_provider(algo, random_bytes(32))
         assert p.algorithm_name() == algo
-
-    def test_creates_none(self):
-        p = create_provider("none", None)
-        assert p.algorithm_name() == "none"
 
     def test_unknown_algo_raises(self):
         with pytest.raises(ValueError):

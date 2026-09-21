@@ -46,6 +46,39 @@ class KeyExchange:
     def private_key(self) -> PrivateKey:
         return self._pc_private
 
+    @property
+    def public_key_bytes(self) -> bytes:
+        """PC 公钥原始字节（32B）。TOFU 模式下用于 SealedBox 加密回传给手机。"""
+        return bytes(self._pc_private.public_key)
+
+    def handle_tofu_auth(self, algo: str, phone_public_bytes: bytes) -> Tuple[str, bytes]:
+        """TOFU 首次连接：algo 和手机公钥均为明文，直接 ECDH → KDF。
+
+        与 ``handle_auth`` 共享相同的 ECDH + BLAKE2b 逻辑，区别在于 auth 数据
+        来源是明文字段而非 SealedBox 密封 blob。
+
+        Args:
+            algo: 手机端选择的算法名（明文传输，无信任锚）。
+            phone_public_bytes: 手机临时 X25519 公钥原始字节（32B）。
+
+        Returns:
+            ``(algo, session_key)``：algo 原样返回，session_key 为 32 字节会话密钥。
+
+        Raises:
+            CryptoError: algo 不在允许列表，或 ECDH 计算失败。
+        """
+        try:
+            if algo not in self._allowed:
+                raise ValueError(f"algorithm '{algo}' not allowed")
+            phone_public = PublicKey(phone_public_bytes)
+            shared = crypto_scalarmult(bytes(self._pc_private), bytes(phone_public))
+            session_key = blake2b(shared, digest_size=32).digest()
+            return algo, session_key
+        except CryptoError:
+            raise
+        except Exception as e:
+            raise CryptoError(f"tofu key exchange failed: {e}") from e
+
     def handle_auth(self, sealed_data: bytes) -> Tuple[str, bytes]:
         """解封手机发来的 auth.data，返回 ``(algo, session_key)``。
 
