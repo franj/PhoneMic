@@ -30,7 +30,7 @@ from phonemic.gui.clipboard import copy_image
 from phonemic.gui.mouse import perform_mouse, set_stats_hook
 from phonemic.gui.mouse_debug import MouseDebugWindow
 from phonemic.gui.tray import SystemTray
-from phonemic.server.api import start_server, stop_server, restart_server, set_secure_channel, get_secret_path, request_client_rescan
+from phonemic.server.api import start_server, stop_server, restart_server, set_secure_channel, get_secret_path, request_client_rescan, resolve_approval
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_auth_method
@@ -276,6 +276,7 @@ def main():
         request_client_rescan()
 
     dashboard.set_algorithm_change_callback(_recreate_secure_channel)
+    dashboard.set_approval_callback(resolve_approval)
 
     # 启动时同步模式（配置为 Cloudflare 时自动连接隧道）
     if dashboard.get_mode() == TunnelMode.CLOUDFLARE:
@@ -328,10 +329,15 @@ def main():
             else:
                 tray.notify_photo_failed(name)
         elif event_type == "connect":
-            # payload 为本次握手协商出的算法名（明文模式为 "none"）
+            # payload 为本次握手协商出的算法名
             algo = payload if isinstance(payload, str) else None
             dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
+        elif event_type == "approval_request":
+            # TOFU 首次连接审批请求：payload 为 {"pin": str, "ip": str}
+            # 主界面内嵌通知（非弹窗），新请求替换旧通知
+            if isinstance(payload, dict):
+                dashboard.show_approval_request(payload.get("pin", ""), payload.get("ip", ""))
         elif event_type == "disconnect":
             # 一轮会话到此为止：清掉可能停在 ABANDONED 的 direct 会话，
             # 否则下一轮会静默退化成「预览 + 悬浮窗」（原因见上屏方式变更处）。

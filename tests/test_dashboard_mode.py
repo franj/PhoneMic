@@ -229,107 +229,147 @@ class TestUrlDisplay:
         assert dashboard.ip_label.alignment() == Qt.AlignCenter
 
 
-class TestEncryptionModeRestriction:
-    """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际强制加密。"""
+class TestAuthModeRestriction:
+    """Cloudflare 模式强制 url_fragment：TOFU 选项禁用。"""
 
-    def test_algo_none_enabled_in_lan_by_default(self, dashboard):
-        assert dashboard.act_algo_none.isEnabled() is True
+    def test_auth_tofu_enabled_in_lan_by_default(self, dashboard):
+        assert dashboard.act_auth_tofu.isEnabled() is True
 
-    def test_algo_none_disabled_in_cf_mode(self, dashboard):
+    def test_auth_tofu_disabled_in_cf_mode(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is False
+        assert dashboard.act_auth_tofu.isEnabled() is False
 
-    def test_algo_none_re_enabled_back_to_lan(self, dashboard):
+    def test_auth_tofu_re_enabled_back_to_lan(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         dashboard._on_mode_clicked(TunnelMode.LAN)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is True
+        assert dashboard.act_auth_tofu.isEnabled() is True
 
-    def test_cf_with_config_none_shows_encrypted_checked(self, dashboard):
-        """配置为 none 时进入 CF 模式：none 禁用 + 加密勾选。"""
-        # 模拟配置为 none 的场景
-        dashboard._algorithm = "none"
+    def test_cf_with_tofu_config_shows_url_fragment_checked(self, dashboard):
+        """配置为 tofu 时进入 CF 模式：TOFU 禁用 + url_fragment 勾选。"""
+        dashboard._auth_method = "tofu"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is False
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+        assert dashboard.act_auth_tofu.isEnabled() is False
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
-    def test_clicking_none_in_cf_mode_does_not_change_algorithm(self, dashboard):
-        """CF 模式下点 none 应被拒绝，配置不变。"""
-        dashboard._algorithm = "auto"
+    def test_clicking_tofu_in_cf_mode_does_not_change_auth_method(self, dashboard):
+        """CF 模式下点 TOFU 应被拒绝，配置不变。"""
+        dashboard._auth_method = "url_fragment"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         dashboard._sync_menu_checks()
-        dashboard._on_algorithm_clicked("none")
-        # 应保持 auto（加密），未切到 none
-        assert dashboard._algorithm == "auto"
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+        dashboard._on_auth_method_clicked("tofu")
+        assert dashboard._auth_method == "url_fragment"
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
 
-class TestEncryptionToggle:
-    """加密菜单只有 加密/不加密 两项，具体算法由客户端协商。"""
+class TestAuthMethodToggle:
+    """认证方式菜单只有 TOFU 手动审批 / 扫码认证 两项，加密永远开启。"""
 
-    def test_menu_has_no_algorithm_items(self, dashboard):
-        """不再暴露具体算法菜单项。"""
+    def test_menu_has_no_legacy_algo_items(self, dashboard):
+        """不再暴露旧的加密/明文菜单项。"""
+        assert not hasattr(dashboard, "act_algo_none")
+        assert not hasattr(dashboard, "act_algo_encrypted")
         assert not hasattr(dashboard, "act_algo_xsalsa20")
         assert not hasattr(dashboard, "act_algo_xchacha20")
 
-    def test_default_is_none(self, dashboard):
-        """默认不加密（LAN 模式）。"""
-        assert dashboard.act_algo_none.isChecked() is True
-        assert dashboard.act_algo_encrypted.isChecked() is False
+    def test_default_is_tofu(self, dashboard):
+        """默认 TOFU 手动审批（LAN 模式）。"""
+        assert dashboard.act_auth_tofu.isChecked() is True
+        assert dashboard.act_auth_url_fragment.isChecked() is False
 
-    def test_clicking_encrypted_persists_auto(self, dashboard):
-        """点击加密：配置写入 auto，加密项勾选。"""
-        dashboard._on_algorithm_clicked("auto")
-        assert dashboard._algorithm == "auto"
-        assert dashboard.sm.get("e2ee_algorithm") == "auto"
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+    def test_clicking_url_fragment_persists(self, dashboard):
+        """点击扫码认证：配置写入 url_fragment。"""
+        dashboard._on_auth_method_clicked("url_fragment")
+        assert dashboard._auth_method == "url_fragment"
+        assert dashboard.sm.get("auth_method") == "url_fragment"
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
-    def test_clicking_none_back_in_lan(self, dashboard):
-        """LAN 模式下可从加密切回不加密。"""
-        dashboard._on_algorithm_clicked("auto")
-        dashboard._on_algorithm_clicked("none")
-        assert dashboard._algorithm == "none"
-        assert dashboard.sm.get("e2ee_algorithm") == "none"
-        assert dashboard.act_algo_none.isChecked() is True
+    def test_clicking_tofu_back_in_lan(self, dashboard):
+        """LAN 模式下可从扫码认证切回 TOFU。"""
+        dashboard._on_auth_method_clicked("url_fragment")
+        dashboard._on_auth_method_clicked("tofu")
+        assert dashboard._auth_method == "tofu"
+        assert dashboard.sm.get("auth_method") == "tofu"
+        assert dashboard.act_auth_tofu.isChecked() is True
 
-    def test_status_shows_negotiated_algorithm(self, dashboard):
-        """加密连接时状态栏显示协商出的具体算法（信息透明，菜单不让用户选）。"""
-        dashboard._algorithm = "auto"
+    def test_status_shows_auth_method_and_negotiated_algo(self, dashboard):
+        """状态栏显示认证方式 + 协商出的算法。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True, "xchacha20")
         assert "XChaCha20" in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_encrypted_algo", algo="XChaCha20") \
-            in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_tofu") in dashboard.status_label.text()
 
-    def test_status_encrypted_without_negotiated_algo(self, dashboard):
-        """未携带协商算法（如模式切换后刷新）时退化为通用 加密 文案。"""
-        dashboard._algorithm = "auto"
+    def test_status_url_fragment_with_algo(self, dashboard):
+        """扫码认证模式下状态栏显示扫码 + 算法。"""
+        dashboard._auth_method = "url_fragment"
+        dashboard.update_connection_status(True, "xchacha20")
+        assert "XChaCha20" in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_url_fragment") in dashboard.status_label.text()
+
+    def test_status_connected_without_negotiated_algo(self, dashboard):
+        """未携带协商算法时只显示认证方式。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True)
         assert "XChaCha20" not in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_encrypted") in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_tofu") in dashboard.status_label.text()
 
     def test_status_negotiated_algo_cleared_on_disconnect(self, dashboard):
-        """断开后清空协商结果，明文模式不显示算法。"""
-        dashboard._algorithm = "auto"
+        """断开后清空协商结果。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True, "xchacha20")
         assert dashboard._negotiated_algo == "xchacha20"
         dashboard.update_connection_status(False)
         assert dashboard._negotiated_algo is None
-        dashboard._algorithm = "none"
-        dashboard.update_connection_status(True)
-        assert "XChaCha20" not in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_plaintext") in dashboard.status_label.text()
 
     def test_algo_display_name_fallback_for_unknown_algo(self, dashboard):
         """locale 缺失的算法名回退为原始算法名（未来新增算法无需先加 locale）。"""
         assert dashboard._algo_display_name("xchacha20") == "XChaCha20"
-        assert dashboard._algo_display_name("aes-256-gcm") == "aes-256-gcm"
+
+
+class TestTofuApprovalUi:
+    """TOFU 审批通知 UI 测试。"""
+
+    def test_approval_frame_hidden_by_default(self, dashboard):
+        """审批通知默认隐藏。"""
+        assert dashboard._approval_frame.isVisible() is False
+
+    def test_show_approval_request_displays_frame(self, dashboard, qtbot):
+        """显示审批请求后通知框可见。"""
+        with qtbot.waitExposed(dashboard):
+            dashboard.show()
+        dashboard.show_approval_request("1234", "192.168.1.100")
+        assert dashboard._approval_frame.isVisible() is True
+
+    def test_hide_approval_request_hides_frame(self, dashboard):
+        """隐藏审批请求后通知框不可见。"""
+        dashboard.show_approval_request("1234", "192.168.1.100")
+        dashboard.hide_approval_request()
+        assert dashboard._approval_frame.isVisible() is False
+
+    def test_approval_callback_invoked_on_accept(self, dashboard):
+        """点击允许后调用回调（参数为 True）。"""
+        result = []
+        dashboard.set_approval_callback(lambda approved: result.append(approved))
+        dashboard.show_approval_request("5678", "10.0.0.1")
+        dashboard._approval_accept_btn.click()
+        assert result == [True]
+        assert dashboard._approval_frame.isVisible() is False
+
+    def test_approval_callback_invoked_on_deny(self, dashboard):
+        """点击拒绝后调用回调（参数为 False）。"""
+        result = []
+        dashboard.set_approval_callback(lambda approved: result.append(approved))
+        dashboard.show_approval_request("5678", "10.0.0.1")
+        dashboard._approval_deny_btn.click()
+        assert result == [False]
+        assert dashboard._approval_frame.isVisible() is False
 
 
 class TestRestartServiceMenu:
