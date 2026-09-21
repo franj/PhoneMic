@@ -33,7 +33,7 @@ from phonemic.gui.tray import SystemTray
 from phonemic.server.api import start_server, stop_server, restart_server, set_secure_channel, get_secret_path, request_client_rescan
 from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
-from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_auth_method
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
 from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.i18n import I18n
@@ -175,10 +175,10 @@ def main():
     start_server(selected_ip, actual_port, bridge)
 
     # 安全通道
-    algorithm = sm.get("e2ee_algorithm", "none")
+    auth_method = sm.get("auth_method", "tofu")
     tunnel_mode = get_mode()
-    # Cloudflare 模式下配置为 none 时强制使用 xchacha20，配置保持原值不写入
-    secure_channel = SecureChannel(algorithm=effective_algorithm(algorithm, tunnel_mode), mode=tunnel_mode.value)
+    # Cloudflare 公网可达，TOFU 首次连接无信任锚，强制 url_fragment
+    secure_channel = SecureChannel(auth_method=effective_auth_method(auth_method, tunnel_mode), mode=tunnel_mode.value)
     set_secure_channel(secure_channel)
 
     if not wait_for_server(selected_ip, actual_port, secure_channel.secret_path):
@@ -263,14 +263,14 @@ def main():
     # 安全通道
     dashboard.set_secure_channel(secure_channel)
 
-    def _recreate_secure_channel(algo: str):
-        """算法变更时重建 SecureChannel，同步更新 api 和 dashboard。
+    def _recreate_secure_channel(auth_method: str):
+        """认证方式变更时重建 SecureChannel，同步更新 api 和 dashboard。
 
         URL（随机路径/公钥）已变化，通知已连接的手机端重新扫码并断开旧连接，
         避免旧连接继续以旧加密状态通信、且自动重连陷入死循环。
         """
         mode = dashboard.get_mode()
-        new_sc = SecureChannel(algorithm=effective_algorithm(algo, mode), mode=mode.value)
+        new_sc = SecureChannel(auth_method=effective_auth_method(auth_method, mode), mode=mode.value)
         set_secure_channel(new_sc)
         dashboard.set_secure_channel(new_sc)
         request_client_rescan()
@@ -354,9 +354,9 @@ def main():
             mode = TunnelMode(payload)
             dashboard._mode = mode
             set_mode(mode)
-            # 模式变更后重建 SecureChannel（mode 影响 needs_auth 和 token 生成）
+            # 模式变更后重建 SecureChannel（mode 影响认证方式和 secret_path 生成）
             new_sc = SecureChannel(
-                algorithm=effective_algorithm(sm.get("e2ee_algorithm", "none"), mode),
+                auth_method=effective_auth_method(sm.get("auth_method", "tofu"), mode),
                 mode=mode.value,
             )
             set_secure_channel(new_sc)
