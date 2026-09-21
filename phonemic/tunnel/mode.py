@@ -42,3 +42,15 @@ def effective_algorithm(algo: str, mode: TunnelMode) -> str:
     if mode == TunnelMode.CLOUDFLARE and algo == "none":
         return "auto"
     return algo
+
+
+def effective_auth_method(auth_method: str, mode: TunnelMode) -> str:
+    """根据当前模式返回最终生效的认证方式。
+
+    返回值为 "tofu"（手动审批）或 "url_fragment"（扫码认证）。
+    Cloudflare 公网可达，TOFU 首次连接无信任锚，强制 url_fragment。
+    LAN 模式下尊重用户选择。
+    """
+    if mode == TunnelMode.CLOUDFLARE:
+        return "url_fragment"
+    return auth_method

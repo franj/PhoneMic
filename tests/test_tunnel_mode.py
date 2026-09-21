@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm, effective_auth_method
 
 
 class TestTunnelMode:
@@ -76,3 +76,20 @@ class TestEffectiveAlgorithm:
         assert effective_algorithm("xsalsa20", TunnelMode.LAN) == "auto"
         assert effective_algorithm("xchacha20", TunnelMode.LAN) == "auto"
         assert effective_algorithm("xsalsa20", TunnelMode.CLOUDFLARE) == "auto"
+
+
+class TestEffectiveAuthMethod:
+    """effective_auth_method 返回 "tofu"/"url_fragment"，CF 模式强制 url_fragment。"""
+
+    def test_lan_tofu_stays_tofu(self):
+        assert effective_auth_method("tofu", TunnelMode.LAN) == "tofu"
+
+    def test_lan_url_fragment_stays_url_fragment(self):
+        assert effective_auth_method("url_fragment", TunnelMode.LAN) == "url_fragment"
+
+    def test_cf_tofu_forced_to_url_fragment(self):
+        """CF 模式下 tofu 被强制为 url_fragment。"""
+        assert effective_auth_method("tofu", TunnelMode.CLOUDFLARE) == "url_fragment"
+
+    def test_cf_url_fragment_stays_url_fragment(self):
+        assert effective_auth_method("url_fragment", TunnelMode.CLOUDFLARE) == "url_fragment"

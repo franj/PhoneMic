@@ -240,41 +240,59 @@ def test_network_selection_mode_validation(mock_config_path, reset_singleton):
     assert sm.get("network_selection_mode") == "ask"
 
 
-def test_e2ee_algorithm_legacy_values_migrated(mock_config_path, reset_singleton):
-    """历史算法值（xsalsa20/xchacha20）加载时迁移为 auto（加密，算法协商）"""
+def test_e2ee_algorithm_none_migrates_to_tofu(mock_config_path, reset_singleton):
+    """e2ee_algorithm: "none" 迁移为 auth_method: "tofu"（手动审批）"""
     config_file = mock_config_path / "settings.json"
     with open(config_file, "w", encoding="utf-8") as f:
-        json.dump({"e2ee_algorithm": "xchacha20"}, f)
+        json.dump({"e2ee_algorithm": "none"}, f)
 
     sm = SettingsManager.instance()
-    assert sm.get("e2ee_algorithm") == "auto"
-
-    # xsalsa20 同样迁移
-    SettingsManager._instance = None
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump({"e2ee_algorithm": "xsalsa20"}, f)
-    sm = SettingsManager.instance()
-    assert sm.get("e2ee_algorithm") == "auto"
+    assert sm.get("auth_method") == "tofu"
+    assert sm.get("e2ee_algorithm") is None  # 旧键已删除
 
 
-def test_e2ee_algorithm_valid_values_kept(mock_config_path, reset_singleton):
-    """合法值 none/auto 原样保留"""
+def test_e2ee_algorithm_auto_migrates_to_url_fragment(mock_config_path, reset_singleton):
+    """e2ee_algorithm: "auto" 迁移为 auth_method: "url_fragment"（扫码认证）"""
     config_file = mock_config_path / "settings.json"
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump({"e2ee_algorithm": "auto"}, f)
 
     sm = SettingsManager.instance()
-    assert sm.get("e2ee_algorithm") == "auto"
+    assert sm.get("auth_method") == "url_fragment"
+    assert sm.get("e2ee_algorithm") is None
 
 
-def test_e2ee_algorithm_invalid_value_reset_to_default(mock_config_path, reset_singleton):
-    """非法值重置为默认 none"""
+def test_e2ee_algorithm_legacy_migrates_to_url_fragment(mock_config_path, reset_singleton):
+    """历史算法值（xsalsa20/xchacha20）迁移为 auth_method: "url_fragment" """
+    config_file = mock_config_path / "settings.json"
+    for old_val in ("xchacha20", "xsalsa20"):
+        SettingsManager._instance = None
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"e2ee_algorithm": old_val}, f)
+        sm = SettingsManager.instance()
+        assert sm.get("auth_method") == "url_fragment"
+        assert sm.get("e2ee_algorithm") is None
+
+
+def test_auth_method_valid_values_kept(mock_config_path, reset_singleton):
+    """合法 auth_method 值原样保留"""
+    config_file = mock_config_path / "settings.json"
+    for method in ("tofu", "url_fragment"):
+        SettingsManager._instance = None
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"auth_method": method}, f)
+        sm = SettingsManager.instance()
+        assert sm.get("auth_method") == method
+
+
+def test_auth_method_invalid_value_reset_to_default(mock_config_path, reset_singleton):
+    """非法 auth_method 值重置为默认 tofu"""
     config_file = mock_config_path / "settings.json"
     with open(config_file, "w", encoding="utf-8") as f:
-        json.dump({"e2ee_algorithm": "bogus_algo"}, f)
+        json.dump({"auth_method": "bogus"}, f)
 
     sm = SettingsManager.instance()
-    assert sm.get("e2ee_algorithm") == "none"
+    assert sm.get("auth_method") == "tofu"
 
 
 def test_text_input_mode_direct_is_kept(mock_config_path, reset_singleton):
