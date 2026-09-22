@@ -8,9 +8,18 @@
 - test_js_crypto 测试 Provider 层（直接调用 encrypt/decrypt）
 - 本测试测试协议层（SecureChannel.wrap/unwrap ↔ SecureClient.encrypt/decrypt + WSClient 消息收发）
 
+架构前提（docs/e2ee-always-on-design.md）：
+- 加密永远开启，不存在明文模式；`none` 算法与 `PlainProvider` 已删除，
+  因此也没有「连上即就绪」的路径——`needs_auth` / `is_encrypted` 恒为 True。
+- `SecureChannel(auth_method=..., mode=...)`：url_fragment（扫码）或 tofu（手动审批）。
+  本文件默认覆盖 url_fragment 认证与 TOFU 首次连接；CF 模式强制 url_fragment
+  （tunnel/mode.effective_auth_method）。
+
 关键设计：
 - set_content 加载 HTML（与 test_mobile.py 一致）
-- patch _parseUrlFragment 注入 PC 公钥和 a= 算法列表（绕过 location.hash 限制）
+- patch _parseUrlFragment 注入认证方式 / PC 公钥 / a= 算法列表
+  （set_content 装载的是 about:blank 不透明源文档，location.hash 与 localStorage
+  均不可用，只能直接给出这些参数；TOFU 路径另用内存 localStorage 替身）
 - 不 patch _selectAlgorithm — 让真实的协商选择逻辑运行
 - Mock WebSocket 不自动回帧 — Python 手动完成握手（auth_challenge / auth_proof）
 - 参数化测试 xsalsa20 和 xchacha20 两种算法（通过调整 a= 列表顺序让客户端分别选中）
@@ -24,8 +33,8 @@ import pytest
 
 from phonemic.tunnel.crypto import OFFERED_ALGORITHMS
 from phonemic.tunnel.e2ee import SecureChannel
-from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
+from phonemic.tunnel.mode import TunnelMode, effective_auth_method
 
 pytest.importorskip("playwright")
 
@@ -110,10 +119,18 @@ window.WebSocket.CLOSED = 3;
 """
 
 
-def _prepare_html(channel, offered, force_none_algo=False):
-    """读取 mobile.html，内联外部脚本，注入 Mock WebSocket 和密钥参数。
+def _prepare_html(channel, offered, tofu_first=False):
+    """读取 mobile.html，内联外部脚本，注入 Mock WebSocket 和握手参数。
 
     offered: 服务端 a= 下发的算法优先级列表，客户端按序协商选择第一个自身支持的。
+    tofu_first: True 模拟「URL 无 k= 且本地无已存公钥」→ TOFU 首次连接（明文 auth
+        携带 algo/pk/pin，随后等待 PC 审批）；默认 False 模拟 url_fragment 认证
+        （SealedBox 密封 auth）。
+
+    `_parseUrlFragment` 整体替换：set_content 装载的是 about:blank 不透明源文档，
+    真实实现里的 location.hash 与 localStorage 都不可用，只能直接给出认证方式、
+    PC 公钥与算法列表。TOFU 路径还要读写 localStorage（存/清 PC 公钥），故另注入
+    内存替身——仅补上文档上下文缺的浏览器能力，不放宽任何协议断言。
     """
     html = (RES_DIR / "mobile.html").read_text(encoding="utf-8")
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
@@ -132,27 +149,33 @@ def _prepare_html(channel, offered, force_none_algo=False):
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
     # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
     # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    # localStorage 替身必须在这里（早于主脚本）：about:blank 下读写 localStorage
+    # 会抛 SecurityError，而 TOFU 路径要存/清 PC 公钥（e2ee-always-on-design §8.6）。
+    storage_stub = (
+        "<script>(function(){var m={};Object.defineProperty(window,'localStorage',"
+        "{configurable:true,value:{getItem:function(k){return k in m?m[k]:null;},"
+        "setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];}}});"
+        "})();</script>"
+    )
     boot = (
         "<script>window.__PHONEMIC_DEV__=true;</script>"
-        "<script>" + MOCK_WS_SCRIPT + "</script>"
+        + storage_stub
+        + "<script>" + MOCK_WS_SCRIPT + "</script>"
     )
     html = re.sub(r"<head[^>]*>", lambda m: m.group(0) + boot, html, count=1)
-    # patch _parseUrlFragment：注入 PC 公钥/token 和 a= 算法列表
-    pc_pubkey_b64 = channel.get_public_key_b64()
+    # patch _parseUrlFragment：注入认证方式 / PC 公钥 / a= 算法列表
     offered_js = ",".join(f"'{a}'" for a in offered)
     patch = "<script>SecureClient.prototype._parseUrlFragment = function() {"
-    if pc_pubkey_b64:
+    if tofu_first:
+        # 无 k=、无已存公钥 → TOFU 首次：只给算法列表，认证方式保持默认
+        patch += "  this._authMode = 'tofu_first';"
+    else:
+        pc_pubkey_b64 = channel.get_public_key_b64()
         patch += f"  this._pcPublicKeyB64 = '{pc_pubkey_b64}';"
+        patch += f"  this._pcPublicKeyRaw = this._fromB64('{pc_pubkey_b64}');"
+        patch += "  this._authMode = 'url_fragment';"
     patch += f"  this._selectedAlgo = this._selectAlgorithm([{offered_js}]);"
-    patch += "};"
-    if force_none_algo:
-        patch += (
-            "SecureClient.prototype._parseUrlFragment = function() {"
-            "  this._pcPublicKeyB64 = 'fake_token';"
-            "  this._selectedAlgo = 'none';"
-            "};"
-        )
-    patch += "</script>"
+    patch += "};</script>"
     html = html.replace("</body>", patch + "</body>", 1)
 
     # 暴露 wsClient 供 Python 端检查
@@ -164,10 +187,16 @@ def _prepare_html(channel, offered, force_none_algo=False):
 
 
 def _as_frame(msg):
-    """把 mock WS 捕获的明文帧还原为 Python 帧（bin 字段由 int 数组转回 bytes）。"""
+    """把 mock WS 捕获的明文帧还原为 Python 帧（bin 字段由 int 数组转回 bytes）。
+
+    mock WS 的 toPlain 把 Uint8Array 转成 int 数组才能跨 Playwright 边界；msgpack
+    里是 bin 的字段（url_fragment 的 auth.data、TOFU 首次的 auth.pk）都得转回 bytes，
+    否则下游 receive_auth 会判为非法编码。
+    """
     frame = dict(msg)
-    if isinstance(frame.get("data"), list):
-        frame["data"] = bytes(frame["data"])
+    for key in ("data", "pk"):
+        if isinstance(frame.get(key), list):
+            frame[key] = bytes(frame[key])
     return frame
 
 
@@ -193,39 +222,31 @@ def _wait_auth(page):
     return _as_frame(msg)
 
 
-def _process_auth(page, channel):
-    """跑完握手，并下发首个 config——等价于真实服务端的 _handle_auth + 首个 config。
+def _answer_challenge_and_send_config(page, channel):
+    """发 auth_challenge、校验 JS 回的 auth_proof，再下发首个 config。
 
-    加密模式：回 auth_challenge（整帧加密），等 JS 回 auth_proof 后由 Python 校验，
-    即 _handle_auth 的第三步。明文模式（none+CF）：没有会话密钥、不发挑战，token
-    一过即完成——客户端要到第一个数据帧才判定接入，所以两种模式都要推 config。
-
-    加密模式下客户端随后即 isConnected，这是**乐观接入**（与 TLS 1.3 客户端
+    auth_challenge 由 ``make_auth_challenge()`` 直接产出**线上字节**
+    （url_fragment 下已整帧加密），不能再经 ``channel.wrap`` 二次加密。
+    客户端收到 config 后即 isConnected，这是**乐观接入**（与 TLS 1.3 客户端
     Finished 同形）；被拒由 error(code="auth") 或 close 4001 体现。
     """
-    auth_msg = _wait_auth(page)
-    assert channel.receive_auth(auth_msg) is True
-
-    if channel.is_encrypted:
-        challenge = channel.make_auth_challenge()
-        page.evaluate(
-            "(msg) => window.__mockWS.triggerMessage(msg)",
-            list(channel.wrap(challenge)),
-        )
-        # auth_proof 是加密帧 → mock 按「raw」保存（明文帧才会被解成 dict）
-        page.wait_for_function(
-            "() => window.__mockWS.sentMessages.some(m => m.raw)", timeout=3000
-        )
-        proof_raw = page.evaluate(
-            "() => { const m = window.__mockWS.sentMessages.find(m => m.raw);"
-            " return m ? m.raw : null; }"
-        )
-        assert proof_raw, "客户端未回 auth_proof"
-        assert channel.verify_auth_proof(
-            channel.unwrap(bytes(proof_raw)), challenge["nonce"]
-        ) is True, "auth_proof 未能通过 nonce 校验"
-    else:
-        assert channel.is_authenticated is True
+    challenge_bytes = channel.make_auth_challenge()
+    page.evaluate(
+        "(msg) => window.__mockWS.triggerMessage(msg)",
+        list(challenge_bytes),
+    )
+    # auth_proof 是加密帧 → mock 按「raw」保存（明文帧才会被解成 dict）
+    page.wait_for_function(
+        "() => window.__mockWS.sentMessages.some(m => m.raw)", timeout=3000
+    )
+    proof_raw = page.evaluate(
+        "() => { const m = window.__mockWS.sentMessages.find(m => m.raw);"
+        " return m ? m.raw : null; }"
+    )
+    assert proof_raw, "客户端未回 auth_proof"
+    assert channel.verify_auth_proof(
+        channel.unwrap(bytes(proof_raw))
+    ) is True, "auth_proof 未能通过 nonce 校验"
 
     page.evaluate(
         "(msg) => window.__mockWS.triggerMessage(msg)",
@@ -236,6 +257,43 @@ def _process_auth(page, channel):
     )
 
 
+def _process_auth(page, channel):
+    """跑完 url_fragment 握手，并下发首个 config——等价 api._handle_auth 的认证分支。
+
+    auth(SealedBox) → receive_auth 交出 (algo, session_key) → create_provider →
+    auth_challenge(Provider 加密) → auth_proof(Provider 加密) → config。
+
+    注意 TOFU 首次连接不走这里（receive_auth 只返回 pin、不建密钥，须先过审批），
+    见 `_process_tofu_first_auth`。
+    """
+    auth_msg = _wait_auth(page)
+    algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
+    assert pin is None, "url_fragment 认证不应携带识别码（无审批环节）"
+    assert session_key is not None, "SealedBox 解封后应拿到会话密钥"
+    assert phone_pk is None
+    channel.create_provider(algo, session_key)
+
+    _answer_challenge_and_send_config(page, channel)
+
+
+def _process_tofu_first_auth(page, channel):
+    """跑完 TOFU 首次握手，并下发首个 config——等价 api._handle_auth 的 TOFU 分支。
+
+    明文 auth(algo/pk/pin) → receive_auth 只交出 (pin, phone_pk)，**不做 ECDH** →
+    审批放行 → complete_tofu_auth 建 Provider → SealedBox(phone_public) 挑战 →
+    auth_proof(Provider 加密) → config。审批通过后手机把 PC 公钥存入 localStorage。
+    """
+    auth_msg = _wait_auth(page)
+    algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
+    assert pin is not None, "TOFU 首次 auth 应携带明文识别码"
+    assert session_key is None, "审批前不应完成 ECDH（零计算开销）"
+    assert phone_pk is not None
+
+    channel.complete_tofu_auth(algo, phone_pk)   # 审批放行
+
+    _answer_challenge_and_send_config(page, channel)
+
+
 @pytest.fixture(params=["xsalsa20", "xchacha20"])
 def secure_pair(page, request):
     """参数化 fixture：Python SecureChannel + JS SecureClient（已认证）。
@@ -244,7 +302,7 @@ def secure_pair(page, request):
     验证客户端按序协商后回传选择。
     """
     algo = request.param
-    pc = SecureChannel(algorithm="auto")
+    pc = SecureChannel(auth_method="url_fragment")
     channel = pc.new_session()
     offered = [algo] + [a for a in OFFERED_ALGORITHMS if a != algo]
     html = _prepare_html(pc, offered)
@@ -257,10 +315,16 @@ def secure_pair(page, request):
 
 class TestHandshake:
     def test_auth_success(self, secure_pair):
-        """握手成功：Python 已认证，JS 已连接。"""
+        """握手成功：Python 已认证，JS 已连接。
+
+        `is_rejected` / `reject_reason` 随本次架构变更一并删除（握手失败现在直接
+        以 CryptoError 抛出、由 api 归为 close 4001，没有「记录拒绝原因」的会话字段），
+        故这里改为断言新语义下恒真的握手前提。
+        """
         page, channel, algo = secure_pair
         assert channel.is_authenticated
-        assert not channel.is_rejected
+        assert channel.needs_auth is True
+        assert channel.is_encrypted is True
         assert page.evaluate("() => window.__wsClient.isConnected") is True
 
     def test_algorithm_selected_correctly(self, secure_pair):
@@ -418,31 +482,17 @@ class TestRoundtrip:
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 15
 
 
-# ---------- 算法拒绝 ----------
-
-class TestAlgorithmRejection:
-    def test_none_rejected(self, page):
-        """none 算法被 PC 端拒绝，JS 断开连接。"""
-        pc = SecureChannel(algorithm="auto")
-        channel = pc.new_session()
-        html = _prepare_html(pc, ["xsalsa20"], force_none_algo=True)
-        page.set_content(html)
-
-        auth_msg = _wait_auth(page)
-        assert auth_msg["algo"] == "none"
-
-        assert channel.receive_auth(auth_msg) is False
-        assert channel.is_rejected
-        # 新协议下 algo 在密封 blob 内：none 算法走不到密钥交换，以解封失败被拒
-        assert channel.reject_reason
-
-        # 认证前失败：服务端不回消息层帧，直接 close 4001（与 api._handle_auth 一致）
-        page.evaluate("() => window.__mockWS.triggerClose(4001)")
-
-        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
-        assert page.evaluate("() => window.__wsClient.isConnected") is False
-        assert page.locator("#status-bar").is_visible()
-        assert page.locator("#input-box").is_disabled()
+# ---------- 算法拒绝（用例已移除，覆盖位置见下方说明） ----------
+#
+# 原 TestAlgorithmRejection.test_none_rejected 依赖 `algorithm="none"` 明文路径：
+# 手机端选 'none'、服务端以「token 不匹配」拒绝。该路径随架构变更整体删除
+# （docs/e2ee-always-on-design.md §9：`none` 算法、PlainProvider、token 认证路径全部移除），
+# `none` 不再是可协商算法，也不是合法的 Provider——这条用例的语义已不存在，故删除。
+#
+# 等价的真实覆盖仍在：
+#   - 「算法不在允许列表 → 服务端拒绝」：test_e2ee.py::test_receive_auth_unsupported_algo_raises
+#   - 「认证前失败 → close 4001 → 界面提示重新扫码并停止重连」：
+#     TestAuthFailureUX.test_close_4001_shows_warning_and_stops_reconnect
 
 
 # ---------- 算法协商 ----------
@@ -452,7 +502,7 @@ class TestAlgorithmNegotiation:
 
     def test_client_prefers_first_offered(self, page):
         """客户端选择列表中首个支持的算法。"""
-        pc = SecureChannel(algorithm="auto")
+        pc = SecureChannel(auth_method="url_fragment")
         html = _prepare_html(pc, ["xchacha20", "xsalsa20"])
         page.set_content(html)
         page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
@@ -460,19 +510,25 @@ class TestAlgorithmNegotiation:
 
     def test_client_falls_back_along_list(self, page):
         """列表首位不支持时按序回退到下一个支持的算法。"""
-        pc = SecureChannel(algorithm="auto")
+        pc = SecureChannel(auth_method="url_fragment")
         html = _prepare_html(pc, ["aes-256-gcm", "xchacha20", "xsalsa20"])
         page.set_content(html)
         page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
         assert page.evaluate("() => window.__wsClient.secure._selectedAlgo") == "xchacha20"
 
     def test_no_common_algorithm_stops_connect(self, page):
-        """无共同算法：不建立 WebSocket 连接，提示重新扫码。"""
-        pc = SecureChannel(algorithm="auto")
-        html = _prepare_html(pc, ["aes-256-gcm", "aegis256"])
+        """无共同算法：不建立 WebSocket 连接，提示重新扫码。
+
+        列表里刻意混入已删除的 'none'：它不再对应任何 Provider，必须和别的未知
+        算法一样被跳过，而不能像旧明文模式那样被选中（`none` 与 PlainProvider
+        已随本次架构变更移除，见 docs/e2ee-always-on-design.md §9）。
+        """
+        pc = SecureChannel(auth_method="url_fragment")
+        html = _prepare_html(pc, ["none", "aes-256-gcm", "aegis256"])
         page.set_content(html)
         page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready")
 
+        assert page.evaluate("() => window.__wsClient.secure._selectedAlgo") is None
         assert page.evaluate("() => window.__wsClient.secure.algoUnsupported") is True
         # 未创建 WebSocket
         assert page.evaluate("() => window.__mockWS.current") is None
@@ -483,7 +539,7 @@ class TestAlgorithmNegotiation:
     def test_server_offered_list_priority(self):
         """服务端 URL 下发完整优先级列表：xchacha20 优先于 xsalsa20。"""
         assert OFFERED_ALGORITHMS[0] == "xchacha20"
-        pc = SecureChannel(algorithm="auto")
+        pc = SecureChannel(auth_method="url_fragment")
         url = pc.append_to_url("https://x.trycloudflare.com")
         assert "a=xchacha20,xsalsa20" in url
 
@@ -526,201 +582,158 @@ class TestDisconnect:
         assert page.evaluate("() => window.__wsClient.isConnected") is False
 
 
-# ---------- none+LAN 模式 ----------
+# ---------- TOFU 首次连接（LAN 模式 1） ----------
+#
+# 原「none+LAN 模式」整组用例（TestNoneLAN / none_lan_pair fixture）已删除：
+# 它们断言 `not channel.needs_auth` / `not channel.is_encrypted`、JS 不发 auth、
+# 明文收发——这些都是 `algorithm="none"` 的明文直连路径，随本次架构变更消失
+# （docs/e2ee-always-on-design.md §7.3/§8.4：needs_auth 与 is_encrypted 恒为 True，
+# 不存在「连上即就绪」）。恒真语义已在 test_e2ee.py::TestStateMachine 中断言，
+# 明文收发则没有了对应物，故不再重复。
+#
+# 取而代之：LAN 模式现在只有两条真实路径——TOFU 首次（审批）与 TOFU 重连
+# （等同 url_fragment）。后者由上面的 url_fragment 用例覆盖（帧格式完全相同，
+# 见 design §5.3），这里补 TOFU 首次这条 JS ↔ Python 的集成路径。
 
-@pytest.fixture
-def none_lan_pair(page):
-    """none+LAN 模式：无认证，明文 msgpack。"""
-    pc = SecureChannel(algorithm="none", mode="lan")
-    channel = pc.new_session()
-    html = _prepare_html(pc, ["none"])
-    page.set_content(html)
-    page.wait_for_function("() => window.__wsClient && window.__wsClient.isConnected")
-    yield page, channel
 
+class TestTofuFirst:
+    """TOFU 首次连接：明文 auth（含识别码）→ PC 审批 → SealedBox 挑战。
 
-class TestNoneLAN:
-    def test_no_auth_needed(self, none_lan_pair):
-        """none+LAN: 无需 auth，直接连接。"""
-        page, channel = none_lan_pair
-        assert not channel.needs_auth
-        assert not channel.is_encrypted
-        assert channel.is_authenticated
-        assert page.evaluate("() => window.__wsClient.isConnected") is True
+    取代原先的 TestAuthFailureUX.test_missing_key_does_not_connect——那条用例
+    断言「URL 缺 k= → 不建连接、提示重新扫码」，前提是「URL fragment 认证是唯一
+    合法路径」。新架构下无 k= 正是 TOFU 模式（design §4），合法且必须建连等待审批，
+    故按新语义重写为下面的用例。
+    """
 
-    def test_no_auth_message_sent(self, none_lan_pair):
-        """none+LAN: JS 不发送 auth 消息。"""
-        page, channel = none_lan_pair
-        auth_msgs = page.evaluate(
-            "() => window.__mockWS.sentMessages.filter(m => m.type === 'auth')"
-        )
-        assert len(auth_msgs) == 0
+    def test_plaintext_auth_carries_pin_not_sealed(self, page):
+        """无 k= → TOFU 首次：auth 为明文 {algo, pk, pin}，不能用 SealedBox（无信任锚）。"""
+        pc = SecureChannel(auth_method="tofu", mode="lan")
+        channel = pc.new_session()
+        assert channel.needs_auth is True and channel.is_encrypted is True
 
-    def test_send_plaintext_message(self, none_lan_pair):
-        """none+LAN: JS → Python 明文消息。"""
-        page, channel = none_lan_pair
-        page.locator("#mode-toggle").click()
-        page.locator("#input-box").fill("hello plaintext")
-        page.locator("#btn-send").click()
+        html = _prepare_html(pc, ["xsalsa20"], tofu_first=True)
+        page.set_content(html)
 
-        sent = page.evaluate("() => window.__mockWS.sentMessages")
-        send_msgs = [m for m in sent if m["type"] == "send"]
-        assert len(send_msgs) >= 1
-        assert send_msgs[-1]["text"] == "hello plaintext"
+        auth_msg = _wait_auth(page)
+        assert auth_msg["type"] == "auth"
+        assert "data" not in auth_msg, "TOFU 首次无 PC 公钥，无法密封 auth"
+        assert auth_msg["algo"] == "xsalsa20"
+        assert isinstance(auth_msg["pk"], bytes) and len(auth_msg["pk"]) == 32, "手机公钥明文（32B）"
+        assert re.fullmatch(r"\d{4}", auth_msg["pin"]), f"识别码应为 4 位数字: {auth_msg['pin']}"
 
-        unwrapped = _decode_sent(channel, send_msgs[-1])
-        assert unwrapped["text"] == "hello plaintext"
-
-    def test_receive_plaintext_config(self, none_lan_pair):
-        """none+LAN: Python → JS 明文 config。"""
-        page, channel = none_lan_pair
-        msg = channel.wrap({"type": "config", "mobile_max_records": 7})
-        assert frame_decode(msg)["type"] == "config"
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
-        page.wait_for_timeout(50)
-        assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 7
-
-    def test_bidirectional_plaintext(self, none_lan_pair):
-        """none+LAN: 双向明文通信。"""
-        page, channel = none_lan_pair
-
-        # Python → JS
-        msg = channel.wrap({"type": "config", "mobile_max_records": 3})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
-        page.wait_for_timeout(50)
-        assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 3
-
-        # JS → Python
-        page.locator("#mode-toggle").click()
-        page.locator("#input-box").fill("lan roundtrip")
-        page.locator("#btn-send").click()
-
-        sent = page.evaluate("() => window.__mockWS.sentMessages")
-        send_msgs = [m for m in sent if m["type"] == "send"]
-        assert len(send_msgs) >= 1
-        assert send_msgs[-1]["text"] == "lan roundtrip"
-
-    def test_disconnect_updates_ui(self, none_lan_pair):
-        """none+LAN: 断开后 UI 立刻显示断线状态。"""
-        page, channel = none_lan_pair
-        assert page.locator("#input-box").is_enabled()
-
-        _disconnect_without_recovery(page)
-
-        assert page.locator("#status-bar").is_visible()
-        assert page.locator("#input-box").is_disabled()
+        # 手机屏幕显示同一识别码，供用户与 PC 审批通知核对（防他人抢先连接）
+        assert page.locator("#approval-overlay").is_visible()
+        assert page.locator("#approval-pin").inner_text() == auth_msg["pin"]
+        # 尚未收到 auth_challenge（等审批）→ 未接入
         assert page.evaluate("() => window.__wsClient.isConnected") is False
 
+        # 服务端收到明文 auth：只解析字段、不做 ECDH（审批前零密钥计算）
+        algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
+        assert algo == "xsalsa20"
+        assert session_key is None and pin == auth_msg["pin"] and phone_pk is not None
 
-# ---------- none+Cloudflare 模式 ----------
+    def test_full_handshake_and_encrypted_roundtrip(self, page):
+        """审批放行后完成握手：SealedBox 挑战 → auth_proof → 加密双向通信。"""
+        pc = SecureChannel(auth_method="tofu", mode="lan")
+        channel = pc.new_session()
+        html = _prepare_html(pc, ["xsalsa20"], tofu_first=True)
+        page.set_content(html)
+
+        _process_tofu_first_auth(page, channel)
+
+        assert channel.is_authenticated
+        assert page.evaluate("() => window.__wsClient.isConnected") is True
+        # 审批浮层收起、识别码不再显示
+        assert not page.locator("#approval-overlay").is_visible()
+
+        # JS → Python：加密 send 能解密（两端独立 ECDH 得到同一会话密钥）
+        page.locator("#mode-toggle").click()
+        page.locator("#input-box").fill("tofu hello")
+        page.locator("#btn-send").click()
+        sent = page.evaluate("() => window.__mockWS.sentMessages")
+        send_msgs = [m for m in (_decode_sent(channel, m) for m in sent)
+                     if m and m.get("type") == "send"]
+        assert send_msgs[-1]["text"] == "tofu hello"
+
+
+# ---------- Cloudflare 模式（强制 url_fragment 认证） ----------
+#
+# 原「none+Cloudflare」两组用例（TestNoneCloudflare / TestNoneCloudflareRejection）
+# 基于 `algorithm="none"` 的 token 认证 + 明文 msgpack，已随架构变更删除：CF 模式
+# 不再有 token 明文回传路径，认证与加密都走 url_fragment（SealedBox）。
+# 「凭据不对 → 服务端拒绝」的等价覆盖见
+# test_e2ee.py::test_receive_auth_wrong_key_raises；
+# 「认证前失败 → close 4001 → 界面提示重新扫码」见
+# TestAuthFailureUX.test_close_4001_shows_warning_and_stops_reconnect。
 
 @pytest.fixture
-def none_cf_pair(page):
-    """none+Cloudflare 模式：token 认证，明文 msgpack。"""
-    pc = SecureChannel(algorithm="none", mode="cloudflare")
+def cf_pair(page):
+    """Cloudflare 模式：auth_method 被 effective_auth_method 强制为 url_fragment。
+
+    按真实装配方式取值（PhoneMic.py 即这样构造 SecureChannel）：CF 公网可达，
+    TOFU 首次连接无信任锚（攻击者可抢先连上骗取审批），故 CF 下用户的 auth_method
+    一律归一为 url_fragment（docs/e2ee-always-on-design.md §2）。
+    """
+    auth_method = effective_auth_method("tofu", TunnelMode.CLOUDFLARE)
+    assert auth_method == "url_fragment"
+    pc = SecureChannel(auth_method=auth_method, mode="cloudflare")
+    assert pc.secret_path, "url_fragment 模式应生成 secret_path 作为端点门禁"
+
     channel = pc.new_session()
-    html = _prepare_html(pc, ["none"])
+    html = _prepare_html(pc, list(OFFERED_ALGORITHMS))
     page.set_content(html)
     _process_auth(page, channel)
     yield page, channel, pc
 
 
-class TestNoneCloudflare:
-    def test_token_auth_success(self, none_cf_pair):
-        """none+CF: token 认证成功。"""
-        page, channel, pc = none_cf_pair
-        assert channel.needs_auth
-        assert not channel.is_encrypted
+class TestCloudflareUrlFragment:
+    def test_handshake_is_sealed_not_plaintext_token(self, cf_pair):
+        """CF 模式：auth 是 SealedBox 密文（bin），线上无明文 algo / token。"""
+        page, channel, pc = cf_pair
+        assert channel.needs_auth is True
+        assert channel.is_encrypted is True
         assert channel.is_authenticated
         assert page.evaluate("() => window.__wsClient.isConnected") is True
 
-    def test_auth_uses_token(self, none_cf_pair):
-        """none+CF: auth 消息包含 token。"""
-        page, channel, pc = none_cf_pair
         auth_msg = page.evaluate(
             "() => window.__mockWS.sentMessages.find(m => m.type === 'auth')"
         )
-        assert auth_msg["algo"] == "none"
-        token = pc.get_public_key_b64()
-        assert auth_msg["data"] == token
+        assert "algo" not in auth_msg, "算法密封在密文内，不明文传输"
+        assert "token" not in auth_msg, "token 认证路径已删除"
+        assert isinstance(auth_msg["data"], list), "auth.data 应为 bin（SealedBox 密文）"
+        assert channel.negotiated_algorithm in OFFERED_ALGORITHMS
 
-    def test_send_plaintext_after_auth(self, none_cf_pair):
-        """none+CF: 认证后明文消息（JS → Python）。"""
-        page, channel, pc = none_cf_pair
-        page.locator("#mode-toggle").click()
-        page.locator("#input-box").fill("cf plaintext")
-        page.locator("#btn-send").click()
+    def test_encrypted_roundtrip(self, cf_pair):
+        """CF 模式：双向通信均为整帧加密（Python 解密 JS 帧，JS 解密 Python 帧）。"""
+        page, channel, pc = cf_pair
 
-        sent = page.evaluate("() => window.__mockWS.sentMessages")
-        send_msgs = [m for m in sent if m["type"] == "send"]
-        assert len(send_msgs) >= 1
-        assert send_msgs[-1]["text"] == "cf plaintext"
-
-        unwrapped = _decode_sent(channel, send_msgs[-1])
-        assert unwrapped["text"] == "cf plaintext"
-
-    def test_receive_plaintext_config(self, none_cf_pair):
-        """none+CF: Python → JS 明文 config。"""
-        page, channel, pc = none_cf_pair
-        msg = channel.wrap({"type": "config", "mobile_max_records": 8})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
+        # Python → JS：加密 config，JS 解密后应用
+        page.evaluate(
+            "(m) => window.__mockWS.triggerMessage(m)",
+            list(channel.wrap({"type": "config", "mobile_max_records": 8})),
+        )
         page.wait_for_timeout(50)
         assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 8
 
-    def test_bidirectional_plaintext(self, none_cf_pair):
-        """none+CF: 双向明文通信。"""
-        page, channel, pc = none_cf_pair
-
-        # Python → JS
-        msg = channel.wrap({"type": "config", "mobile_max_records": 15})
-        page.evaluate("(m) => window.__mockWS.triggerMessage(m)", list(msg))
-        page.wait_for_timeout(50)
-        assert page.evaluate("() => window.chatManagerInstance.maxHistory") == 15
-
-        # JS → Python
+        # JS → Python：加密 send，Python 解密得到原文
         page.locator("#mode-toggle").click()
         page.locator("#input-box").fill("cf roundtrip")
         page.locator("#btn-send").click()
 
         sent = page.evaluate("() => window.__mockWS.sentMessages")
-        send_msgs = [m for m in sent if m["type"] == "send"]
-        assert len(send_msgs) >= 1
+        send_msgs = [m for m in (_decode_sent(channel, m) for m in sent)
+                     if m and m.get("type") == "send"]
         assert send_msgs[-1]["text"] == "cf roundtrip"
-
-
-class TestNoneCloudflareRejection:
-    def test_wrong_token_rejected(self, page):
-        """none+CF: 错误 token 被拒绝。"""
-        pc = SecureChannel(algorithm="none", mode="cloudflare")
-        channel = pc.new_session()
-        html = _prepare_html(pc, ["none"], force_none_algo=True)
-        page.set_content(html)
-
-        auth_msg = _wait_auth(page)
-        assert auth_msg["algo"] == "none"
-        assert auth_msg["data"] == "fake_token"
-
-        assert channel.receive_auth(auth_msg) is False
-        assert channel.is_rejected
-        assert "token mismatch" in channel.reject_reason
-
-        # 明文模式同样：认证前失败直接 close 4001，客户端据此提示重新扫码
-        page.evaluate("() => window.__mockWS.triggerClose(4001)")
-
-        page.wait_for_function("() => window.__wsClient.authRejected === true", timeout=2000)
-        assert page.evaluate("() => window.__wsClient.isConnected") is False
-        assert page.locator("#status-bar").is_visible()
-        assert page.locator("#input-box").is_disabled()
 
 
 # ---------- 认证失败：用户提示与重连策略 ----------
 
 class TestAuthFailureUX:
-    """认证失败后：明确提示用户、停止无意义重连；密钥缺失时不发起连接。"""
+    """认证失败后：明确提示用户、停止无意义重连。"""
 
     def test_close_4001_shows_warning_and_stops_reconnect(self, page):
-        """模拟旧二维码：服务端在密钥建立前就 close 4001 → 提示重新扫码且不再重连。"""
-        pc = SecureChannel(algorithm="auto")
+        """过期二维码（PC 密钥已变更）：服务端在密钥建立前 close 4001 → 提示重新扫码。"""
+        pc = SecureChannel(auth_method="url_fragment")
         html = _prepare_html(pc, ["xsalsa20"])
         page.set_content(html)
         _wait_auth(page)
@@ -741,13 +754,15 @@ class TestAuthFailureUX:
 
         这是「认证后失败」那条路径——密钥已在手，所以拒绝是加密帧而非 close 码。
         """
-        pc = SecureChannel(algorithm="auto")
+        pc = SecureChannel(auth_method="url_fragment")
         channel = pc.new_session()
         html = _prepare_html(pc, ["xsalsa20"])
         page.set_content(html)
 
         auth_msg = _wait_auth(page)
-        assert channel.receive_auth(auth_msg) is True
+        algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
+        assert pin is None and session_key is not None
+        channel.create_provider(algo, session_key)
 
         page.evaluate(
             "(msg) => window.__mockWS.triggerMessage(msg)",
@@ -758,21 +773,10 @@ class TestAuthFailureUX:
         assert page.locator("#input-box").is_disabled()
         assert page.evaluate("() => window.__wsClient.reconnectTimer") is None
 
-    def test_missing_key_does_not_connect(self, page):
-        """加密算法但 URL 无密钥（如浏览器丢失 hash）：直接提示，不建立连接。"""
-        pc = SecureChannel(algorithm="auto")
-        html = _prepare_html(pc, ["xsalsa20"])
-        # 去掉注入的公钥，模拟 hash 丢失
-        html = html.replace(f"this._pcPublicKeyB64 = '{pc.get_public_key_b64()}';", "")
-
-        page.set_content(html)
-        page.wait_for_function("() => window.__wsClient && window.__wsClient.secure._ready", timeout=5000)
-
-        # 未创建 WebSocket，状态栏提示重新扫码
-        assert page.evaluate("() => window.__mockWS.current") is None
-        text = page.locator("#status-bar").inner_text()
-        assert "重新扫码" in text
-        assert page.locator("#input-box").is_disabled()
+    # test_missing_key_does_not_connect 已移除：它断言「URL 无 k= → 不建连接、提示
+    # 重新扫码」，前提是 url_fragment 为唯一合法路径。新架构下无 k= 即 TOFU 模式
+    # （docs/e2ee-always-on-design.md §4），必须建连并等待审批，故重写为
+    # TestTofuFirst.test_plaintext_auth_carries_pin_not_sealed。
 
     def test_reconnect_fixed_interval(self, secure_pair):
         """断连重连保持固定间隔：保证后台切回前台时快速重连。"""

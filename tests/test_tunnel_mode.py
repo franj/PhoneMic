@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm, effective_auth_method
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
 
 
 class TestTunnelMode:
@@ -53,29 +53,6 @@ class TestSetMode:
             mock_sm_cls.instance.return_value = mock_sm
             set_mode(TunnelMode.CLOUDFLARE)
             mock_sm.set.assert_called_once_with("tunnel_mode", "cloudflare")
-
-
-class TestEffectiveAlgorithm:
-    """effective_algorithm 返回 "none"/"auto"，CF 模式强制加密。"""
-
-    def test_lan_none_stays_none(self):
-        assert effective_algorithm("none", TunnelMode.LAN) == "none"
-
-    def test_lan_auto_stays_auto(self):
-        assert effective_algorithm("auto", TunnelMode.LAN) == "auto"
-
-    def test_cf_none_forced_to_auto(self):
-        """CF 模式下配置 none 强制加密。"""
-        assert effective_algorithm("none", TunnelMode.CLOUDFLARE) == "auto"
-
-    def test_cf_auto_stays_auto(self):
-        assert effective_algorithm("auto", TunnelMode.CLOUDFLARE) == "auto"
-
-    def test_legacy_values_normalized_to_auto(self):
-        """历史配置值 xsalsa20/xchacha20 统一归一化为 auto。"""
-        assert effective_algorithm("xsalsa20", TunnelMode.LAN) == "auto"
-        assert effective_algorithm("xchacha20", TunnelMode.LAN) == "auto"
-        assert effective_algorithm("xsalsa20", TunnelMode.CLOUDFLARE) == "auto"
 
 
 class TestEffectiveAuthMethod:

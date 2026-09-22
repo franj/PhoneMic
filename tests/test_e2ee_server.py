@@ -451,3 +451,29 @@ class TestTofuHandshake:
             phone.handshake(ws)
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "connect"
+
+    def test_tofu_approval_slower_than_auth_timeout_still_succeeds(
+            self, tofu_server, monkeypatch):
+        """审批耗时超过 AUTH_TIMEOUT，握手仍须完成。
+
+        回归：deadline 曾在握手开始时一次算好并给两次等待共享，TOFU 审批动辄
+        数十秒、早就把它耗光，于是「用户点了允许、auth_proof 却立刻超时」。
+        现在 auth 与 auth_proof 各有一份预算，审批不占用任何一方。
+        """
+        import phonemic.server.api as api_mod
+        monkeypatch.setattr(api_mod, "AUTH_TIMEOUT", 1.0)
+
+        host, port, queue, sc = tofu_server
+        phone = PhoneSimulator()
+
+        with ws_connect(ws_url(host, port, sc)) as ws:
+            ws.send(frame_encode(phone.make_tofu_first_auth()))
+            msg_type, text = queue.get(timeout=5)
+            assert msg_type == "approval_request"
+
+            time.sleep(1.5)          # 躺过原 deadline（1s）
+            resolve_approval(True)
+
+            ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
+            msg_type, text = queue.get(timeout=2)
+            assert msg_type == "connect"

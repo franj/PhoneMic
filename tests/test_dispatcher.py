@@ -1,12 +1,12 @@
-"""
+﻿"""
 dispatcher 统一入口路由测试。
 
-验证加密/明文模式的路径校验：
-- 加密模式：根路由 404，仅 /{secret} 前缀放行（含尾斜杠归一化），防扫描
-- 明文模式：仅白名单根路径放行，未知路径 404
+验证两种入口路径形态的校验：
+- URL fragment 认证模式：根路由 404，仅 /{secret} 前缀放行（含尾斜杠归一化），防扫描
+- 裸 URL（TOFU 模式，secret_path 为空）：仅白名单根路径放行，未知路径 404
 - POST 等非 GET 方法一律 405（唯一写入口是手机端日志回传 /api/client-log），
   且 405 之前必须把请求体读掉（见 test_post_405_drains_body_before_reply）
-- 运行中替换 SecureChannel（算法切换）→ 新 secret 即时生效，无需重启
+- 运行中替换 SecureChannel（认证方式切换）→ 新 secret 即时生效，无需重启
 """
 
 import json
@@ -25,7 +25,7 @@ from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import decode as frame_decode, encode as frame_encode
 from phonemic.tunnel.keepalive import TunnelKeepalive
 
-from conftest import get_test_port
+from conftest import get_test_port, PhoneSimulator
 
 
 def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
@@ -71,11 +71,11 @@ def _post(host, port, path):
 
 @pytest.fixture
 def enc_server():
-    """加密模式服务器（带随机 secret_path，根路由 404）。"""
+    """URL fragment 认证服务器（带随机 secret_path，根路由 404）。"""
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
     host, port = "127.0.0.1", get_test_port()
-    sc = SecureChannel(algorithm="auto")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
     start_server(host, port, bridge)
     assert wait_for_server_ready(host, port, sc.secret_path)
@@ -86,12 +86,17 @@ def enc_server():
 
 
 @pytest.fixture
-def plain_server():
-    """明文模式服务器（secret 为空，根路由可用）。"""
+def bare_server():
+    """裸 URL 服务器（TOFU 模式：不生成 secret_path，根路由可用）。
+
+    之所以用 TOFU 而不是「明文模式」：加密永远开启，已无明文档
+    （e2ee-always-on-design.md）。TOFU 的入口门禁是审批机制，故 secret_path 为空
+    ——HTTP 路径校验的行为与旧的明文模式完全一致。
+    """
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
     host, port = "127.0.0.1", get_test_port()
-    sc = SecureChannel(algorithm="none", mode="lan")
+    sc = SecureChannel(auth_method="tofu", mode="lan")
     set_secure_channel(sc)
     start_server(host, port, bridge)
     assert wait_for_server_ready(host, port)
@@ -219,9 +224,9 @@ class TestSecurityHeaders:
     因此这条头必须覆盖到每一个响应，包括路由层直接给出的 404。
     """
 
-    def test_plain_responses_carry_referrer_policy(self, plain_server):
+    def test_plain_responses_carry_referrer_policy(self, bare_server):
         """200 与 404 都要带 —— 404 最容易漏（不经过分发函数）。"""
-        host, port, sc, _ = plain_server
+        host, port, sc, _ = bare_server
         for path in ("/", "/some/random/path"):
             status, headers = _get(host, port, path)
             assert headers.get("referrer-policy") == "no-referrer", f"{path} 缺 Referrer-Policy"
@@ -234,29 +239,29 @@ class TestSecurityHeaders:
         assert headers.get("referrer-policy") == "no-referrer"
 
 
-class TestPlainPathGuard:
-    """明文模式：根路由可用，未知路径 404。"""
+class TestBareUrlPathGuard:
+    """裸 URL（TOFU）：根路由可用，未知路径 404。"""
 
-    def test_root_200(self, plain_server):
-        host, port, sc, _ = plain_server
+    def test_root_200(self, bare_server):
+        host, port, sc, _ = bare_server
         status, headers = _get(host, port, "/")
         assert status == 200
         assert "text/html" in headers.get("content-type", "")
 
-    def test_known_resources_200(self, plain_server):
-        host, port, sc, _ = plain_server
+    def test_known_resources_200(self, bare_server):
+        host, port, sc, _ = bare_server
         for path in ("/sodium.js", "/msgpack.min.js", "/crypto_providers.js", "/favicon.ico"):
             status, _ = _get(host, port, path)
             assert status == 200, f"{path} 应返回 200"
 
-    def test_unknown_path_404(self, plain_server):
-        host, port, sc, _ = plain_server
+    def test_unknown_path_404(self, bare_server):
+        host, port, sc, _ = bare_server
         status, _ = _get(host, port, "/some/random/path")
         assert status == 404
 
-    def test_keepalive_200_uncached(self, plain_server):
+    def test_keepalive_200_uncached(self, bare_server):
         """明文模式下保活端点走白名单放行；禁缓存且回显 nonce。"""
-        host, port, sc, _ = plain_server
+        host, port, sc, _ = bare_server
         status, headers, body = _get_full(host, port, "/api/keepalive?t=1726300000000")
         assert status == 200
         assert json.loads(body) == {"status": "ok", "t": "1726300000000"}
@@ -266,20 +271,20 @@ class TestPlainPathGuard:
         "nonce",
         ["", "abc", "%3Cscript%3E", "123456789012345678901", "-1", "1.5"],
     )
-    def test_keepalive_rejects_bad_nonce(self, plain_server, nonce):
+    def test_keepalive_rejects_bad_nonce(self, bare_server, nonce):
         """t 是反射型数据，非「纯数字且 ≤20 位」一律不回显（返回 null）。"""
-        host, port, sc, _ = plain_server
+        host, port, sc, _ = bare_server
         status, _, body = _get_full(host, port, f"/api/keepalive?t={nonce}")
         assert status == 200
         assert json.loads(body) == {"status": "ok", "t": None}
 
-    def test_keepalive_roundtrip_against_real_server(self, plain_server):
+    def test_keepalive_roundtrip_against_real_server(self, bare_server):
         """真实服务端 + 真实保活器：nonce 必须对得上。
 
         这是客户端与服务端之间的隐式约定（服务端回显 t，客户端比对 t），一旦
         任一侧改动而另一侧没跟上，保活会静默失效——只有真跑一遍才拦得住。
         """
-        host, port, sc, _ = plain_server
+        host, port, sc, _ = bare_server
         states = []
         ka = TunnelKeepalive(
             on_state_change=states.append, interval=0.05, timeout=2.0, fail_threshold=1
@@ -291,12 +296,19 @@ class TestPlainPathGuard:
         finally:
             ka.stop()
 
-    def test_ws_root_handshake_ok(self, plain_server):
-        host, port, sc, bridge = plain_server
-        # none+LAN 无需 auth：连接即注册，触发 connect 事件
+    def test_ws_root_handshake_ok(self, bare_server):
+        """裸 URL 下 /ws 可路由到应用（101 升级成功），认证门禁照常生效。
+
+        加密永远开启后不再有「连接即注册」：能连上只说明路由放行，
+        connect 事件必须等握手完成（TOFU 还需审批，见 test_e2ee_server.py）。
+        这里用「非 auth 首帧被关闭」证明这条 /ws 确实到了应用层而非 404。
+        """
+        host, port, sc, bridge = bare_server
         with ws_connect(f"ws://{host}:{port}/ws") as ws:
-            msg_type, _ = bridge.queue.get(timeout=2)
-            assert msg_type == "connect"
+            ws.send(frame_encode({"type": "data", "data": b"anything"}))
+            with pytest.raises(Exception):
+                ws.recv(timeout=3)
+        assert bridge.queue.empty(), "握手未完成不得注册连接"
 
 
 def test_dynamic_secret_switch_without_restart():
@@ -305,14 +317,14 @@ def test_dynamic_secret_switch_without_restart():
     set_bridge(bridge)
     host, port = "127.0.0.1", get_test_port()
 
-    sc1 = SecureChannel(algorithm="auto")
+    sc1 = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc1)
     start_server(host, port, bridge)
     assert wait_for_server_ready(host, port, sc1.secret_path)
     assert _get(host, port, f"/{sc1.secret_path}/")[0] == 200
 
     # 运行中替换（模拟算法/模式切换），服务器不重启
-    sc2 = SecureChannel(algorithm="auto")
+    sc2 = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc2)
     time.sleep(0.3)
 
@@ -328,19 +340,19 @@ def test_dynamic_secret_switch_without_restart():
 def test_get_secret_path_tracks_latest_channel():
     """get_secret_path 应始终返回最新 SecureChannel 的 secret_path，而非过期引用。"""
     try:
-        sc1 = SecureChannel(algorithm="auto")
+        sc1 = SecureChannel(auth_method="url_fragment")
         set_secure_channel(sc1)
         assert get_secret_path() == sc1.secret_path
 
         # 模拟算法/模式切换重建 SecureChannel
-        sc2 = SecureChannel(algorithm="auto")
+        sc2 = SecureChannel(auth_method="url_fragment")
         set_secure_channel(sc2)
         assert get_secret_path() == sc2.secret_path
         assert get_secret_path() != sc1.secret_path
 
-        # 明文模式（无 secret）与未设置场景
-        plain = SecureChannel(algorithm="none")
-        set_secure_channel(plain)
+        # 裸 URL（TOFU，无 secret_path）与未设置场景
+        bare = SecureChannel(auth_method="tofu")
+        set_secure_channel(bare)
         assert get_secret_path() == ""
 
         set_secure_channel(None)
@@ -351,7 +363,15 @@ def test_get_secret_path_tracks_latest_channel():
 
 # ---------- WS 消息类型分派（wire-protocol.md §6 / §7 / §10） ----------
 class TestMessageDispatch:
-    """明文模式下消息帧的类型分派：key / mouse 转发，未知 type 回 error。"""
+    """已认证会话下的消息帧分派：key / mouse 转发，未知 type 回 error。
+
+    加密永远开启，因此每条连接都要先握手；这里用 url_fragment 认证（手机端已有
+    PC 公钥，握手无需人工审批），帧一律走密文。
+    """
+
+    @staticmethod
+    def _ws_url(host, port, sc):
+        return f"ws://{host}:{port}/{sc.secret_path}/ws"
 
     @staticmethod
     def _drain_connect(queue):
@@ -360,53 +380,61 @@ class TestMessageDispatch:
         assert msg_type == "connect"
 
     @staticmethod
-    def _recv_type(ws, want_type, timeout=2.0):
+    def _recv_type(ws, phone, want_type, timeout=2.0):
         """跳过 config 等自动下发帧，取到指定 type 的帧。"""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            inner = frame_decode(ws.recv(timeout=max(0.1, deadline - time.time())))
+            inner = phone.decrypt(ws.recv(timeout=max(0.1, deadline - time.time())))
             if inner.get("type") == want_type:
                 return inner
         raise AssertionError(f"未收到 {want_type} 帧")
 
-    def test_key_frame_forwarded(self, plain_server):
+    def test_key_frame_forwarded(self, enc_server):
         """key 帧的 keys 原样转发给事件桥，由 PC 端 send_keys 执行。"""
-        host, port, sc, bridge = plain_server
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        host, port, sc, bridge = enc_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+        with ws_connect(self._ws_url(host, port, sc)) as ws:
+            phone.handshake(ws)
             self._drain_connect(bridge.queue)
-            ws.send(frame_encode({"type": "key", "keys": "ctrl+z"}))
+            ws.send(phone.encrypt({"type": "key", "keys": "ctrl+z"}))
             event_type, payload = bridge.queue.get(timeout=2)
             assert event_type == "key"
             assert payload == "ctrl+z"
 
-    def test_mouse_click_frame_forwarded(self, plain_server):
+    def test_mouse_click_frame_forwarded(self, enc_server):
         """mouse 帧整帧转发，PC 端按 a 决定动作。"""
-        host, port, sc, bridge = plain_server
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        host, port, sc, bridge = enc_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+        with ws_connect(self._ws_url(host, port, sc)) as ws:
+            phone.handshake(ws)
             self._drain_connect(bridge.queue)
-            ws.send(frame_encode({"type": "mouse", "a": "click", "btn": "right"}))
+            ws.send(phone.encrypt({"type": "mouse", "a": "click", "btn": "right"}))
             event_type, payload = bridge.queue.get(timeout=2)
             assert event_type == "mouse"
             assert payload == {"type": "mouse", "a": "click", "btn": "right"}
 
-    def test_mouse_move_dx_dy_preserved(self, plain_server):
+    def test_mouse_move_dx_dy_preserved(self, enc_server):
         """move 帧的 dx/dy 是整数像素，负值必须原样保留（方向语义）。"""
-        host, port, sc, bridge = plain_server
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        host, port, sc, bridge = enc_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+        with ws_connect(self._ws_url(host, port, sc)) as ws:
+            phone.handshake(ws)
             self._drain_connect(bridge.queue)
-            ws.send(frame_encode({"type": "mouse", "a": "move", "dx": 12, "dy": -3}))
+            ws.send(phone.encrypt({"type": "mouse", "a": "move", "dx": 12, "dy": -3}))
             event_type, payload = bridge.queue.get(timeout=2)
             assert event_type == "mouse"
             assert payload["dx"] == 12
             assert payload["dy"] == -3
 
-    def test_unknown_type_replies_error(self, plain_server):
+    def test_unknown_type_replies_error(self, enc_server):
         """wire-protocol.md §10：type 不在分派表内 → 丢弃并回 error(malformed)。"""
-        host, port, sc, bridge = plain_server
-        with ws_connect(f"ws://{host}:{port}/ws") as ws:
+        host, port, sc, bridge = enc_server
+        phone = PhoneSimulator(sc.get_public_key_b64())
+        with ws_connect(self._ws_url(host, port, sc)) as ws:
+            phone.handshake(ws)
             self._drain_connect(bridge.queue)
-            ws.send(frame_encode({"type": "no_such_type"}))
-            inner = self._recv_type(ws, "error")
+            ws.send(phone.encrypt({"type": "no_such_type"}))
+            inner = self._recv_type(ws, phone, "error")
             assert inner["code"] == "malformed"
             assert "no_such_type" in inner["msg"]
             # 未知帧不产生任何事件

@@ -352,10 +352,10 @@ def _close_reason(reason: str, limit: int = 100) -> str:
 
 
 async def _recv_handshake_frame(websocket, deadline: float):
-    """在握手的绝对截止时刻前读取一条 binary 帧。
+    """在给定截止时刻前读取一条 binary 帧。
 
-    两次握手等待（auth / auth_proof）共用同一个 deadline，因此慢速或恶意的
-    客户端无法靠「每一步都拖到超时」把握手时长翻倍。
+    deadline 按「单次等待」计算：auth 与 auth_proof 各有一份（见 _handle_auth），
+    TOFU 首次连接的审批等待夹在两者之间、不占用任何一方的时间预算。
 
     Returns:
         ``(raw_bytes, None)`` 成功；``(None, reason)`` 失败（reason 供日志）。
@@ -443,6 +443,10 @@ async def _handle_auth(websocket, session) -> bool:
             return False
         # 审批通过：现在才做 ECDH + 创建 Provider
         session.complete_tofu_auth(algo, phone_pk)
+        # 审批等待动辄数十秒，握手 deadline 早已过期——auth_proof 必须拿到
+        # 一份全新的预算，否则「用户点了接受、握手却立刻超时」。
+        # AUTH_TIMEOUT 的语义是「单次等待的上限」，不是「整轮握手的墙钟预算」。
+        deadline = time.monotonic() + AUTH_TIMEOUT
     else:
         # URL fragment / TOFU 重连：session_key 已就绪
         session.create_provider(algo, session_key)

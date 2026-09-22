@@ -52,7 +52,7 @@ class CryptoProvider(ABC):
 | --------------------------- | ---------------------------------------------- |
 | 上层换编码（msgpack → CBOR 等）     | 加密层**零改动**                                     |
 | 加密层新增算法（AES-GCM、AEGIS-256…） | 编码层与 type 表**零改动**                               |
-| 明文 ↔ 加密切换（LAN `none` ↔ 加密）  | 编码层零改动，由 `SecureSession.is_encrypted` 决定走不走加密层 |
+| 认证方式切换（`url_fragment` ↔ `tofu`） | 编码层零改动，只影响握手前两步的帧形态；Provider 与数据帧完全一致（§3.5） |
 
 这套正交性正是 §3 把 `KeyExchange` 从 `Provider` 拆出来、§5 把 `seq` 内化进 `Provider` 的统一动机：**每一层只认字节与密钥，不认彼此的内部格式。**
 
@@ -62,11 +62,24 @@ class CryptoProvider(ABC):
 
 ### 场景
 
-| 模式              | 加密   | 原因                                                                                                                            |
-| --------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `none` + LAN    | 可选关闭 | 局域网内，用户自担风险                                                                                                                   |
-| 加密 + LAN        | 强制   | —                                                                                                                             |
-| 任何 + Cloudflare | 强制   | 流量出公网，TLS 在 CF 边缘终结，隧道段裸奔；`mode.py` 的 `effective_algorithm` 在 Cloudflare 下把 `none` 归一为 `auto`。**不存在明文 CF**（`none`+CF 历史模式已删除） |
+加密与认证已解耦（设计依据见 `e2ee-always-on-design.md`）：**加密永远开启**，认证方式可选。
+
+| 模式 | 加密 | 认证 | 原因 |
+| --------------- | ---- | -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| LAN + TOFU | 强制 | 手动审批（首次）/ PC 公钥 token（重连） | 局域网被动嗅探门槛低，明文是最大短板 ⇒ 加密不可关；首次连接无信任锚，用识别码核对 + 人工审批补门禁 |
+| LAN + URL fragment | 强制 | QR fragment 中的 PC 公钥（bearer token） | — |
+| Cloudflare（任意配置） | 强制 | URL fragment（强制） | 流量出公网，TLS 在 CF 边缘终结，隧道段裸奔；`mode.py` 的 `effective_auth_method` 在 Cloudflare 下强制 `url_fragment`。**不存在明文 CF**，也不提供 TOFU+CF（公网可达 ⇒ 攻击者可抢先骗取审批） |
+
+`none` 算法与 `PlainProvider` 已完全移除——所有通信都经过 AEAD，不存在"不加密"这一档。
+
+### 两条认证路径
+
+| 路径 | 信任锚 | 首次需审批 | 握手帧 |
+|---|---|---|---|
+| URL fragment（QR） | QR fragment 中的 PC 公钥（带外分发） | 否 | `auth`(SealedBox) → `auth_challenge`(Provider) → `auth_proof` |
+| TOFU | 首次无 ⇒ 人工审批 + 识别码核对；审批后 PC 公钥存 localStorage | 是（仅首次） | `auth`(明文 `algo`/`pk`/`pin`) → `auth_challenge`(**SealedBox**) → `auth_proof`(Provider) |
+
+TOFU 重连与 URL fragment 完全同构（手机已持有 PC 公钥，走 SealedBox），差异只在首次连接。
 
 ### bearer 认证：能密封即认证
 
@@ -132,9 +145,28 @@ class KeyExchange:
         shared = crypto_scalarmult(bytes(self._pc_private), bytes(phone_public))  # ③ ECDH
         session_key = blake2b(shared, digest_size=32).digest()     # ④ 统一 KDF，32B
         return algo, session_key
+
+    def handle_tofu_auth(self, algo: str, phone_public_bytes: bytes) -> tuple[str, bytes]:
+        """TOFU 首次：参数是明文字段（非密封 blob），做同样的 ECDH + KDF。
+
+        与 handle_auth 共用 ③④ 两步，区别只在参数来源：这里不经过 SealedBox
+        ——首次连接手机还没有 PC 公钥，无从密封（见 3.5）。
+        """
+        if algo not in self._allowed:
+            raise ValueError(f"algorithm {algo!r} not allowed")
+        shared = crypto_scalarmult(bytes(self._pc_private), phone_public_bytes)
+        session_key = blake2b(shared, digest_size=32).digest()
+        return algo, session_key
+
+    @property
+    def public_key_bytes(self) -> bytes:
+        """PC 公钥原始字节。TOFU 首次审批通过后据此密封回传（见 3.5）。"""
+        return bytes(self._pc_private.public_key)
 ```
 
 链条：**非对称只用于交换一次临时公钥，之后全程对称。**
+
+为什么不把两个 `handle_*` 合并：`handle_auth` 的输入是一个不透明 blob（消息层不解释内容），`handle_tofu_auth` 的输入是 `algo`(str) + `pk`(bytes) 两个已拆开的明文字段。签名不同，强行合并会让消息层的分支判断渗进密钥交换层。
 
 ### 3.3 auth 内层结构（加密层自带的最小编码）
 
@@ -162,6 +194,23 @@ self._provider = create_provider(algo, session_key)                    # 才知�
 
 **收益**：新增算法只需写一个几十行的 `CryptoProvider` 子类并在 `create_provider` 注册，`KeyExchange` 一行不用改；X25519 交换代码从两份收敛为一处。老的 `algo == "none"`（token）分支随明文 CF 模式一并删除。
 
+### 3.5 TOFU 首次：明文 auth 是唯一例外
+
+TOFU 首次连接时手机没有 PC 公钥，**无法**密封 `auth`——这是"信任锚尚未建立"的直接后果，不是可以绕过的实现细节。因此该帧走明文（`{"type":"auth","algo":...,"pk":<bin>,"pin":...}`），密钥材料只有公钥，保密性无损失：
+
+- `pk` 是手机临时公钥，本身即公开值；被动窃听者拿到它也算不出 `shared`（Curve25519 DLP）。
+- `algo` 明文暴露服务端算法列表——仅在"无信任锚"的首次连接上发生，且服务端的算法列表不是秘密（可枚举）。
+- `pin` 是给**用户**核对的识别码（见 `e2ee-always-on-design.md` §5.5），不是密码学凭据。
+
+关键设计：**审批在 ECDH 之前、`auth_challenge` 必须等审批通过才发**。`auth_challenge` 里含 PC 公钥（= token），只有审批通过才允许暴露给对端——否则未授权的连接方可以借此拿到 token，绕过审批直接走认证路径重连。所以：
+
+```
+receive_auth(明文) → 只解析字段，不做 ECDH，不建 Provider   # 被拒绝的连接零计算开销
+审批通过 → complete_tofu_auth()：handle_tofu_auth() → create_provider()
+```
+
+`SecureSession` 因此有三个协作点：`receive_auth()` 返回 `(algo, session_key_or_none, pin_or_none, phone_pk_or_none)`；`complete_tofu_auth()` 在审批通过后补上 ECDH + Provider；`make_auth_challenge()` 在 TOFU 首次下改发 `SealedBox(phone_public)` 包裹的 `{pc_public, nonce}`（手机此刻还没有 Provider，无法用对称加密收挑战）。
+
 ---
 
 ## 4. 对称封装：CryptoProvider
@@ -169,7 +218,7 @@ self._provider = create_provider(algo, session_key)                    # 才知�
 `CryptoProvider` 是**纯对称 AEAD 封装**：构造时直接拿 `session_key`，不碰 `pc_private`、不做 `SealedBox` / ECDH / KDF（那些归 §3 的 `KeyExchange`）。
 
 
-### 4.1 三个算法
+### 4.1 两个算法（+ 一个预留）
 
 ```python
 # XChaCha20：nacl.secret.Aead，支持 aad → seq 进 aad（§5.1 AAD 路径）
@@ -241,8 +290,7 @@ class AESGCMProvider(CryptoProvider):
 - **单调策略**：`seq` 必须等于当前 `_rx_seq`（初始 0，每成功收一帧 +1），即首帧 seq=0、每帧严格 +1。`encrypt` 自动打当前 `_tx_seq` 并 +1；`decrypt` 校验失败即抛异常，不返回任何明文。
 - **外部只收状态，不收 seq**：`decrypt` 成功返回明文；失败抛 `DecryptError` / `ReplayError`（§1.1），供 `SecureSession` 映射成 error code（异常类型即状态）。**注意**：AAD 路径下重放也表现为 MAC 失败（aad 不符），一并归 `DecryptError`；前缀路径能区分，重放单独归 `ReplayError`。两者对客户端行为一致（丢弃该帧），区分只在日志粒度；安全上"重放当解密失败处理"更稳妥——不向攻击者区分是重放还是篡改。
 - **`SecureSession` 不碰 seq**：只调用 `provider.decrypt()`，按异常类型归类 error code（见 §8）。
-- **重置**：seq 状态随 Provider 实例生命周期。每个连接握手时新建 Provider，`seq` 天然从 0 开始，通常无需显式 reset。若同一实例复用（rekey 沿用 Provider），`reset()` 把 `_tx_seq` / `_rx_seq` 归零，等价于重新初始化。
-- **明文模式（`none` + LAN）不带 `seq`**：没有密钥就没有 MAC，seq 既无完整性也无机密性，无意义，故省略。
+- **重置**：seq 状态随 Provider 实例生命周期。每个连接握手时新建 Provider，`seq` 天然从 0 开始，通常无需显式 reset。若同一实例复用（rekey 沿用 Provider），`reset()` 把 `_tx_seq` / `_rx_seq` 归零，等价于重新初始化。**TOFU 首次连接是唯一需要显式 `reset()` 的场景**：Provider 在 `init()` 时就建好（此时还没有密钥），审批通过后拿到 PC 公钥才派生会话密钥，两端计数器必须在这一刻对齐归零。
 - **上下行各自独立计数器**：服务端校验上行、手机端校验下行，规则相同（严格 +1）。CF 隧道在边缘终结 TLS，下行重放需靠手机端 `seq` 校验挡掉。
 - **边际价值，以及它的边界**：同连接内 WS 可靠有序，`seq` 主要防御 (a) 连接内的帧重放 / 乱序，(b) CF 边缘节点这类"TLS 在别处终结"的中间节点重放。**跨连接的重放不是它的职责**——`seq` 每个连接都从 0 重来（见上），所以从会话开头录下的整段密文，在新连接上按序重放是**解得开**的；挡住它的是握手的新鲜值 `nonce`（`wire-protocol.md` §5 / §7）。成本仅 8 字节/帧 + 约 5 行，保留。
 
@@ -266,13 +314,16 @@ class AESGCMProvider(CryptoProvider):
 
 ## 7. 会话状态与安全原则
 
-- **会话状态是权威**：`SecureSession.is_encrypted` 在握手时按连接确定，之后不变。接收端永远知道该解还是不该解，不需要"试一试"。
-- **原则：绝不"解密失败就当明文"。** 解密失败的可能原因（对端模式不同、版本不同、中间人篡改）处理动作完全一致——丢弃 + 回 `error`。区分它们没有价值。
-- **唯一明文帧是 `auth`**：会话密钥在服务端解出 `auth` 之后才建立，因此只有这一帧没有密钥可用；握手**成功**时从 `auth_challenge` 起（含）全部整帧对称加密（含 `type`），握手在**认证前**失败时服务端不回消息层帧、直接关闭 WS（close 4001）——因此不存在"解密失败就当明文"的例外。实现上绝不能把 `auth` 帧塞进 `wrap()`。
+- **会话状态是权威**：`SecureSession.is_encrypted` **恒为 `True`**（加密与认证解耦后没有"不加密"这一档，见 §2）。接收端永远知道该解还是不该解，不需要"试一试"。
+- **原则：绝不"解密失败就当明文"。** 解密失败的可能原因（对端版本不同、中间人篡改、重放）处理动作完全一致——丢弃 + 回 `error`。区分它们没有价值。
+- **明文帧只有两种，且都是握手的必然产物**：
+  - `auth`(SealedBox) —— 密钥尚未建立，无密钥可用。
+  - `auth`(TOFU 首次明文) —— 手机还没有 PC 公钥，无从密封（§3.5）。
+  除此之外，握手**成功**时从 `auth_challenge` 起（含）全部整帧对称加密（含 `type`）；握手在**认证前**失败时服务端不回消息层帧、直接关闭 WS（close 4001）。实现上绝不能把 `auth` 帧塞进 `wrap()`。
 - **唯一的加密失败例外是握手第三步**：`auth_proof` 校验不通过（或超时）时密钥已经存在、对端也读得懂加密帧，所以这一路失败用**加密的 `error(code:"auth")`** 表达而非 close（`wire-protocol.md` §7）。这不破坏上一条——那条约束的是"无密钥可用的时刻"。
-- **`auth_challenge` 只带一个 `nonce`**：它不重复"我已经承认你的材料"这件事——手机能把它解开，本身就是"PC 持有正确会话密钥"的证明；`nonce` 的唯一职责是**给本次连接一个新鲜值**，使录下的整段旧握手（`auth` + `auth_challenge` + `auth_proof`）无法按序重放。它既不是 `algo` 的回显（`algo` 早在 `auth.data` 里协商完），也不是"你通过了"的最终回执（那是随后 `config` 的事）。
-  - 威胁前提要说清楚：这套重放防护对**"能看见隧道明文帧、但拿不到二维码"**的对手才有意义（CF 内部路径、或 TLS 在别处被终结）。对**持有二维码**的一方，重放本来就是多余手段——它直接自己完成一次握手即可（见 §2）。
-- **判别不靠帧类型，靠会话状态机**：连接建立后按 `needs_auth` 决定期待 `auth` 还是**直接进入数据帧**，之后按 `is_encrypted` 决定解不解密。（状态机表与 text 帧拒绝策略见 `wire-protocol.md` §10。）
+- **`auth_challenge` 只带一个 `nonce`**（TOFU 首次例外：它额外携带 PC 公钥，见 §3.5）：它不重复"我已经承认你的材料"这件事——手机能把它解开，本身就是"PC 持有正确会话密钥"的证明；`nonce` 的唯一职责是**给本次连接一个新鲜值**，使录下的整段旧握手（`auth` + `auth_challenge` + `auth_proof`）无法按序重放。它既不是 `algo` 的回显（`algo` 早在 `auth` 里协商完），也不是"你通过了"的最终回执（那是随后 `config` 的事）。
+  - 威胁前提要说清楚：这套重放防护对**"能看见隧道明文帧、但拿不到二维码"**的对手才有意义（CF 内部路径、或 TLS 在别处被终结）。对**持有二维码 / 持有 PC 公钥**的一方，重放本来就是多余手段——它直接自己完成一次握手即可（见 §2）。
+- **判别不靠帧类型，靠会话状态机**：`needs_auth` 恒为 `True`，消息层永远先期待 `auth`（不存在"连上即进数据帧"的路径）；`is_encrypted` 恒为 `True`，认证后的每一帧都解密。（状态机表与 text 帧拒绝策略见 `wire-protocol.md` §10。）
 - **握手三步不带任何跨连接状态**：`nonce` 由服务端现场生成、只活这一次握手，是 `_handle_auth` 协程里的局部变量（不入 `SecureSession` 字段）。这正是它相对「轮换密钥对 / 盐 / 续期票据」那类方案的关键差别——那些方案要把新鲜度存进长期凭据，而长期凭据唯一的分发通道是二维码（带外、只在页面加载时读一次），于是要么每次重连都重新扫码，要么把真机锁死。
 
 ---
@@ -281,10 +332,13 @@ class AESGCMProvider(CryptoProvider):
 
 消息层与加密层的全部接触面，收敛为四条：
 
-1. **握手判定**：`needs_auth` = not (`none` and LAN)（`e2ee.py` 的 `SecureChannel`）。为真时消息层期待 `auth` 消息帧，把 `data`（bytes）交给 `KeyExchange.handle_auth`；成功后用返回的 `algo` + `session_key` 经 `create_provider` 建 Provider，此后连 `auth_challenge` 在内整帧走 Provider。握手第三步（`auth_proof` 的 `nonce` 校验）属于消息层，见 `wire-protocol.md` §7：认证前失败 → WS close 4001 + reason；`nonce` 不符 / 超时 → 加密 `error(code:"auth")`。
+1. **握手判定**：`needs_auth` **恒为 `True`**（`e2ee.py` 的 `SecureChannel`/`SecureSession`）——所有模式都需要握手，不存在跳过握手的路径。消息层期待 `auth` 消息帧：
+   - 帧含 `data`（bytes）⇒ 交 `KeyExchange.handle_auth` 解封，返回 `(algo, session_key)`，经 `create_provider` 建 Provider，此后连 `auth_challenge` 在内整帧走 Provider。
+   - 帧含明文 `algo`/`pk`/`pin` ⇒ TOFU 首次：`receive_auth` 只解析字段（**不建 Provider**），消息层等待审批；通过后调 `complete_tofu_auth()` 走 `handle_tofu_auth` 补上 ECDH + Provider，再发 `auth_challenge`（SealedBox 加密，见 §3.5）；拒绝 / 超时（30s）→ WS close 4032。
+   握手第三步（`auth_proof` 的 `nonce` 校验）属于消息层，见 `wire-protocol.md` §7：认证前失败 → WS close 4001 + reason；`nonce` 不符 / 超时 → 加密 `error(code:"auth")`。
 2. **数据帧**：消息层把编码后的字节交给 `provider.encrypt()`，密文原样上 WS binary 帧；收到 binary 帧交给 `provider.decrypt()`，把返回的字节交给编码层解析。
 3. **错误映射**：`CryptoError` → `error(code:"decrypt")`；`ReplayError` → `error(code:"replay")`。统一丢弃 + 回 error，连续 N 次断连（code 表见 `wire-protocol.md` §7 的 error 小节）。
-4. **明文模式**：`none` + LAN 时消息层直接编解码，不经加密层，也没有 `auth` / `auth_challenge` / `auth_proof` 帧——**一条握手帧都没有**，连上即进数据帧（`wire-protocol.md` §5）。
+4. **失败路径与关闭码**：认证前失败 → `4001`（`auth` 解不开、`algo` 不在列表）；TOFU 审批被拒 / 超时 → `4032`。**不存在"连上即进数据帧"的路径**，因此也没有"无握手帧"的模式（`wire-protocol.md` §5 / §10）。
 
 ---
 
@@ -292,13 +346,15 @@ class AESGCMProvider(CryptoProvider):
 
 | 文件                                       | 职责                                                   |
 | ---------------------------------------- | ---------------------------------------------------- |
-| `phonemic/tunnel/crypto/key_exchange.py` | `KeyExchange`：算法无关密钥交换（§3）                           |
+| `phonemic/tunnel/crypto/key_exchange.py` | `KeyExchange`：算法无关密钥交换（§3；含 TOFU 首次的 `handle_tofu_auth` / `public_key_bytes`） |
 | `phonemic/tunnel/crypto/errors.py`       | `CryptoError` / `DecryptError` / `ReplayError`       |
 | `phonemic/tunnel/crypto/base.py`         | `CryptoProvider` ABC（§1.1 / §4）                      |
 | `phonemic/tunnel/crypto/xchacha20.py`    | `XChaCha20Provider`（AAD 路径）                          |
 | `phonemic/tunnel/crypto/nacl_box.py`     | `XSalsa20Provider`（前缀路径）                             |
-| `phonemic/tunnel/e2ee.py`                | `SecureChannel` / `SecureSession`：装配、握手判定、needs_auth |
-| `phonemic/resources/crypto_providers.js` | JS 端同构实现（密封 auth、seq 内化）                             |
-| `phonemic/resources/mobile.html`         | `SecureClient`：JS 调用侧                                |
+| `phonemic/tunnel/e2ee.py`                | `SecureChannel` / `SecureSession`：装配、握手分叉、TOFU 审批后建密钥（§3.5）、`needs_auth` / `is_encrypted` 恒真 |
+| `phonemic/resources/crypto_providers.js` | JS 端同构实现（密封 auth、明文 auth、seq 内化、TOFU 挑战解封）             |
+| `phonemic/resources/mobile.html`         | `SecureClient`：JS 调用侧（三种认证模式分叉、识别码、localStorage）      |
+
+`phonemic/tunnel/crypto/plain.py`（`PlainProvider`）已删除——加密永远开启，不再有明文 Provider，`PROVIDER_CLASSES` 中也没有 `"none"` 条目。
 
 依赖：Python `pynacl`（已有）；JS `sodium.js`（已 vendor）。新增算法时：AAD 路径优先选支持 aad 的库（`cryptography` 的 AESGCM）；无 aad 的库走前缀路径。

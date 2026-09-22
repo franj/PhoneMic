@@ -64,6 +64,23 @@ function unsealTofuChallenge(sealedBytes, phonePrivateKey) {
     };
 }
 
+/**
+ * TOFU 首次连接的明文 auth 载荷。
+ *
+ * 首次连接没有 PC 公钥，无法密封，故三项均为明文：
+ * - algo：算法名。无信任锚时保密算法列表无安全意义，且服务端需要它来建 Provider
+ * - pk：手机临时 X25519 公钥（32B）。公钥本身即公开值
+ * - pin：4 位识别码。供用户核对手机与 PC 屏幕，防「他人抢先连接」
+ */
+function plaintextAuthData(providerName, phonePublicKey, pin) {
+    return {
+        type: 'auth',
+        algo: providerName,
+        pk: phonePublicKey,          // Uint8Array，msgpack 编码为 bin
+        pin: pin,                    // 4 位识别码字符串
+    };
+}
+
 class NaClBoxProvider {
     static get algorithmName() { return 'xsalsa20'; }
     constructor() {

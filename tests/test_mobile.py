@@ -3,20 +3,35 @@ mobile.html UI 测试
 使用 Playwright + Mock WebSocket 进行前端测试，无需启动真实服务端。
 依赖: pytest-playwright (需先运行 playwright install chromium)
 
+背景：加密与认证已解耦，加密永远开启，明文模式与 PlainProvider 已删除
+（见 docs/e2ee-always-on-design.md）。SecureClient 恒需三步握手
+（auth → auth_challenge → auth_proof），下行数据帧全部整帧加密。
+
 Mock 策略：
 - 内联加载 sodium.js、msgpack.min.js 和 crypto_providers.js
   （set_content 无法加载外部脚本）
-- 强制选择 PlainProvider（不加密，#a=none 语义），UI 全流程走明文帧
-- Mock WS 自动建立连接，使 WSClient 进入已连接状态
-- triggerMessage 经 secure.encrypt 编码下行帧（本文件的明文模式即 msgpack 字节）
-- sent_messages 返回解码后的上行原始内容
+- 页面按 **url_fragment 模式**加载：head 的 boot 脚本在 SecureClient.init 之前
+  注入 ``location.hash = "#k=<PC公钥>&a=xchacha20"``，故 _authMode === 'url_fragment'，
+  由 QR 里的 PC 公钥立即做 ECDH（无需 TOFU 审批）
+- mock WS 自持一个**独立 Provider**——克隆客户端 secure 的 provider
+  （复制 _phonePrivate/_phonePublicKey/_pcPublicKey/_sharedKey，seq 从 0 起）。
+  绝不能复用客户端实例：客户端 tx=上行、rx=下行，mock 恰好相反，共用计数器会
+  互相踩踏，帧一多就 seq 失步、解密全挂
+- 握手：mock 收到明文 auth 后，用该独立 Provider 加密回
+  ``{type:'auth_challenge', nonce:<16B>}``；客户端回加密 auth_proof，握手完成
+- 上行：mock 先 MessagePack.decode；解出 ``type==='auth'`` 即明文握手帧（其余帧
+  整帧加密、必然解不出），其余帧用独立 Provider 解密后再解出应用层报文
+- 下行：triggerMessage 用同一独立实例加密（seq 独立于客户端）
+- sent_messages 返回解码后的上行应用层报文（含握手帧）
 """
 
+import base64
 import json
 import re
 from pathlib import Path
 
 import pytest
+from nacl.public import PrivateKey
 
 pytest.importorskip("playwright")
 RES_DIR = Path(__file__).parent.parent / "phonemic" / "resources"
@@ -28,6 +43,17 @@ MOBILE_I18N = json.loads(
     (RES_DIR / "locales" / "zh_CN.json").read_text(encoding="utf-8")
 )["mobile"]
 
+
+def _b64url_nopad(raw: bytes) -> str:
+    """URL-safe base64 去 padding——与 sodium.base64_VARIANT_URLSAFE_NO_PADDING 一致。"""
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+# QR fragment 里的 PC 公钥（``#k=``）。mock 只负责「共享同一会话密钥」的加解密，
+# 会话密钥直接克隆自客户端，故不需要 PC 私钥；用真实 X25519 公钥是为保证
+# 客户端的 crypto_scalarmult 接受该点（低阶点会被 libsodium 拒绝）。
+_PC_PUBLIC_KEY_B64 = _b64url_nopad(bytes(PrivateKey.generate().public_key))
+
 MOCK_WS_SCRIPT = """
 window.__mockWS = {
     sentMessages: [],
@@ -38,6 +64,47 @@ window.__mockWS = {
     //（停等生效后没有 ack 就发不出第 2 块；取消生效后没有回执就解锁不了界面）。
     autoAckFn: null,
     received: {},
+    // mock 侧 Provider：与客户端 secure 的 Provider **共享同一会话密钥**，
+    // 但 tx/rx seq 完全独立（客户端 tx=上行、rx=下行，mock 恰好相反）。
+    // 复用客户端实例会让两端计数器互相踩踏 ⇒ 帧一多就 seq 失步、解密全挂。
+    _mockProvider: null,
+
+    // 克隆客户端 Provider：复制全部密钥材料（含 ECDH 派生），seq 从 0 起。
+    // 客户端此刻可能尚未派生 _sharedKey（要到首个加密帧才惰性派生），
+    // 这里就地派生，得到与客户端完全一致的会话密钥。
+    _cloneProvider: function() {
+        var src = window.__wsClient.secure._provider;
+        var clone = new src.constructor();
+        clone._phonePrivate = src._phonePrivate;
+        clone._phonePublicKey = src._phonePublicKey;
+        clone._pcPublicKey = src._pcPublicKey;
+        clone._sharedKey = src._sharedKey;
+        clone._txSeq = 0;
+        clone._rxSeq = 0;
+        if (!clone._sharedKey && clone._pcPublicKey) clone._deriveSharedKey();
+        return clone;
+    },
+    _provider: function() {
+        if (!this._mockProvider) this._mockProvider = this._cloneProvider();
+        return this._mockProvider;
+    },
+
+    // 模拟 PC 侧握手应答：收到明文 auth 后，用独立 Provider 加密回
+    // auth_challenge。异步（setTimeout 0）与真实服务端往返一致；每次握手前
+    // 归零 seq，与客户端 makeAuth() 的 reset 对齐（重连即新会话）。
+    _replyChallenge: function() {
+        var mock = this;
+        var provider = mock._provider();
+        provider.reset();
+        var nonce = sodium.randombytes_buf(16);
+        var challenge = provider.encrypt(
+            MessagePack.encode({ type: 'auth_challenge', nonce: nonce }));
+        setTimeout(function() {
+            if (mock.current && mock.current.onmessage) {
+                mock.current.onmessage({ data: challenge });
+            }
+        }, 0);
+    },
 
     autoAck: function(on) {
         this.autoAckFn = on ? function(msg) {
@@ -67,9 +134,10 @@ window.__mockWS = {
 
     triggerMessage: function(data) {
         if (this.current && this.current.onmessage) {
-            // 与真实服务端一致：经 secure.encrypt 产出线上字节
-            //（明文=msgpack / 加密=整帧密文，无外层信封）
-            this.current.onmessage({ data: window.__wsClient.secure.encrypt(data) });
+            // 与真实服务端一致：经**独立 Provider**加密产出下行线上字节
+            //（整帧密文；seq 由 mock 自己的计数器承载，不碰客户端实例）
+            var raw = this._provider().encrypt(MessagePack.encode(data));
+            this.current.onmessage({ data: raw });
         }
     },
     triggerClose: function() {
@@ -99,14 +167,30 @@ window.WebSocket = function(url) {
 
     this.send = function(data) {
         if (this.readyState !== 1) return false;
+        var mock = window.__mockWS;
         var msg = null;
-        try {
-            msg = MessagePack.decode(data);
-            window.__mockWS.sentMessages.push(msg);
-        } catch(e) { window.__mockWS.sentMessages.push({ raw: 'undecodable' }); }
-        if (msg && window.__mockWS.autoAckFn &&
+        // 握手首帧 auth 是**明文** msgpack（只有 data 字段被 SealedBox 密封，
+        // 算法名藏在密文内），能直接解出来；其余帧整帧加密，MessagePack.decode
+        // 必然失败。故先试探解码，type==='auth' 即判定为明文握手帧。
+        var plain = null;
+        try { plain = MessagePack.decode(data); } catch (e) { plain = null; }
+        if (plain && plain.type === 'auth') {
+            msg = plain;
+            mock.sentMessages.push(msg);
+            mock._replyChallenge();       // 加密回 auth_challenge
+        } else {
+            // 加密帧：用独立 Provider 解密，再解出应用层报文
+            try {
+                msg = MessagePack.decode(mock._provider().decrypt(data));
+                mock.sentMessages.push(msg);
+            } catch (e) {
+                mock.sentMessages.push({ raw: 'undecodable', error: String(e) });
+                msg = null;
+            }
+        }
+        if (msg && mock.autoAckFn &&
             (msg.a === 'data' || msg.a === 'cancel' || msg.type === 'hello')) {
-            window.__mockWS.autoAckFn(msg);
+            mock.autoAckFn(msg);
         }
         return true;
     };
@@ -135,12 +219,15 @@ window.WebSocket.CLOSED = 3;
 """
 
 
-def _build_mobile_html() -> str:
-    """组装可离线运行的 mobile.html：内联依赖脚本 + 注入 mock WS / i18n。
+def _build_mobile_html(pc_public_key_b64: str) -> str:
+    """组装可离线运行的 mobile.html：内联依赖脚本 + 注入 mock WS / i18n / url fragment。
 
     返回 HTML 文本，由 fixture 用 ``page.set_content`` 装载——``set_content``
     不做真实导航，页面 hostname 因此保持为调用方预先设定的值（见
     ``cloudflare_page``）。
+
+    ``pc_public_key_b64`` 就是 QR fragment 里的 ``k=``：在 head 的 boot 脚本里
+    写入 ``location.hash``，早于 ``SecureClient.init``，使页面进入 url_fragment 模式。
     """
     html = MOBILE_HTML_PATH.read_text(encoding="utf-8")
     # 内联外部脚本（set_content 无法加载 <script src> 相对路径）
@@ -160,31 +247,27 @@ def _build_mobile_html() -> str:
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
     # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
     # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    #
+    # location.hash 必须在这里设：boot 脚本先于主脚本与 SecureClient.init 执行，
+    # 页面据此进入 url_fragment 模式（有 k= → 不落 TOFU 审批路径）。
     boot = (
-        "<script>window.__PHONEMIC_DEV__=true;</script>"
+        "<script>window.__PHONEMIC_DEV__=true;"
+        "location.hash = '" + "#k=" + pc_public_key_b64 + "&a=xchacha20';"
+        "</script>"
         "<script>" + MOCK_WS_SCRIPT + "</script>"
     )
     html = re.sub(r"<head[^>]*>", lambda m: m.group(0) + boot, html, count=1)
-    # 暴露 wsClient 供 mock 检查 isEncrypted
+    # 暴露 wsClient：mock 需要读它的 secure._provider 来克隆共享会话密钥
     html = html.replace(
         "wsClient.connect();",
         "wsClient.connect(); window.__wsClient = wsClient;",
     )
-    # 注入 patch：在主脚本之后、onload 之前，强制使用不加密模式
-    patch = (
-        "<script>"
-        "SecureClient.prototype._parseUrlFragment = function() {"
-        "  this._selectedAlgo = 'none';"
-        "};"
-        "</script>"
-    )
-    html = html.replace("</body>", patch + "</body>", 1)
     return html
 
 
 def _boot_mobile(page) -> None:
-    """装载页面并等 mock WS 连上（none+LAN 模式，无需 auth）。"""
-    page.set_content(_build_mobile_html())
+    """装载页面并等 url_fragment 三步握手完成（auth → auth_challenge → auth_proof）。"""
+    page.set_content(_build_mobile_html(_PC_PUBLIC_KEY_B64))
     page.wait_for_function(
         "() => window.__mockWS && window.__mockWS.current && window.__mockWS.current.readyState === 1"
     )

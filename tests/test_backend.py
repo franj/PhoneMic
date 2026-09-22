@@ -1,4 +1,4 @@
-"""
+﻿"""
 PhoneMic 后端服务单元测试
 使用真实 HTTP/WebSocket 连接测试 Starlette 服务器。
 所有 WebSocket 测试均通过 SecureChannel 认证后发送加密消息。
@@ -31,7 +31,7 @@ from phonemic.tunnel.crypto import create_provider
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 
-from conftest import get_test_port
+from conftest import get_test_port, PhoneSimulator
 
 
 # ---------- 辅助函数 ----------
@@ -71,80 +71,13 @@ def http_url(host, port, sc, path="/"):
     return f"http://{host}:{port}{_path_prefix(sc)}{path}"
 
 
-class PhoneSimulator:
-    """模拟手机端加密操作（使用 PyNaCl 代替 libsodium.js）。
-
-    与 JS 端 SecureClient / CryptoProvider 行为一致：
-    - auth：密封 {"algo","pk"} JSON（algo 不明文传输）
-    - 会话密钥：ECDH + blake2b(32) 派生，交给 CryptoProvider
-    - 防重放 seq 由 Provider 在加密层承载，不进应用层 JSON
-    """
-
-    def __init__(self, pc_public_key_b64: str, algo: str = "xsalsa20"):
-        self._algo = algo
-        if algo == "none":
-            # none+CF：pc_public_key_b64 实为 token
-            self._token = pc_public_key_b64
-            self._provider = None
-            return
-        pc_pub_bytes = base64.urlsafe_b64decode(pc_public_key_b64 + "==")
-        self._pc_public = PublicKey(pc_pub_bytes)
-        self._phone_private = PrivateKey.generate()
-        self._phone_public = self._phone_private.public_key
-        shared = crypto_scalarmult(bytes(self._phone_private), pc_pub_bytes)
-        session_key = blake2b(shared, digest_size=32).digest()
-        self._provider = create_provider(algo, session_key)
-
-    def make_auth(self, algo: str = None) -> dict:
-        """模拟手机端 auth：加密模式密封 {"algo","pk"}；none+CF 明文 token。
-
-        每次握手（= 新连接/新会话）开始时归零 seq 计数器，与服务端对齐。
-        """
-        algo = algo or self._algo
-        if self._provider is not None and hasattr(self._provider, "reset"):
-            self._provider.reset()
-        if algo == "none":
-            return {"type": "auth", "algo": "none", "data": self._token}
-        inner = json.dumps(
-            {
-                "algo": algo,
-                "pk": base64.urlsafe_b64encode(
-                    bytes(self._phone_public)
-                ).decode().rstrip("="),
-            }
-        ).encode("utf-8")
-        sealed = SealedBox(self._pc_public).encrypt(inner)
-        # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
-        return {"type": "auth", "data": sealed}
-
-    def encrypt(self, msg: dict) -> bytes:
-        # 产出线上字节：none 模式直接 msgpack 编码，加密模式整帧加密；无信封
-        pt = frame_encode(msg)
-        if self._provider is None:
-            return pt
-        # seq 由 Provider 在加密层自动打上
-        return bytes(self._provider.encrypt(pt))
-
-    def decrypt(self, raw: bytes) -> dict:
-        # 还原应用层报文：none 模式直接解码，加密模式整帧解密
-        if self._provider is None:
-            return frame_decode(raw)
-        # 重放/乱序/篡改由 Provider 校验并抛错
-        pt = self._provider.decrypt(raw)
-        return frame_decode(pt)
-
-
 def authenticate(ws, phone):
     """完成三步握手（auth → auth_challenge → auth_proof），返回挑战帧内容。
 
     auth_challenge 是下行首帧（服务端 tx_seq=0，整帧加密）：必须在这里解密消费，
     手机端 rx 计数才能与服务端后续下行帧（config 等）对齐。
     """
-    ws.send(frame_encode(phone.make_auth()))
-    challenge = phone.decrypt(ws.recv(timeout=5))
-    assert challenge["type"] == "auth_challenge"
-    ws.send(phone.encrypt({"type": "auth_proof", "nonce": challenge["nonce"]}))
-    return challenge
+    return phone.handshake(ws)
 
 
 def authenticate_and_verify(ws, phone):
@@ -182,7 +115,7 @@ def secure_server():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -206,7 +139,7 @@ def server_no_sc():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -391,7 +324,7 @@ def test_request_client_rescan_when_disconnected():
     """没有活动连接时 request_client_rescan 应返回 False。"""
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     assert request_client_rescan() is False
@@ -403,7 +336,7 @@ def test_send_to_phone_when_disconnected():
     """没有连接时 send_to_phone 应返回 False"""
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     result = send_to_phone({"type": "test"})
@@ -703,7 +636,7 @@ def test_real_server_with_websocket_client():
     host = "127.0.0.1"
     port = get_test_port()
 
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -770,7 +703,7 @@ def test_server_start_stop():
     host = "127.0.0.1"
     port = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -792,7 +725,7 @@ def test_server_restart_cycle():
     port2 = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server(host, port, bridge)
@@ -827,7 +760,7 @@ def test_restart_server_with_different_host():
     port = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server("0.0.0.0", port, bridge)
@@ -859,7 +792,7 @@ def test_restart_server_preserves_bridge():
     port2 = get_test_port()
     bridge = QueueEventBridge(multiprocessing.Queue())
     set_bridge(bridge)
-    sc = SecureChannel(algorithm="xsalsa20")
+    sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
 
     start_server("127.0.0.1", port, bridge)

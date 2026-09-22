@@ -53,7 +53,7 @@ from phonemic.tunnel.crypto.errors import CryptoError
 from phonemic.tunnel.frame import decode as decode_frame
 from phonemic.tunnel.frame import encode as encode_frame
 
-AUTH_TIMEOUT = 10  # 秒：整轮握手的**绝对预算**，两次等待共享（见 api._handle_auth）
+AUTH_TIMEOUT = 10  # 秒：**单次**握手等待的上限（auth / auth_proof 各自计时）
 APPROVAL_TIMEOUT = 30  # 秒：TOFU 审批等待时间
 CHALLENGE_NONCE_BYTES = 16  # auth_challenge 的 nonce 长度
 
