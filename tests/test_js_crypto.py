@@ -102,6 +102,40 @@ class TestTofuHelpers:
         assert result["pcPubB64"] == _to_b64(bytes(pc_priv.public_key))
         assert result["nonceB64"] == _to_b64(nonce)
 
+    def test_unseal_assigned_pin_matches_python(self, crypto_page):
+        """PC 指派并密封下发的识别码 → JS 端可正确解封（含同源 nonce）。
+
+        这条通道是「抄不走」的关键：识别码只以密文形态过网，且密文只对持有
+        sk_手机 的那一方可读（design §5.5.1）。
+        """
+        phone_priv = PrivateKey.generate()
+        nonce = bytes(range(16))
+        pin = "3847"
+
+        inner = json.dumps({
+            "pin": pin,
+            "nonce": _to_b64(nonce),
+        }).encode("utf-8")
+        sealed = SealedBox(phone_priv.public_key).encrypt(inner)
+
+        result = crypto_page.evaluate("""
+            ({ phonePrivB64, sealedB64 }) => {
+                const phonePriv = sodium.from_base64(phonePrivB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const sealed = sodium.from_base64(sealedB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const result = unsealAssignedPin(sealed, phonePriv);
+                return {
+                    pin: result.pin,
+                    nonceB64: sodium.to_base64(result.nonce, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+                };
+            }
+        """, {
+            "phonePrivB64": _to_b64(bytes(phone_priv)),
+            "sealedB64": _to_b64(sealed),
+        })
+
+        assert result["pin"] == pin
+        assert result["nonceB64"] == _to_b64(nonce)
+
     def test_phone_public_key_getter(self, crypto_page):
         """Provider 暴露 phonePublicKey 供 TOFU 明文 auth 使用。"""
         result = crypto_page.evaluate("""

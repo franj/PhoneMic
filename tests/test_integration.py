@@ -276,20 +276,45 @@ def _process_auth(page, channel):
     _answer_challenge_and_send_config(page, channel)
 
 
+def _deliver_sealed_pin(page, channel):
+    """TOFU 首次第 2 步：把密封下发的识别码帧交给 JS，等它大字显示出来。
+
+    手机这一侧解封用的是**自己**的私钥；只有真机（持有 sk_手机）做得到，
+    所以窃听者即便抄到整条明文链路也读不出这个码。解封后手机**不回任何帧**。
+    """
+    before = page.evaluate("() => window.__mockWS.sentMessages.length")
+    page.evaluate(
+        "(msg) => window.__mockWS.triggerMessage(msg)",
+        list(channel.make_sealed_pin()),
+    )
+    page.wait_for_function(
+        "() => document.getElementById('approval-pin').textContent.length > 0",
+        timeout=2000,
+    )
+    shown = page.locator("#approval-pin").inner_text()
+    assert shown == channel.pin, "手机显示的必须是 PC 指派的那一个识别码"
+    after = page.evaluate("() => window.__mockWS.sentMessages.length")
+    assert after == before, "收到识别码后手机不应回任何帧（无可复制、可重放的东西）"
+    return shown
+
+
 def _process_tofu_first_auth(page, channel):
     """跑完 TOFU 首次握手，并下发首个 config——等价 api._handle_auth 的 TOFU 分支。
 
-    明文 auth(algo/pk/pin) → receive_auth 只交出 (pin, phone_pk)，**不做 ECDH** →
-    审批放行 → complete_tofu_auth 建 Provider → SealedBox(phone_public) 挑战 →
+    明文 auth(algo/pk) → receive_auth 只交出 (pin, phone_pk)，**不做 ECDH** →
+    第 2 步把 PC 指派的识别码密封下发给这一方 → 审批放行 →
+    complete_tofu_auth 建 Provider → SealedBox(phone_public) 挑战 →
     auth_proof(Provider 加密) → config。审批通过后手机把 PC 公钥存入 localStorage。
     """
     auth_msg = _wait_auth(page)
     algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
-    assert pin is not None, "TOFU 首次 auth 应携带明文识别码"
+    assert pin is not None, "TOFU 首次应由 PC 指派一个识别码"
+    assert re.fullmatch(r"\d{4}", pin), f"识别码应为 4 位数字: {pin}"
     assert session_key is None, "审批前不应完成 ECDH（零计算开销）"
     assert phone_pk is not None
 
-    channel.complete_tofu_auth(algo, phone_pk)   # 审批放行
+    _deliver_sealed_pin(page, channel)          # 用户先在手机屏幕上看到这个码
+    channel.complete_tofu_auth(algo, phone_pk)  # 核对一致 → 点「允许」
 
     _answer_challenge_and_send_config(page, channel)
 
@@ -605,8 +630,12 @@ class TestTofuFirst:
     故按新语义重写为下面的用例。
     """
 
-    def test_plaintext_auth_carries_pin_not_sealed(self, page):
-        """无 k= → TOFU 首次：auth 为明文 {algo, pk, pin}，不能用 SealedBox（无信任锚）。"""
+    def test_plaintext_auth_has_no_pin_and_pin_is_sealed_down(self, page):
+        """无 k= → TOFU 首次：auth 明文 {algo, pk} 不带识别码，识别码由 PC 密封下发。
+
+        识别码**不上明文链路**是这次改动的核心：同网段窃听者即便抄到整条 auth，
+        也拿不到一个可以让电脑显示出来的码（design §5.5.1）。
+        """
         pc = SecureChannel(auth_method="tofu", mode="lan")
         channel = pc.new_session()
         assert channel.needs_auth is True and channel.is_encrypted is True
@@ -617,20 +646,26 @@ class TestTofuFirst:
         auth_msg = _wait_auth(page)
         assert auth_msg["type"] == "auth"
         assert "data" not in auth_msg, "TOFU 首次无 PC 公钥，无法密封 auth"
+        assert "pin" not in auth_msg, "识别码不再由手机提供（见 design §5.5.1）"
         assert auth_msg["algo"] == "xsalsa20"
         assert isinstance(auth_msg["pk"], bytes) and len(auth_msg["pk"]) == 32, "手机公钥明文（32B）"
-        assert re.fullmatch(r"\d{4}", auth_msg["pin"]), f"识别码应为 4 位数字: {auth_msg['pin']}"
-
-        # 手机屏幕显示同一识别码，供用户与 PC 审批通知核对（防他人抢先连接）
-        assert page.locator("#approval-overlay").is_visible()
-        assert page.locator("#approval-pin").inner_text() == auth_msg["pin"]
+        # 服务端尚未下发：手机屏幕上还一个码都没有
+        assert not page.locator("#approval-overlay").is_visible()
+        assert page.locator("#approval-pin").inner_text() == ""
         # 尚未收到 auth_challenge（等审批）→ 未接入
         assert page.evaluate("() => window.__wsClient.isConnected") is False
 
         # 服务端收到明文 auth：只解析字段、不做 ECDH（审批前零密钥计算）
         algo, session_key, pin, phone_pk = channel.receive_auth(auth_msg)
         assert algo == "xsalsa20"
-        assert session_key is None and pin == auth_msg["pin"] and phone_pk is not None
+        assert session_key is None and phone_pk is not None
+        assert re.fullmatch(r"\d{4}", pin), f"识别码应为 PC 指派的 4 位数字: {pin}"
+
+        # 第 2 步：密封下发 → 手机屏幕显示同一个码（=_deliver_sealed_pin 的断言）
+        shown = _deliver_sealed_pin(page, channel)
+        assert shown == pin
+        assert page.locator("#approval-overlay").is_visible()
+        assert page.evaluate("() => window.__wsClient.isConnected") is False
 
     def test_full_handshake_and_encrypted_roundtrip(self, page):
         """审批放行后完成握手：SealedBox 挑战 → auth_proof → 加密双向通信。"""

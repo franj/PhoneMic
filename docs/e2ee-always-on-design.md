@@ -2,12 +2,13 @@
 
 状态：**已实现**（分支 `feature/e2ee-always-on`）。本文档描述对 `crypto-design.md` 和 `wire-protocol.md` 的架构变更——将"加密"与"认证"从绑定关系解耦，加密成为基线（永远开启），认证变为独立选项。两份下游文档已按 §11 实现影响清单同步更新。
 
-实现落地时的两处偏离（以代码为准）：
+实现落地时的三处偏离（以代码为准）：
 
-- §8.1 的 `plaintextAuthData()` **已实现**在 `crypto_providers.js`，但 §8.2 伪代码里的 `_provider.generatePin()` / `_showPin()` / `deriveSessionKey()` 未按字面引入：识别码生成放在 `SecureClient._generatePin()`，Provider 通过 `setPcPublicKey()` 惰性派生会话密钥（`_deriveSharedKey()`），手机端识别码显示由 `WSClient` 的审批浮层统一负责。
+- §8.1 的 `plaintextAuthData()` **已实现**在 `crypto_providers.js`，但 §8.2 伪代码里的 `_provider.generatePin()` / `_showPin()` / `deriveSessionKey()` 未按字面引入：识别码由 PC 侧的 `phonemic/tunnel/e2ee.py::_generate_pin()` 生成（见 §5.5.1，**不再由手机生成**），Provider 通过 `setPcPublicKey()` 惰性派生会话密钥（`_deriveSharedKey()`），手机端识别码显示由 `WSClient` 的审批浮层在收到第 2 步的 `sealed` 帧后统一负责。
+- §8.2 的 `unsealAssignedPin()` 与 `sameBytes()` 落在 `crypto_providers.js`（前者解封 PC 指派的识别码，后者校验收到的 nonce 与后续挑战同源），由 `SecureClient.receiveSealedPin()` 调用。
 - §5.4 的"两次等待共享一个 deadline"已被推翻：`AUTH_TIMEOUT` 语义收窄为**单次**等待上限。审批等待（最长 30s）夹在 `auth` 与 `auth_proof` 之间，若共用一份预算，用户点「允许」时 deadline 已过期、握手会立刻超时。
 
-另有一条**待实施的改进提案**（未实现，见 [§5.5.1](#551-已知弱点与提案改由-pc-指派并密封下发识别码待实施)）：现状的识别码由手机生成并明文传输，可被同网段窃听者抄走复用，从而确定性抢下配对；提案改为**由 PC 指派、密封下发**。
+- TOFU 首次的识别码**由 PC 指派、密封下发**（§5.5.1，已实现）：它从不上明文链路，因此同网段窃听者既抄不走（密文只对持有 `sk_手机` 的一方可读），也刷不出（取值与任何对端可控输入无关）。手机在整个握手过程中不发送任何与识别码相关的帧。
 
 ---
 
@@ -64,7 +65,9 @@
 - **`none` 算法和 `PlainProvider` 完全移除**。所有通信都经过 AEAD 加密。
 - **认证方式变成 `auth_method` 配置项**：`tofu` 或 `url_fragment`。CF 模式强制 `url_fragment`。
 - **模式 2/3 的握手协议不变**——SealedBox 密封 auth → auth_challenge → auth_proof。
-- **模式 1（TOFU）首次连接**：手机明文发 auth（含公钥 + 识别码）→ PC 审批 → SealedBox 加密回传 PC 公钥 + nonce → 握手完成。
+- **模式 1（TOFU）首次连接**：手机明文发 auth（只含公钥 + 算法）→ PC 指派识别码
+  并密封下发给该连接方 → 用户核对 → PC 审批 → SealedBox 加密回传 PC 公钥 + nonce
+  → 握手完成。
 - **模式 1 重连**：手机用 localStorage 里的 PC 公钥做 SealedBox 密封 auth，与模式 2/3 握手完全一致，无需审批。
 
 ---
@@ -169,8 +172,11 @@ def append_to_url(self, url: str) -> str:
 手机                                              PC
  │  WS 连接
  │
- │──── auth ──────────────────────────────────────────►│  明文帧  {"type":"auth","algo":"xchacha20","pk":<bin>,"pin":"3847"}
- │                                                      │  ← PC 收到 auth，主界面显示审批通知（识别码 3847）
+ │──── auth ──────────────────────────────────────────►│  明文帧  {"type":"auth","algo":"xchacha20","pk":<bin>}
+ │                                                      │  ← PC 指派 4 位识别码（每连接独立随机）
+ │◄─── sealed ──────────────────────────────────────────│  SealedBox(phone_pk): {"pin":<4位>,"nonce":<16B>}
+ │  手机解封 → 大字显示识别码，**一个字节都不回**
+ │                                                      │  ← 主界面显示审批通知（同一个识别码 + 来源 IP）
  │                                                      │  ← 用户核对手机屏幕与 PC 主界面的识别码一致
  │                                                      │  ← 用户点"接受"
  │◄─── auth_challenge ─────────────────────────────────│  SealedBox(phone_public): {pc_public, nonce}
@@ -185,32 +191,48 @@ def append_to_url(self, url: str) -> str:
 TOFU 首次连接时手机没有 PC 公钥，无法用 SealedBox 密封。auth 帧为全明文 msgpack map：
 
 ```
-c→s  {"type":"auth", "algo":"xchacha20", "pk":<bin 32B 手机临时公钥>, "pin":"3847"}
+c→s  {"type":"auth", "algo":"xchacha20", "pk":<bin 32B 手机临时公钥>}
 ```
 
 - `algo` 明文传输——TOFU 首次连接无信任锚，无法保密算法列表，且无安全意义。
 - `pk` 是手机临时 X25519 公钥（32 字节），明文传输——公钥本身就是公开值。
-- `pin` 是 4 位识别码（见 §5.6），手机屏幕和 PC 主界面各显示一个，供用户核对。
+- **没有 `pin` 字段**：识别码由 PC 指派，手机无从提议（理由见 §5.5.1）。
+
+**第二步 `sealed`（明文帧、内容为密文）**
+
+PC 收到 auth 后立刻生成 4 位识别码与本连接的 16 字节 nonce，用 `SealedBox(phone_public)` 密封下发：
+
+```
+s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","nonce":<bin 16B>}>}
+```
+
+- 此刻双方都还没有会话密钥，整帧无法对称加密；但识别码的**机密性**由 SealedBox 保证——
+  只有持有 `phone_private` 的设备读得到它。
+- 手机解封后只做一件事：大字显示，**不回任何帧**。于是链路上不存在可复制、可重放的东西。
+- 这个 `nonce` 不是握手挑战：它随后被第 4 步的 `auth_challenge` **复用**，用来绑定"发识别码的那条"
+  与"发挑战的那条"必须是同一个对端（两条都必须密封给同一个 `phone_public`）。
 
 **PC 端审批（关键步骤）**
 
 PC 收到 auth 后：
-1. 解析 auth 帧取出 `algo`、`phone_public`（手机公钥）、`pin`（识别码）。**不做 ECDH，不创建 Provider**——审批通过后才做。
-2. **暂停握手**，在 dashboard 主界面显示审批通知：识别码 `3847` + 连接来源 IP + 接受/拒绝按钮。
-3. 等待用户操作：
+1. 解析 auth 帧取出 `algo`、`phone_public`（手机公钥）。**不做 ECDH，不创建 Provider**——审批通过后才做。
+2. **指派识别码**：随机生成 4 位数字（每连接独立），连同本连接的 16 字节 nonce 用
+   `SealedBox(phone_public)` 密封下发给这一方（第二步 `sealed`）。
+3. **暂停握手**，在 dashboard 主界面显示审批通知：**同一个识别码** + 连接来源 IP + 接受/拒绝按钮。
+4. 等待用户操作：
    - **点"接受"** → 做 ECDH（`crypto_scalarmult(pc_private, phone_public)` → `shared` → `KDF` → `session_key`），创建 Provider，继续握手发 auth_challenge。
    - **点"拒绝"** → `WS close(code=4032, reason="rejected")`。
    - **超时（30s 无操作）** → 同拒绝处理，`close(code=4032, reason="timeout")`。
 
-> **审批在 ECDH 之前**：收到 auth 后只提取明文字段（`algo`/`pk`/`pin`），不做任何密钥计算。审批通过后才做 ECDH + 创建 Provider + 发 auth_challenge。被拒绝的连接零计算开销。
+> **审批在 ECDH 之前**：收到 auth 后只提取明文字段（`algo`/`pk`），不做任何密钥计算。审批通过后才做 ECDH + 创建 Provider + 发 auth_challenge。被拒绝的连接零计算开销。
 >
 > **审批必须在发 auth_challenge 之前**：auth_challenge 里包含 PC 公钥（SealedBox 加密），只有审批通过后才发送。这确保 PC 公钥不暴露给未授权的连接方——PC 公钥在此架构中是 token，泄露意味着他人可绕过审批直接走认证路径重连。
 
 > **无痛显示，不弹窗**：审批通知在 dashboard 主界面的固定区域（如状态栏区域）显示，不使用模态弹窗。如果有人不断尝试连接，不会反复弹窗打扰用户——新请求替换旧的待审批通知（或排队），用户按自己的节奏处理。
 
-**第二步 `auth_challenge`（SealedBox 加密）**
+**第四步 `auth_challenge`（SealedBox 加密）**
 
-审批通过后，PC 生成 16 字节随机 nonce，用 `SealedBox(phone_public)` 加密 `{pc_public, nonce}`：
+审批通过后，PC 把 `{pc_public, nonce}` 用 `SealedBox(phone_public)` 加密下发——`nonce` 就是第二步那一个：
 
 ```
 s→c  SealedBox(phone_public): {pc_public: <32B>, nonce: <16B>}
@@ -219,13 +241,16 @@ s→c  SealedBox(phone_public): {pc_public: <32B>, nonce: <16B>}
 - 整个帧是 SealedBox 密文（`crypto_box_seal`），手机用 `phone_private` 解封。
 - **PC 公钥不暴露**：SealedBox 只有 `phone_private` 持有者才能解封。被动窃听者拿到密文也无法提取 PC 公钥。这正是"PC 公钥 = token"的实现——它只在审批通过后才通过加密通道传给手机。
 - nonce 在 SealedBox 内是明文（解封后可见），无需额外加密——SealedBox 本身已提供机密性。
+- **复用第二步的 nonce** 是刻意的：手机据此校验"给我识别码的那条"与"给我挑战的这条"同源，
+  不是两次互不相干的握手（`sameBytes()`，实现在 `crypto_providers.js`）。
 
 **手机端处理流程**：
 
 1. `SealedBox.decrypt(rawBytes, phone_private)` → `{pc_public, nonce}`
-2. 取 `pc_public` → `ECDH(phone_private, pc_public)` → `shared` → `KDF(shared)` → `session_key`
-3. `create_provider("xchacha20", session_key)` → Provider
-4. `Provider.encrypt(nonce)` → auth_proof 帧
+2. 校验 `nonce` 与第二步 `sealed` 帧里的那个**逐字节相同**（`sameBytes()`）
+3. 取 `pc_public` → `ECDH(phone_private, pc_public)` → `shared` → `KDF(shared)` → `session_key`
+4. `create_provider("xchacha20", session_key)` → Provider
+5. `Provider.encrypt(nonce)` → auth_proof 帧
 
 > 注意：PC 在审批前已做完 ECDH 并创建了 Provider。手机在收到 auth_challenge 后才做 ECDH 并创建 Provider。两端独立计算 `session_key`，ECDH 保证结果一致。
 
@@ -352,16 +377,16 @@ if (this._authChallengeTimer) {
 
 认证模式和 TOFU 重连不需要审批，PC 毫秒级返回 auth_challenge，现有 `AUTH_TIMEOUT = 10s` 和 `connectTimeout = 3s` 足够。不引入新超时。
 
-### 5.5 4 位识别码
-
-> ⚠️ 本节描述的是**当前实现**。它有一个已知弱点（识别码可被抄走抢配对），改进提案见 [§5.5.1](#551-已知弱点与提案改由-pc-指派并密封下发识别码待实施)。
+### 5.5 4 位识别码（**由 PC 指派，密封下发**）
 
 **生成与显示**
 
-- 手机在 TOFU 首次连接时生成 4 位纯数字识别码：从 `0-9` 中随机取 4 位，如 `3847`。
-- 识别码放在 auth 帧的 `pin` 字段中明文传输。
-- 手机屏幕显示识别码（如连接等待界面的大字显示）。
-- PC 收到 auth 后在主界面审批通知中显示同一个识别码。
+- PC 在收到 TOFU 首次连接的 auth 后生成 4 位纯数字识别码（`e2ee.py::_generate_pin()`），
+  每连接独立随机。手机上不生成识别码（理由见 §5.5.1）。
+- 识别码**从不进入明文链路**：它连同本次握手的 nonce 一起被 `SealedBox(phone_public)`
+  密封，作为第二步 `sealed` 帧下发给当前连接方。
+- 手机解封后大字显示（连接等待界面），并且**不回任何帧**。
+- PC 主界面的审批通知显示的是**同一个**识别码——二者同源于本机的 `SecureSession.pin`。
 
 **用户核对**
 
@@ -373,18 +398,24 @@ if (this._authChallengeTimer) {
 
 识别码防的是"攻击者抢在真机之前连上 PC，用户不看来源就点接受"：
 
-- 攻击者直接连 PC：攻击者的手机生成自己的识别码（如 `5729`），PC 主界面显示 `5729`，但真机屏幕显示的是 `3847`。用户看到不一致 → 拒绝。
-- 攻击者 MITM：MITM 分别与手机和 PC 建立连接，但手机生成的识别码在 auth 帧里传给 MITM，MITM 再连 PC 时用自己的识别码。PC 显示的是 MITM 的码，不是手机的码。用户核对 → 不一致 → 拒绝。
+| 攻击者的选择 | 能否让电脑显示手机上的那个码 | 能否完成握手 | 用户看到的结果 |
+|---|---|---|---|
+| 用**自己的**公钥连 PC | 不能——识别码由 PC 随机指派，与攻击者任何可控输入无关（**没有枚举空间可刷**） | 能 | 两边码不同 → 拒绝 |
+| **抄真机的 auth** 重放（同一个 pk） | 能（PC 就是给这个 pk 发的识别码） | 不能——密封包与挑战都只对持有 `sk_手机` 的一方可解 | 真机屏幕上不会出现这个码 → 拒绝 |
 
-> 识别码不是密码学保护。它的作用是给**用户审批**提供一个可核对的凭据，类似蓝牙配对码。4 位纯数字碰撞概率为 1/10,000（10^4）。
+> 识别码不是密码学保护。它的作用是给**用户审批**提供一个可核对的凭据，类似蓝牙配对码。
+> 关键差别是它必须在**带外可用、带内不可得**：密封下发保证了"只有真机读得到"，
+> PC 指派保证了"只有挨着它的那块屏幕才会显示同一个值"。详见 §5.5.1。
 >
-> ⚠️ 上面「攻击者每次连接只猜一次、成功率 0.01%」的结论，前提是**识别码不可被攻击者获取**——而现状并不成立：识别码在明文 auth 里，可被抄走复用，成功率实际接近 100%。详见 §5.5.1。
+> 4 位数字的意义量化：攻击场景下两边显示的是两个**独立随机**的数，偶然相同概率 1/10⁴，
+> 且攻击者**无法判断自己是否撞中**（他解不开密封给真机的那个包）。
 
-#### 5.5.1 已知弱点与提案：改由 PC 指派并密封下发识别码（**待实施**）
+#### 5.5.1 为什么是 PC 指派 + 密封下发（已实现）
 
-> 本节是**提案**，代码尚未按此实现。
+> 本节记录这条设计**为什么必须如此**：先给出被它取代的那版实现的确定性攻击，再给出论证。
+> 实现见 §5.2、代码见 `e2ee.py::make_sealed_pin()` / `SecureClient.receiveSealedPin()`。
 
-**现状的弱点：识别码可被抄走**
+**被取代的实现（手机自选 + 明文传输）的弱点：识别码可被抄走**
 
 识别码与手机公钥都在明文 auth 里，同网段的被动窃听者能拿到**目标识别码**，然后用自己的密钥对连 PC：
 
@@ -395,7 +426,7 @@ if (this._authChallengeTimer) {
 
 即**一次被动窃听 + 一次主动连接即可确定性得手**（成功率 ≈ 100%，不需要任何算力）。第 3 步成立，是因为识别码由手机自选、明文可读、可复制；而 §5.5 的论证假设的是"攻击者用自己的识别码"，这一步假设与"明文传输"互相矛盾。
 
-**提案：识别码由 PC 生成，密封下发给当前连接方**
+**方案（已实现）：识别码由 PC 生成，密封下发给当前连接方**
 
 对称性在这里是决定性的：**PC 已从明文 auth 里拿到 `phone_pub`，所以 PC 能密封；手机还没有 `pc_pub`，所以手机不能。** 这是无信任阶段唯一能把一个共享秘密送进手机的通道。
 
@@ -411,9 +442,10 @@ PC  → 手机: auth_challenge = SealedBox(pk, {pc_pub, nonce})    审批通过�
 要点：
 
 - **`pc_pub` 仍然只在审批通过后才发**——PC 公钥是 token，不能提前泄露，这一点不变。
-- **第 2 步的 `nonce` 与第 5 步复用同一个**：让"发 PIN 的那条"和"发挑战的那条"必须是同一个对端，PIN 与挑战同源。
-- **手机不再生成识别码**：`pin` 字段从 auth 帧删除，`_generatePin()` 与审批浮层的赋值时机改为"收到第 2 步之后"。
-- 手机**始终不发**任何与 PIN 相关的帧——没有可复制、可重放的东西。
+- **第 2 步的 `nonce` 与第 5 步复用同一个**：让"发识别码的那条"和"发挑战的那条"必须是同一个对端，识别码与挑战同源。
+- **手机不再生成识别码**：`pin` 字段从 auth 帧删除，`SecureClient._generatePin()` 一并删除，
+  PC 侧由 `e2ee._generate_pin()` 生成；审批浮层的显示时机改为"收到第 2 步之后"。
+- 手机**始终不发**任何与识别码相关的帧——没有可复制、可重放的东西。
 
 **为什么这堵住了洞**
 
@@ -424,7 +456,8 @@ PC  → 手机: auth_challenge = SealedBox(pk, {pc_pub, nonce})    审批通过�
 | 用**自己的**公钥 | 不能——PIN 由 PC 随机指派，与攻击者任何可控输入无关（**没有枚举空间可刷**） | 能 | 两边 PIN 不同 → 用户拒绝 |
 | **抄手机的 auth**（用 `pk_手机` 重放） | 能（PC 就是给这个 pk 发的 PIN） | 不能——挑战密封给 `pk_手机`，攻击者没有对应私钥 | 真机不在攻击者那条连接上，手机屏幕不会出现这个 PIN → 用户拒绝 |
 
-对比现状，两个攻击面同时消失：**抄不走**（PIN 从不出现在明文链路上，只有持有 `sk_手机` 的一方能解封）、**也刷不出**（PIN 与公钥无关，不存在 10^4 的枚举空间）。
+对比那版实现，两个攻击面同时消失：**抄不走**（识别码从不出现在明文链路上，只有持有 `sk_手机`
+的一方能解封）、**也刷不出**（识别码与公钥无关，不存在 10^4 的枚举空间）。
 
 这一点**优于"派生码"思路**：派生码的输入含攻击者可控的公钥，必须再引入"先押注后揭晓"的电脑侧随机数才能防离线枚举；而本方案里 PIN 由 PC 独立随机生成，枚举空间根本不存在。（"用私钥签名 PIN"则在任何形态下都无用：签名只证明"持有帧里那把公钥的私钥"，而攻击者本来就持有自己的私钥，自签同值校验恒真。）
 
@@ -433,28 +466,32 @@ PC  → 手机: auth_challenge = SealedBox(pk, {pc_pub, nonce})    审批通过�
 1. **主动中继 / 在途中人**：能截断并转发的人可以把手机的 auth 转给 PC、再把 PC 的密封 PIN 转给手机，用户核对仍会通过——攻击者成为一条透明中继。但会话密钥是手机与 PC 之间 ECDH 出来的，中继读不到内容、也伪造不了帧（AEAD + seq 拒绝），只能阻断或观察流量特征。**本方案不覆盖这一类**（与"无中间人"前提一致）。
 2. **人类因素**：不核对就点「接受」时，任何识别码方案都失效。缓解仍是识别码大字显示 + 一并显示来源 IP（已实现）。
 3. **4 位偶然相同**：攻击场景下两边显示的是两个**独立随机**的数，偶然相同概率 1/10⁴（与现状同一量级，但性质从"可确定性复制"变为"只能撞运气"）。提高位数可降低该值，代价是可读性。注意攻击者**无法判断自己是否撞中**——PIN 是密封给手机公钥的，他解不开，所以不存在"刷到命中就停"的可能。
-4. **超时预算不变**：手机仍需等待"审批 + 挑战"，35s 上限（30s 审批 + 5s 容错）继续适用；第 2 步本身应计入连接的短超时。
+4. **超时预算不变**：手机仍需等待"识别码 + 审批 + 挑战"，35s 上限（30s 审批 + 5s 容错）
+   继续适用。第 2 步是纯机器往返（下行一张帧），与人工核对共用这同一份预算——
+   正常情况下它只占几毫秒，不会挤压审批时间。
 
-**实施时要改的落点**（供后续拆分任务）
+**实现落点**（已按此实现）
 
 | 位置 | 改动 |
 |---|---|
-| `phonemic/tunnel/e2ee.py` | `receive_auth` 不再取 `pin`；新增生成 PIN 与密封下发的方法（复用 `SealedBox(phone_public)`） |
-| `phonemic/server/api.py` | `_handle_auth` 在收到 auth 后先发 `sealed {nonce, PIN}`，再进入审批等待；审批通过后发挑战 |
-| `phonemic/resources/mobile.html` | 删除手机端 PIN 生成；改为收到第 2 步后解封并显示；`pin` 不再入 auth 帧 |
-| `docs/wire-protocol.md` §7 | auth 帧去掉 `pin` 字段；新增 `sealed {nonce, PIN}` 帧 |
-| 测试 | 现有 TOFU 用例改为"PC 指派 PIN"；新增"窃听者连接后两边 PIN 不同"的用例 |
+| `phonemic/tunnel/e2ee.py` | `receive_auth` 不再取 `pin`（改为自行生成 `_generate_pin()` 与挑战 nonce）；新增 `SecureSession.make_sealed_pin()`（复用 `SealedBox(phone_public)`）；`make_auth_challenge()` 在 TOFU 首次下**复用**第 2 步那个 nonce |
+| `phonemic/server/api.py` | `_handle_auth` 在收到 auth 后先发 `sealed {pin, nonce}`，再进入审批等待；审批通过后发挑战 |
+| `phonemic/resources/crypto_providers.js` | `plaintextAuthData()` 去掉 `pin` 形参；新增 `unsealAssignedPin()` 与定长比较 `sameBytes()` |
+| `phonemic/resources/mobile.html` | 删除 `_generatePin()`；改为收到第 2 步后经 `SecureClient.receiveSealedPin()` 解封并显示；`makeAuthProof()` 校验挑战 nonce 与第 2 步同源；`pin` 不再入 auth 帧 |
+| `docs/wire-protocol.md` §5/§6/§7 | auth 帧去掉 `pin` 字段；新增 `sealed {pin, nonce}` 帧 |
+| 测试 | 现有 TOFU 用例改为"PC 指派识别码"；新增"两条连接拿到不同识别码""auth 里的 pin 字段被忽略""重放的 auth 只有真机解得开"等用例 |
 
 
 ### 5.6 三种握手路径对比
 
 | 方面 | URL fragment 认证（模式 2/3） | TOFU 首次（模式 1） | TOFU 重连（模式 1） |
 |---|---|---|---|
-| auth 帧 | SealedBox(pc_public): `{algo, pk}` | 明文 `{algo, pk, pin}` | SealedBox(pc_public): `{algo, pk}` |
+| auth 帧 | SealedBox(pc_public): `{algo, pk}` | 明文 `{algo, pk}` | SealedBox(pc_public): `{algo, pk}` |
+| sealed 帧（仅 TOFU 首次） | — | SealedBox(phone_public): `{pin, nonce}`，**PC 指派** | — |
 | auth_challenge 帧 | Provider 加密整帧 | SealedBox(phone_public): `{pc_public, nonce}` | Provider 加密整帧 |
 | auth_proof 帧 | Provider 加密 | Provider 加密 | Provider 加密 |
 | config 及之后 | Provider 加密 | Provider 加密 | Provider 加密 |
-| PC 端审批 | 不需要 | **需要** | 不需要 |
+| PC 端审批 | 不需要 | **需要**（先下发识别码） | 不需要 |
 | 手机何时创建 Provider | `init()`（有 PC 公钥） | 收到 auth_challenge 时 | `init()`（有 PC 公钥 from localStorage） |
 | 算法选择 | 从 QR `a=` 列表协商 | 默认 `xchacha20` | 默认 `xchacha20` |
 | PC 公钥传递 | QR fragment（带外） | auth_challenge SealedBox（带内加密） | localStorage（首次带内加密获取） |
@@ -467,8 +504,8 @@ PC  → 手机: auth_challenge = SealedBox(pk, {pc_pub, nonce})    审批通过�
 
 ```
 URL fragment / TOFU 重连:  S0 --auth(SealedBox)--> S1(密钥就绪) --auth_proof--> S2(已认证)
-TOFU 首次:                S0 --auth(明文pk+pin)--> S0_pending(待审批) --审批通过--> S1(密钥就绪) --auth_proof--> S2
-                          S0_pending --审批拒绝/超时--> close
+TOFU 首次:                S0 --auth(明文pk)--> S0_pin(识别码已下发) --审批通过--> S1(密钥就绪) --auth_proof--> S2
+                          S0_pin --审批拒绝/超时--> close
 ```
 
 TOFU 首次连接新增 `S0_pending`（待审批）中间状态：auth 已收到，ECDH 已完成，Provider 已创建，但等待用户审批才发 auth_challenge。
@@ -562,13 +599,15 @@ class SecureChannel:
 
 ### 7.2 SecureSession
 
-`receive_auth()` 增加分叉。TOFU 首次模式下该方法只解析明文字段、不做 ECDH：
+`receive_auth()` 增加分叉。TOFU 首次模式下该方法只解析明文字段、不做 ECDH，
+但会**指派本连接的识别码**与**生成挑战 nonce**（这两个值都不是从帧里读来的）：
 
 ```python
 def receive_auth(self, auth_msg: dict):
     """返回 (algo, session_key_or_none, pin_or_none, phone_pk_or_none)。
     认证模式 / TOFU 重连：(algo, session_key, None, None)——密钥就绪。
-    TOFU 首次：(algo, None, pin, phone_pk)——密钥待审批后建。"""
+    TOFU 首次：(algo, None, pin, phone_pk)——pin 是**本机随机指派**的，
+    密钥待审批后建。"""
     if self._channel.auth_method == "url_fragment":
         # 认证模式：SealedBox 路径
         sealed = auth_msg["data"]
@@ -583,8 +622,25 @@ def receive_auth(self, auth_msg: dict):
         # TOFU 首次：明文路径，只解析字段，不做 ECDH
         algo = auth_msg["algo"]
         phone_pk = auth_msg["pk"]
-        pin = auth_msg.get("pin")
-        return algo, None, pin, phone_pk
+        self._tofu_first = True
+        self._phone_public = bytes(phone_pk)
+        # 识别码 + 挑战 nonce **同源生成**（auth 帧里没有这两个字段）
+        self._pin = _generate_pin()
+        self._challenge_nonce = secrets.token_bytes(CHALLENGE_NONCE_BYTES)
+        return algo, None, self._pin, self._phone_public
+```
+
+第二步（TOFU 首次专属）把识别码密封下发给当前连接方：
+
+```python
+def make_sealed_pin(self) -> bytes:
+    """TOFU 首次：SealedBox(phone_public) 加密 {pin, nonce}，仍是明文帧。"""
+    inner = json.dumps({
+        "pin": self._pin,
+        "nonce": _to_b64(self._challenge_nonce),
+    }).encode("utf-8")
+    sealed = SealedBox(PublicKey(self._phone_public)).encrypt(inner)
+    return encode_frame({"type": "sealed", "data": sealed})
 ```
 
 TOFU 首次审批通过后，调用 `complete_tofu_auth()` 做 ECDH + 创建 Provider：
@@ -602,13 +658,18 @@ def complete_tofu_auth(self, algo: str, phone_pk: bytes):
 
 ```python
 def make_auth_challenge(self) -> bytes:
-    nonce = secrets.token_bytes(16)
+    if self._tofu_first:
+        # TOFU 首次：**复用**第二步的 nonce（同源要求）
+        nonce = self._challenge_nonce
+    else:
+        nonce = secrets.token_bytes(16)
     if self._channel.auth_method == "url_fragment" or self._has_token:
         # 认证模式 / TOFU 重连：整帧 Provider 加密（现有逻辑不变）
         frame = {"type": "auth_challenge", "nonce": nonce}
         return self._provider.encrypt(msgpack.packb(frame))
     else:
         # TOFU 首次：SealedBox(phone_public) 加密 {pc_public, nonce}
+        # nonce 复用第二步那个（同源要求），手机据此校验两条下行帧出自同一个对端
         inner = json.dumps({
             "pk": _to_b64(self._channel.key_exchange.public_key_bytes),
             "nonce": _to_b64(nonce),
@@ -638,10 +699,11 @@ auth_msg = await _recv_handshake_frame(websocket, deadline)
 algo, session_key, pin, phone_pk = session.receive_auth(auth_msg)
 
 if pin is not None:
-    # TOFU 首次：等待用户审批（尚未做 ECDH）
+    # TOFU 首次：先下发 PC 指派的识别码，再等待用户审批（尚未做 ECDH）
+    await websocket.send_bytes(session.make_sealed_pin())
     try:
         approved = await asyncio.wait_for(
-            _await_approval(pin, client_ip),
+            _await_approval(session.pin, client_ip),
             timeout=APPROVAL_TIMEOUT
         )
     except asyncio.TimeoutError:
@@ -685,7 +747,7 @@ TOFU 审批机制天然提供了挤占保护：
 
 - 任何新连接都必须经过 PC 用户审批才能注册。
 - 攻击者连上后，PC 弹出审批通知，用户看到不是自己手机的识别码 → 拒绝。
-- 当前活动连接不受影响——审批中的新连接处于 `S0_pending` 状态，不注册到 `_manager`。
+- 当前活动连接不受影响——审批中的新连接处于 `S0_pin` 状态，不注册到 `_manager`。
 - **不需要额外的挤占保护代码**——审批本身就是门禁。
 
 > URL fragment 认证模式（模式 2/3）保持现有挤占行为不变。能完成 SealedBox 握手的人持有 PC 公钥（信任锚），其连接权限与挤占权限在同一信任级别。
@@ -697,18 +759,22 @@ TOFU 审批机制天然提供了挤占保护：
 ### 8.1 `crypto_providers.js`
 
 - **`PlainProvider` 删除**。
-- **`sealedAuthData()` 用于认证模式 / TOFU 重连**。无认证模式不密封，直接返回明文 `{algo, pk, pin}`。
-- 新增 `plaintextAuthData(providerName, phonePublicKey, pin)`：
+- **`sealedAuthData()` 用于认证模式 / TOFU 重连**。TOFU 首次不密封，直接返回明文 `{algo, pk}`
+  （**不带识别码**——识别码不是手机能提议的东西，见 §5.5.1）。
+- 新增 `plaintextAuthData(providerName, phonePublicKey)`：
 
 ```javascript
-function plaintextAuthData(providerName, phonePublicKey, pin) {
+function plaintextAuthData(providerName, phonePublicKey) {
     return {
         algo: providerName,
         pk: phonePublicKey,          // Uint8Array，msgpack 编码为 bin
-        pin: pin,                    // 4 位识别码字符串
     };
 }
 ```
+
+- 新增 `unsealAssignedPin(sealedBytes, phonePrivateKey)`：解封 PC 指派并密封下发的识别码，
+  返回 `{pin, nonce}`（`nonce` 必须与随后的 `auth_challenge` 同源）。
+- 新增 `sameBytes(a, b)`：定长字节串逐字节比较，用于上面那条同源校验。
 
 - `PROVIDER_CLASSES` 删除 `"none"` 条目。
 - 各 Provider 的 `makeAuthData()` 返回值不变（Uint8Array = SealedBox blob），TOFU 首次不走这个方法。
@@ -741,13 +807,15 @@ async init() {
         // TOFU 首次连接
         this._pcPublicKey = null;                 // 还没有，等 auth_challenge
         this._algorithm = "xchacha20";
-        this._pin = generatePin();                // 生成 4 位识别码
-        this._showPin(this._pin);                 // 手机屏幕显示识别码
+        this._pin = null;                         // 由 PC 指派，第 2 步才有值
         this._provider = this._createProvider(this._algorithm);
         this._provider.initKeypair();             // 只生成密钥对，不做 ECDH
     }
 }
 ```
+
+> **识别码不在这里生成**。手机端已经不带 `_generatePin()`——它明文出现在 auth 里时会被
+> 同网段窃听者抄走复用（§5.5.1）。手机上现在不存在任何"可复制、可重放"的识别码。
 
 `makeAuth()` 的分叉：
 
@@ -760,14 +828,29 @@ makeAuth() {
         auth.data = sealed;
         return auth;
     } else {
-        // TOFU 首次：明文
-        return {
-            type: "auth",
-            algo: this._algorithm,
-            pk: this._provider.getPhonePublicKey(),      // Uint8Array
-            pin: this._pin,                              // 4 位识别码
-        };
+        // TOFU 首次：明文，**不带识别码**
+        this._awaitingSealedPin = true;  // 下一条期望帧是第 2 步的 sealed
+        return plaintextAuthData(
+            this._algorithm, this._provider.getPhonePublicKey()
+        );
     }
+}
+```
+
+第 2 步到达时的处理（`WSClient.onmessage` 在握手未完成时按阶段分发）：
+
+```javascript
+receiveSealedPin(rawBytes) {
+    const frame = MessagePack.decode(rawBytes);
+    if (!frame || frame.type !== 'sealed' || !(frame.data instanceof Uint8Array)) return null;
+    const { pin, nonce } = unsealAssignedPin(
+        frame.data, this._provider.phonePrivateKey);
+    if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) return null;
+    this._pin = pin;              // 大字显示
+    this._tofuNonce = nonce;      // 稍后据此校验挑战同源
+    this._awaitingSealedPin = false;
+    this._awaitingTofuApproval = true;
+    return pin;                   // ← 然后什么都不发
 }
 ```
 
@@ -792,6 +875,9 @@ makeAuthProof(rawBytes) {
         const pcPublicKey = base64ToBytes(msg.pk);
         const nonce = base64ToBytes(msg.nonce);
 
+        // 挑战必须与第 2 步下发的识别码同源（同一个对端、同一次握手）
+        if (!sameBytes(nonce, this._tofuNonce)) return null;
+
         // 此时才做 ECDH 并初始化 Provider 的会话密钥
         this._provider.deriveSessionKey(pcPublicKey);
         this._pcPublicKey = pcPublicKey;
@@ -809,19 +895,16 @@ makeAuthProof(rawBytes) {
 
 `encrypt()` / `decrypt()` 无需改动——Provider 创建后，加解密逻辑与模式无关。
 
-### 8.3 识别码生成
+### 8.3 识别码生成（PC 侧）
 
-```javascript
-function generatePin() {
-    let pin = "";
-    for (let i = 0; i < 4; i++) {
-        pin += Math.floor(Math.random() * 10).toString();
-    }
-    return pin;
-}
+```python
+def _generate_pin() -> str:
+    return str(secrets.randbelow(10 ** PIN_DIGITS)).zfill(PIN_DIGITS)   # PIN_DIGITS = 4
 ```
 
-手机端在 TOFU 首次连接等待审批期间，屏幕大字显示识别码（如 `3847`）。
+- 每连接独立随机，由 `SecureSession.receive_auth()` 在**收到明文 auth 之后、下发之前**调用。
+- 手机端在收到第 2 步的 `sealed` 帧后，才在等待审批界面大字显示它（如 `3847`）。
+- 手机从不发送它，也就无从被复制或重放：窃听者看不到它，攻击者也刷不出它。
 
 ### 8.4 `isEncrypted` 属性
 
@@ -851,9 +934,10 @@ function generatePin() {
  │  2. UI 显示"PC 密钥已变更，等待重新审批"
  │  3. 自动重连 → 走 TOFU 首次路径
  │
- │──── auth ──────────────────────────────────────────►│  明文 {algo, pk, pin:"3847"}
+ │──── auth ──────────────────────────────────────────►│  明文 {algo, pk}
+ │◄── sealed ──────────────────────────────────────────│  SealedBox(phone_public): {pin:"3847", nonce}
  │  手机屏幕显示识别码 3847                               │
- │                                                      │  ← PC 主界面显示审批通知（识别码 3847）
+ │                                                      │  ← PC 主界面显示审批通知（同一个识别码 3847）
  │                                                      │  ← 用户核对手机与 PC 的识别码一致
  │                                                      │  ← 用户点"接受"
  │◄── auth_challenge ────────────────────────────────────│  SealedBox(phone_public): {pc_public, nonce}
@@ -884,7 +968,7 @@ if (closeCode === 4001) {
 
 - **自动重连**：收到 4001 且 localStorage 有旧 key → 清除 localStorage → 自动重连（走 TOFU 首次路径）。用户不需要手动操作。
 - **手机端 UI 区分**：重连场景（之前有 localStorage）显示"PC 密钥已变更，等待重新审批"；全新连接显示"等待 PC 审批"。仅 UI 文案不同，协议层完全一致。
-- **PC 端不区分**：PC 收到的 TOFU auth 帧与全新连接的 auth 帧完全相同（`{algo, pk, pin}`），PC 无法也不需要区分两者。审批通知统一显示"新连接请求 + 识别码"。
+- **PC 端不区分**：PC 收到的 TOFU auth 帧与全新连接的 auth 帧完全相同（`{algo, pk}`），PC 无法也不需要区分两者。审批通知统一显示"新连接请求 + 识别码"。
 
 ### 8.7 其他 localStorage 清理场景
 
@@ -944,19 +1028,19 @@ TOFU 模式下 PC 公钥的保密性甚至**优于** URL fragment 模式：QR �
 
 TOFU 首次连接没有信任锚（手机没有 PC 公钥）。主动 MITM 攻击者可以：
 
-1. 拦截手机的 auth 帧，获取 `phone_public` 和 `pin`
+1. 拦截手机的 auth 帧，获取 `phone_public`
 2. 生成自己的密钥对 `(mitm_private, mitm_public)`
-3. 向 PC 发送 auth：`{algo, pk: mitm_public, pin: <MITM自己的码>}` → PC 显示 MITM 的码
+3. 向 PC 发送 auth：`{algo, pk: mitm_public}` → PC 给**这条连接**指派识别码，显示的必然是 MITM 那条的值
 4. 向手机发送 auth_challenge：`SealedBox(phone_public): {mitm_public, nonce}` → 手机做 ECDH(phone_private, mitm_public) → `session_key_2`
 
 **但识别码会暴露 MITM**：
-- 手机的屏幕显示 `3847`（手机生成的码）
-- PC 的审批通知显示 `5729`（MITM 的码，因为 MITM 向 PC 发了自己的 auth）
-- 用户核对 → 不一致 → 拒绝
+- 手机的屏幕显示 PC 指派给**真机那条连接**的识别码
+- PC 的审批通知显示的是它给 MITM 那条连接指派的另一个随机值
+- 用户核对 → 两个独立随机数相同只有 1/10⁴ → 拒绝
 
 因此 MITM 攻击在用户核对识别码的前提下**可被检测**。这是检测型防护（类似蓝牙配对码），不是预防型。
 
-> ⚠️ 上面这条论证**依赖"攻击者无法获得真机的识别码"**，而现状并不成立：识别码在明文 auth 里可被抄走，攻击者可以直接复用真机的码骗过核对（§5.5.1 有完整攻击链）。识别码改由 PC 指派并密封下发之后，这条论证才真正成立。
+> 这条论证之所以成立，前提是**攻击者无法让自己那条连接的识别码等于真机那条**。识别码在旧实现里由手机自选且明文传输，攻击者抄走即可复用；改由 PC 指派并密封下发之后，取值与任何对端可控输入无关、且只对持有 `sk_手机` 的一方可读（§5.5.1），这条论证才真正立得住。
 
 残余风险：用户不核对识别码就点"接受"。缓解措施：PC 审批通知把识别码做大字显示，引导用户核对。
 
@@ -998,26 +1082,28 @@ TOFU 首次连接相对现状是**明确的净改进**——消除了明文通�
 | `phonemic/tunnel/crypto/key_exchange.py` | 新增 | `handle_tofu_auth()` 方法 + `public_key_bytes` 属性 |
 | `phonemic/tunnel/crypto/plain.py` | **删除** | `PlainProvider` 移除 |
 | `phonemic/tunnel/crypto/__init__.py` | 修改 | 移除 `"none"` 注册；`OFFERED_ALGORITHMS` 不变 |
-| `phonemic/tunnel/e2ee.py` | 修改 | `SecureChannel` 用 `auth_method` 替代 `_algorithm`；`SecureSession.receive_auth` / `make_auth_challenge` 增加 TOFU 分叉；删除 `_token` 路径 |
+| `phonemic/tunnel/e2ee.py` | 修改 | `SecureChannel` 用 `auth_method` 替代 `_algorithm`；`SecureSession.receive_auth` / `make_auth_challenge` 增加 TOFU 分叉；删除 `_token` 路径；新增 `_generate_pin()` 与 `make_sealed_pin()`（§5.5.1） |
 | `phonemic/tunnel/mode.py` | 修改 | `effective_algorithm` → `effective_auth_method` |
 | `phonemic/utils/settings_manager.py` | 修改 | `e2ee_algorithm` → `auth_method` + 迁移逻辑 |
-| `phonemic/server/api.py` | 修改 | `_handle_auth` 无 `needs_auth=False` 跳过分支；auth 帧解析按 `auth_method` 分叉；TOFU 审批等待逻辑；`APPROVAL_TIMEOUT = 30` 常量 |
+| `phonemic/server/api.py` | 修改 | `_handle_auth` 无 `needs_auth=False` 跳过分支；auth 帧解析按 `auth_method` 分叉；TOFU 先下发密封识别码再进审批等待；`APPROVAL_TIMEOUT = 30` 常量 |
 | `phonemic/PhoneMic.py` | 修改 | `SecureChannel` 构造参数从 `algorithm=` 改为 `auth_method=` |
 | `phonemic/gui/dashboard.py` | 修改 | 加密开关 → 认证方式选择（TOFU / 扫码）；CF 模式下强制扫码；TOFU 审批通知 UI（主界面内嵌，非弹窗） |
-| `phonemic/resources/crypto_providers.js` | 修改 | 删除 `PlainProvider`；新增 `plaintextAuthData()` |
-| `phonemic/resources/mobile.html` | 修改 | `SecureClient.init` / `makeAuth` / `makeAuthProof` 增加分叉；sodium.js 无条件加载；识别码生成与显示；localStorage 持久化 |
-| `tests/test_e2ee.py` | 修改 | 移除 `none` 模式测试；新增 TOFU 握手测试 |
-| `tests/test_e2ee_server.py` | 修改 | 同上 |
+| `phonemic/resources/crypto_providers.js` | 修改 | 删除 `PlainProvider`；新增 `plaintextAuthData()` / `unsealAssignedPin()` / `sameBytes()` |
+| `phonemic/resources/mobile.html` | 修改 | `SecureClient.init` / `makeAuth` / `makeAuthProof` 增加分叉；sodium.js 无条件加载；**删除手机端识别码生成**，改由第 2 步 `receiveSealedPin()` 接收后显示；localStorage 持久化 |
+| `tests/test_e2ee.py` | 修改 | 移除 `none` 模式测试；新增 TOFU 握手测试与「窃听者」一组（§5.5.1） |
+| `tests/test_e2ee_server.py` | 修改 | 同上，并覆盖「识别码先到、审批后到」的顺序保证 |
 
 ### 测试要点
 
-- TOFU 首次握手往返：`auth(明文+pin) → 审批 → auth_challenge(SealedBox) → auth_proof(加密) → config(加密)`
+- TOFU 首次握手往返：`auth(明文 algo+pk) → sealed(PC 指派的识别码) → 审批 → auth_challenge(SealedBox) → auth_proof(加密) → config(加密)`
 - TOFU 首次 ECDH 一致性：PC 和手机独立计算 `session_key`，Provider 加解密往返成功
 - TOFU 重连握手：等同 URL fragment 认证，`auth(SealedBox) → auth_challenge(Provider加密) → auth_proof(加密)`
 - TOFU 审批拒绝：用户点"拒绝" → close 4032，手机端停止重连
 - TOFU 审批超时：30s 无操作 → close 4032（reason="timeout"）
-- TOFU 手机端 auth_challenge 等待超时：35s（30s 审批 + 5s 容错）后手机端主动断开
-- 识别码核对：手机生成码 = PC 显示码
+- TOFU 手机端等待超时：35s（30s 审批 + 5s 容错，自 auth 发出起算、覆盖第 2 步与第 4 步）后手机端主动断开
+- 识别码指派：auth 帧不含 `pin`；两条独立连接拿到两个不同识别码；对端塞进 auth 的 `pin` 字段被忽略
+- 识别码核对：手机显示的 = PC 审批通知显示的（同源）
+- 窃听者（§5.5.1）：重放真机 auth 后密封包只有真机解得开；用自己密钥对连 PC 拿不到手机的码
 - localStorage 失效（PC 重启）：旧公钥 SealedBox 解封失败 → close 4001 → 手机清除 localStorage → 自动重连走 TOFU 首次路径 → 审批通过 → 新公钥存入 localStorage
 - 4001 后自动重连：手机收到 4001 且有 localStorage → 自动清除并重连，不需要用户手动操作
 - 认证模式回归：现有 `test_e2ee_server.py::TestAuthHandshake` 全部通过（零改动）
@@ -1030,7 +1116,7 @@ TOFU 首次连接相对现状是**明确的净改进**——消除了明文通�
 | 文档 | 影响 |
 |---|---|
 | `crypto-design.md` | §2 威胁模型表更新（无明文行，新增 TOFU）；§3 新增 `handle_tofu_auth`；§4 删除 `PlainProvider`；§7 `needs_auth` 恒为 True |
-| `wire-protocol.md` | §4 加密边界更新（无明文路径）；§5 握手流程增加 TOFU 分支；§6 type 表 `auth` 帧增加 `algo`/`pk`/`pin` 明文字段说明；§10 状态表删除明文行 |
+| `wire-protocol.md` | §4 加密边界更新（无明文路径）；§5 握手流程增加 TOFU 分支（含第 2 步 `sealed`）；§6 type 表 `auth` 帧为 `algo`/`pk` 明文字段说明 + 新增下行 `sealed` 类型；§10 状态表删除明文行 |
 | 本文档 | 以上变更的完整设计依据 |
 
 实现时需同步更新 `crypto-design.md` 和 `wire-protocol.md` 的相关章节，保持文档与代码一致。

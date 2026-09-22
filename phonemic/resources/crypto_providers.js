@@ -19,6 +19,8 @@
  *   组装、识别均由上层 SecureClient 处理，Provider 不参与握手
  *
  * TOFU 首次连接（明文 auth）由 SecureClient 直接组装，不走 Provider。
+ * PC 指派的识别码也由 SecureClient 走 Provider 外的 SealedBox 路径解封
+ * （unsealAssignedPin）——此时双方还没有会话密钥，Provider 尚未可用。
  */
 
 // 8 字节大端 seq 编解码（与 Python 端 _SEQ_LEN=8 / to_bytes(8,'big') 一致）
@@ -31,6 +33,15 @@ function seqFromBytes(b) {
     let n = 0;
     for (let i = 0; i < 8; i++) n = n * 256 + b[i];
     return n;
+}
+
+/** 定长字节串比较（TOFU 的挑战 nonce 必须与 sealed 帧同源，见 SecureClient）。 */
+function sameBytes(a, b) {
+    if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) return false;
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
 }
 
 /**
@@ -65,19 +76,42 @@ function unsealTofuChallenge(sealedBytes, phonePrivateKey) {
 }
 
 /**
+ * 解封 PC 端 SealedBox 密封下发的 TOFU 识别码（第 2 步下行帧）。
+ * 返回 { pin, nonce }：pin 大字显示给用户核对，nonce 必须与随后的
+ * auth_challenge 同源（同一条连接），由上层校验。
+ *
+ * 识别码**由 PC 指派**，手机不生成也不回帧——因此它在明文链路上不可被抄走，
+ * 也不存在用可控输入撞同一个码的空间（e2ee-always-on-design.md §5.5.1）。
+ *
+ * @param {Uint8Array} sealedBytes - SealedBox 密文
+ * @param {Uint8Array} phonePrivateKey - 手机私钥原始字节
+ */
+function unsealAssignedPin(sealedBytes, phonePrivateKey) {
+    const phonePublicKey = sodium.crypto_scalarmult_base(phonePrivateKey);
+    const inner = sodium.crypto_box_seal_open(
+        sealedBytes, phonePublicKey, phonePrivateKey);
+    const obj = JSON.parse(sodium.to_string(inner));
+    return {
+        pin: obj.pin,
+        nonce: sodium.from_base64(obj.nonce, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+    };
+}
+
+/**
  * TOFU 首次连接的明文 auth 载荷。
  *
- * 首次连接没有 PC 公钥，无法密封，故三项均为明文：
+ * 首次连接没有 PC 公钥，无法密封，故两项均明文：
  * - algo：算法名。无信任锚时保密算法列表无安全意义，且服务端需要它来建 Provider
  * - pk：手机临时 X25519 公钥（32B）。公钥本身即公开值
- * - pin：4 位识别码。供用户核对手机与 PC 屏幕，防「他人抢先连接」
+ *
+ * **不带识别码**：识别码改由 PC 指派、密封下发给这一方（unsealAssignedPin）。
+ * 手机上不再存在任何「可复制、可重放」的识别码，抄走它这条路因此被堵死。
  */
-function plaintextAuthData(providerName, phonePublicKey, pin) {
+function plaintextAuthData(providerName, phonePublicKey) {
     return {
         type: 'auth',
         algo: providerName,
         pk: phonePublicKey,          // Uint8Array，msgpack 编码为 bin
-        pin: pin,                    // 4 位识别码字符串
     };
 }
 

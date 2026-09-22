@@ -77,7 +77,7 @@ class CryptoProvider(ABC):
 | 路径 | 信任锚 | 首次需审批 | 握手帧 |
 |---|---|---|---|
 | URL fragment（QR） | QR fragment 中的 PC 公钥（带外分发） | 否 | `auth`(SealedBox) → `auth_challenge`(Provider) → `auth_proof` |
-| TOFU | 首次无 ⇒ 人工审批 + 识别码核对；审批后 PC 公钥存 localStorage | 是（仅首次） | `auth`(明文 `algo`/`pk`/`pin`) → `auth_challenge`(**SealedBox**) → `auth_proof`(Provider) |
+| TOFU | 首次无 ⇒ 人工审批 + 识别码核对；审批后 PC 公钥存 localStorage | 是（仅首次） | `auth`(明文 `algo`/`pk`) → `sealed`(**SealedBox**，PC 指派识别码) → `auth_challenge`(**SealedBox**) → `auth_proof`(Provider) |
 
 TOFU 重连与 URL fragment 完全同构（手机已持有 PC 公钥，走 SealedBox），差异只在首次连接。
 
@@ -196,20 +196,26 @@ self._provider = create_provider(algo, session_key)                    # 才知�
 
 ### 3.5 TOFU 首次：明文 auth 是唯一例外
 
-TOFU 首次连接时手机没有 PC 公钥，**无法**密封 `auth`——这是"信任锚尚未建立"的直接后果，不是可以绕过的实现细节。因此该帧走明文（`{"type":"auth","algo":...,"pk":<bin>,"pin":...}`），密钥材料只有公钥，保密性无损失：
+TOFU 首次连接时手机没有 PC 公钥，**无法**密封 `auth`——这是"信任锚尚未建立"的直接后果，不是可以绕过的实现细节。因此该帧走明文（`{"type":"auth","algo":...,"pk":<bin>}`），密钥材料只有公钥，保密性无损失：
 
 - `pk` 是手机临时公钥，本身即公开值；被动窃听者拿到它也算不出 `shared`（Curve25519 DLP）。
 - `algo` 明文暴露服务端算法列表——仅在"无信任锚"的首次连接上发生，且服务端的算法列表不是秘密（可枚举）。
-- `pin` 是给**用户**核对的识别码（见 `e2ee-always-on-design.md` §5.5），不是密码学凭据。
+- **帧里没有识别码**：识别码**由 PC 指派**并密封下发给这一方（`sealed` 帧，`SealedBox(phone_public)`），
+  手机解封后只用于显示、不回任何帧。理由见 `e2ee-always-on-design.md` §5.5.1——自选自报 + 明文
+  传输的识别码可被同网段窃听者抄走复用，那是一次被动窃听即可确定性得手的攻击。
 
-关键设计：**审批在 ECDH 之前、`auth_challenge` 必须等审批通过才发**。`auth_challenge` 里含 PC 公钥（= token），只有审批通过才允许暴露给对端——否则未授权的连接方可以借此拿到 token，绕过审批直接走认证路径重连。所以：
+同一条对称性是这条通道存在与否的全部依据：**PC 已从明文 auth 拿到 `phone_pub`，所以 PC 能密封；
+手机还没有 `pc_pub`，所以手机不能密封。** 因此 `sealed` 帧与 `auth_challenge` 一样是"明文帧 + 内容为密文"。
+
+关键设计：**审批在 ECDH 之前、`auth_challenge` 必须等审批通过才发**。`auth_challenge` 里含 PC 公钥（= token），只有审批通过才允许暴露给对端——否则未授权的连接方可以借此拿到 token，绕过审批直接走认证路径重连。`sealed` 不含 PC 公钥，故可以先于审批下发（用户开始核对之前，手机上必须已经有一个码）。所以：
 
 ```
-receive_auth(明文) → 只解析字段，不做 ECDH，不建 Provider   # 被拒绝的连接零计算开销
+receive_auth(明文) → 只解析字段，指派识别码 + 生成挑战 nonce，不做 ECDH，不建 Provider
+下发 sealed（SealedBox(phone_public)：{pin, nonce}）
 审批通过 → complete_tofu_auth()：handle_tofu_auth() → create_provider()
 ```
 
-`SecureSession` 因此有三个协作点：`receive_auth()` 返回 `(algo, session_key_or_none, pin_or_none, phone_pk_or_none)`；`complete_tofu_auth()` 在审批通过后补上 ECDH + Provider；`make_auth_challenge()` 在 TOFU 首次下改发 `SealedBox(phone_public)` 包裹的 `{pc_public, nonce}`（手机此刻还没有 Provider，无法用对称加密收挑战）。
+`SecureSession` 因此有四个协作点：`receive_auth()` 返回 `(algo, session_key_or_none, pin_or_none, phone_pk_or_none)`（TOFU 首次下 `pin` 是**本机指派**的）；`make_sealed_pin()` 产出第 2 步的密封帧；`complete_tofu_auth()` 在审批通过后补上 ECDH + Provider；`make_auth_challenge()` 在 TOFU 首次下改发 `SealedBox(phone_public)` 包裹的 `{pc_public, nonce}`，且 **nonce 复用第 2 步那一个**（手机据此校验两条下行帧同源；手机此刻还没有 Provider，无法用对称加密收挑战）。
 
 ---
 
@@ -334,7 +340,7 @@ class AESGCMProvider(CryptoProvider):
 
 1. **握手判定**：`needs_auth` **恒为 `True`**（`e2ee.py` 的 `SecureChannel`/`SecureSession`）——所有模式都需要握手，不存在跳过握手的路径。消息层期待 `auth` 消息帧：
    - 帧含 `data`（bytes）⇒ 交 `KeyExchange.handle_auth` 解封，返回 `(algo, session_key)`，经 `create_provider` 建 Provider，此后连 `auth_challenge` 在内整帧走 Provider。
-   - 帧含明文 `algo`/`pk`/`pin` ⇒ TOFU 首次：`receive_auth` 只解析字段（**不建 Provider**），消息层等待审批；通过后调 `complete_tofu_auth()` 走 `handle_tofu_auth` 补上 ECDH + Provider，再发 `auth_challenge`（SealedBox 加密，见 §3.5）；拒绝 / 超时（30s）→ WS close 4032。
+   - 帧含明文 `algo`/`pk` ⇒ TOFU 首次：`receive_auth` 只解析字段并**指派识别码 + 生成挑战 nonce**（**不建 Provider**），消息层先发 `sealed`（SealedBox 加密，见 §3.5）再等待审批；通过后调 `complete_tofu_auth()` 走 `handle_tofu_auth` 补上 ECDH + Provider，再发 `auth_challenge`（SealedBox 加密，nonce 与 `sealed` 同源）；拒绝 / 超时（30s）→ WS close 4032。
    握手第三步（`auth_proof` 的 `nonce` 校验）属于消息层，见 `wire-protocol.md` §7：认证前失败 → WS close 4001 + reason；`nonce` 不符 / 超时 → 加密 `error(code:"auth")`。
 2. **数据帧**：消息层把编码后的字节交给 `provider.encrypt()`，密文原样上 WS binary 帧；收到 binary 帧交给 `provider.decrypt()`，把返回的字节交给编码层解析。
 3. **错误映射**：`CryptoError` → `error(code:"decrypt")`；`ReplayError` → `error(code:"replay")`。统一丢弃 + 回 error，连续 N 次断连（code 表见 `wire-protocol.md` §7 的 error 小节）。

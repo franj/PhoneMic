@@ -7,6 +7,7 @@ SecureChannel / SecureSession 单元测试。
 - receive_auth() 返回 (algo, session_key, pin, phone_pk) 元组
 - make_auth_challenge() 返回线上字节（bytes）
 - verify_auth_proof() 不再需要外部传入 nonce
+- 识别码由 PC 指派并密封下发：make_sealed_pin()，auth 帧不带 pin
 """
 
 import base64
@@ -47,15 +48,29 @@ def make_phone_auth(sc, algorithm=ALGO):
     return {"type": "auth", "data": sb.encrypt(inner)}, phone_private
 
 
-def make_tofu_first_auth(algorithm=ALGO, pin="3847"):
-    """模拟手机端 TOFU 首次连接：明文 auth，返回 (auth_msg, phone_private)。"""
+import re
+
+
+def make_tofu_first_auth(algorithm=ALGO):
+    """模拟手机端 TOFU 首次连接：明文 auth，返回 (auth_msg, phone_private)。
+
+    识别码**不在** auth 帧里（由 PC 指派并密封下发，见 design §5.5.1）。
+    """
     phone_private = PrivateKey.generate()
     return {
         "type": "auth",
         "algo": algorithm,
         "pk": bytes(phone_private.public_key),
-        "pin": pin,
     }, phone_private
+
+
+def unseal_sealed_pin(session, phone_private):
+    """模拟手机端解封 PC 密封下发的识别码帧，返回 (pin, nonce)。"""
+    frame = frame_decode(session.make_sealed_pin())
+    assert frame["type"] == "sealed"
+    inner = SealedBox(phone_private).decrypt(bytes(frame["data"]))
+    data = json.loads(inner)
+    return data["pin"], _from_b64(data["nonce"])
 
 
 def do_url_fragment_handshake(session, auth_msg_and_pk):
@@ -86,26 +101,32 @@ def do_url_fragment_handshake(session, auth_msg_and_pk):
 
 
 def do_tofu_first_handshake(session, auth_msg_and_pk):
-    """跑完 TOFU 首次三步握手（含模拟审批）。
+    """跑完 TOFU 首次五步握手（含密封下发识别码 + 模拟审批）。
 
-    auth(明文) → complete_tofu_auth → auth_challenge(SealedBox) → auth_proof
+    auth(明文algo+pk) → sealed(nonce+pin) → complete_tofu_auth →
+    auth_challenge(SealedBox) → auth_proof
     """
     auth_msg, phone_private = auth_msg_and_pk
     algo, session_key, pin, phone_pk = session.receive_auth(auth_msg)
-    assert pin is not None  # TOFU 首次有 pin
+    assert re.fullmatch(r"\d{4}", pin), f"识别码应由 PC 指派为 4 位数字: {pin}"
     assert session_key is None  # 尚未做 ECDH
 
-    # 模拟审批通过
+    # 第 2 步：PC 密封下发识别码（同一 nonce 稍后复用为挑战 nonce）
+    sealed_pin, sealed_nonce = unseal_sealed_pin(session, phone_private)
+    assert sealed_pin == pin
+
+    # 模拟用户核对后点「接受」
     session.complete_tofu_auth(algo, phone_pk)
 
     challenge_bytes = session.make_auth_challenge()
 
-    # 手机端解封 SealedBox 取 pc_public + nonce
+    # 手机端解封 SealedBox 取 pc_public + nonce（nonce 必须与识别码同源）
     sealed_data = frame_decode(challenge_bytes)["data"]
     inner = SealedBox(phone_private).decrypt(bytes(sealed_data))
     msg = json.loads(inner)
     pc_public = _from_b64(msg["pk"])
     nonce = _from_b64(msg["nonce"])
+    assert nonce == sealed_nonce, "挑战 nonce 必须与下发识别码那条同源"
 
     # 手机端做 ECDH + 创建 Provider
     shared = crypto_scalarmult(bytes(phone_private), pc_public)
@@ -467,17 +488,55 @@ class TestSessionIsolation:
 
 class TestTofuFirstHandshake:
     def test_receive_tofu_first_auth(self):
-        """TOFU 首次：明文 auth，返回 (algo, None, pin, phone_pk)。"""
+        """TOFU 首次：明文 auth 不带 pin，PC 返回自己指派的 (algo, None, pin, phone_pk)。"""
         sc = SecureChannel(auth_method="tofu", mode="lan")
         session = sc.new_session()
-        auth_msg, phone_private = make_tofu_first_auth(pin="1234")
+        auth_msg, phone_private = make_tofu_first_auth()
         algo, session_key, pin, phone_pk = session.receive_auth(auth_msg)
         assert algo == ALGO
         assert session_key is None  # 尚未做 ECDH
-        assert pin == "1234"
+        assert pin is not None and re.fullmatch(r"\d{4}", pin)
         assert phone_pk == bytes(phone_private.public_key)
         assert session.is_tofu_first is True
         assert session.is_authenticated is False
+
+    def test_auth_frame_has_no_pin_field(self):
+        """识别码不上明文链路：手机发出的 auth 帧里没有 pin 字段（抄不走）。"""
+        auth_msg, _ = make_tofu_first_auth()
+        assert "pin" not in auth_msg
+
+    def test_assigned_pin_is_not_taken_from_auth_frame(self):
+        """窃听到的 auth + 自己的密钥对 → PC 指派的识别码与认码方无关。
+
+        攻击者即便在 auth 里塞一个自己挑的 pin，session 也完全不读这个字段。
+        """
+        sc = SecureChannel(auth_method="tofu", mode="lan")
+        session = sc.new_session()
+        auth_msg, _ = make_tofu_first_auth()
+        auth_msg["pin"] = "0000"          # 模拟攻击者塞入自定义识别码
+        pin = session.receive_auth(auth_msg)[2]
+        assert pin != "0000"
+        assert session.pin == pin
+
+    def test_sealed_pin_is_independent_per_connection(self):
+        """两次连接拿到两个独立随机的识别码——攻击者没有可控输入可撞。"""
+        sc = SecureChannel(auth_method="tofu", mode="lan")
+        pins = set()
+        for _ in range(8):
+            session = sc.new_session()
+            auth_msg, phone_private = make_tofu_first_auth()
+            session.receive_auth(auth_msg)
+            pins.add(unseal_sealed_pin(session, phone_private)[0])
+        assert len(pins) > 1, "识别码必须与连接绑定、每次独立随机"
+
+    def test_sealed_pin_requires_tofu_first(self):
+        """非 TOFU 首次握手没有这一步（也不需要——那条路径本来就有信任锚）。"""
+        sc = SecureChannel(auth_method="url_fragment")
+        session = sc.new_session()
+        algo, sk, _, _ = session.receive_auth(make_phone_auth(sc)[0])
+        session.create_provider(algo, sk)
+        with pytest.raises(CryptoError):
+            session.make_sealed_pin()
 
     def test_complete_tofu_auth_creates_provider(self):
         """审批通过后 complete_tofu_auth 做 ECDH + 创建 Provider。"""
@@ -536,7 +595,7 @@ class TestTofuFirstHandshake:
         assert phone_provider.decrypt(ct) == frame_encode({"type": "test"})
 
     def test_tofu_first_missing_fields_raises(self):
-        """TOFU 首次 auth 缺少 algo 或 pk 时抛 CryptoError。"""
+        """TOFU 首次 auth 缺少 algo 或 pk 时抛 CryptoError（含过去缺一不可的 pin 已不再必需）。"""
         sc = SecureChannel(auth_method="tofu", mode="lan")
         session = sc.new_session()
         with pytest.raises(CryptoError):
@@ -550,6 +609,56 @@ class TestTofuFirstHandshake:
         session = sc.new_session()
         with pytest.raises(CryptoError):
             session.receive_auth({"type": "auth", "algo": ALGO, "pk": "not_bytes", "pin": "1234"})
+
+
+# ---------- 窃听者攻击（design §5.5.1） ----------
+
+class TestEavesdropperCannotStealPin:
+    """design §5.5.1 的两条攻击——两条都堵死了，各有一条用例对应。"""
+
+    def test_replayed_auth_unsealable_only_by_the_real_phone(self):
+        """抄 auth 重放：PC 的密封包只有真机解得开。
+
+        攻击者重放真机的 {algo, pk} 确实能让 PC 显示**真机那条连接的**识别码，
+        但他没有 sk_手机 ⇒ 解不开 ⇒ 自己屏幕上不会出现这个码 ⇒ 用户核对失败。
+        """
+        sc = SecureChannel(auth_method="tofu", mode="lan")
+        victim_auth, victim_private = make_tofu_first_auth()
+
+        recorded_session = sc.new_session()
+        recorded_session.receive_auth(dict(victim_auth))
+        sealed_frame = frame_decode(recorded_session.make_sealed_pin())
+
+        # 真机能解开，且解出的正是 PC 审批通知要显示的那个
+        assert unseal_sealed_pin(recorded_session, victim_private)[0] == recorded_session.pin
+        # 攻击者（拿的是自己的私钥）解不开
+        with pytest.raises(Exception):
+            SealedBox(PrivateKey.generate()).decrypt(bytes(sealed_frame["data"]))
+
+    def test_own_keypair_cannot_influence_the_assigned_pin(self):
+        """用自己的密钥对连 PC：PC 指派的识别码与真机屏幕上的那个无关。
+
+        PC 独立随机指派 ⇒ 与攻击者任何可控输入无关 ⇒ 没有 10^4 的枚举空间可刷，
+        两边撞到同一个值的概率只有 1/10^4（且攻击者解不开密封包、无从判断是否撞中）。
+        """
+        sc = SecureChannel(auth_method="tofu", mode="lan")
+
+        victim_auth, victim_private = make_tofu_first_auth()
+        victim_session = sc.new_session()
+        victim_session.receive_auth(victim_auth)
+        pin_on_phone = unseal_sealed_pin(victim_session, victim_private)[0]
+
+        attacker_auth, attacker_private = make_tofu_first_auth()
+        attacker_session = sc.new_session()
+        attacker_session.receive_auth(attacker_auth)
+        pin_on_pc = unseal_sealed_pin(attacker_session, attacker_private)[0]
+
+        assert re.fullmatch(r"\d{4}", pin_on_phone)
+        assert re.fullmatch(r"\d{4}", pin_on_pc)
+        assert pin_on_pc != pin_on_phone, (
+            "两条独立连接拿到同一个识别码：概率 1/10^4，重跑确认；"
+            "若必现则说明指派逻辑退化成了常量"
+        )
 
 
 # ---------- TOFU 重连（等同 url_fragment） ----------

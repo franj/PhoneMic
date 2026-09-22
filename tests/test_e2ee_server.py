@@ -11,6 +11,7 @@ SecureChannel 服务器端集成测试。
 import base64
 import json
 import multiprocessing
+import re
 import time
 import urllib.request
 import urllib.error
@@ -83,6 +84,8 @@ class PhoneSimulator:
         self._phone_public = self._phone_private.public_key
         self._provider = None
         self._pc_public = None
+        # TOFU 首次：第 2 步下发的 nonce（随后的 auth_challenge 必须同源）
+        self._tofu_nonce = None
         if pc_public_key_b64 is not None:
             self._setup_with_pc_key(pc_public_key_b64)
 
@@ -128,19 +131,35 @@ class PhoneSimulator:
 
     # ---- TOFU 首次 ----
 
-    def make_tofu_first_auth(self, pin: str = "1234") -> dict:
-        """明文 auth——TOFU 首次连接路径。"""
+    def make_tofu_first_auth(self) -> dict:
+        """明文 auth——TOFU 首次连接路径。
+
+        不再携带识别码：识别码由 **PC 指派**并密封下发（design §5.5.1），
+        手机上没有任何「可被抄走」的东西。
+        """
         if self._provider is not None and hasattr(self._provider, "reset"):
             self._provider.reset()
         return {
             "type": "auth",
             "algo": self._algo,
             "pk": bytes(self._phone_public),
-            "pin": pin,
         }
 
+    def read_sealed_pin(self, frame: bytes) -> str:
+        """第 2 步：解封 PC 密封下发的识别码，返回 4 位识别码（同时记住 nonce）。"""
+        msg = frame_decode(frame)
+        assert msg.get("type") == "sealed", msg
+        inner = SealedBox(self._phone_private).decrypt(bytes(msg["data"]))
+        data = json.loads(inner)
+        self._tofu_nonce = base64.urlsafe_b64decode(data["nonce"] + "==")
+        return data["pin"]
+
     def answer_tofu_challenge(self, frame: bytes) -> bytes:
-        """解封 SealedBox 挑战，做 ECDH 创建 Provider，回 auth_proof。"""
+        """解封 SealedBox 挑战，做 ECDH 创建 Provider，回 auth_proof。
+
+        挑战里的 nonce 必须与第 2 步的识别码帧同源——同一条连
+        接、同一个对端（design §5.5.1 要点第 2 条）。
+        """
         msg = frame_decode(frame)
         assert msg.get("type") == "auth_challenge", msg
         sealed = bytes(msg["data"])
@@ -148,18 +167,23 @@ class PhoneSimulator:
         data = json.loads(inner)
         pc_public = base64.urlsafe_b64decode(data["pk"] + "==")
         nonce = base64.urlsafe_b64decode(data["nonce"] + "==")
+        assert nonce == self._tofu_nonce, "挑战 nonce 与识别码帧不同源"
         shared = crypto_scalarmult(bytes(self._phone_private), pc_public)
         session_key = blake2b(shared, digest_size=32).digest()
         self._provider = create_provider(self._algo, session_key)
         return self.encrypt({"type": "auth_proof", "nonce": nonce})
 
-    def tofu_handshake(self, ws, queue) -> None:
-        """TOFU 首次三步握手（含审批）。"""
+    def tofu_handshake(self, ws, queue) -> str:
+        """TOFU 首次五步握手（含识别码下发与审批），返回 PC 指派的识别码。"""
         ws.send(frame_encode(self.make_tofu_first_auth()))
+        # 第 2 步先到：PC 密封下发的识别码（手机上显示、供用户核对）
+        pin = self.read_sealed_pin(ws.recv(timeout=5))
         msg_type, text = queue.get(timeout=5)
         assert msg_type == "approval_request"
+        assert text["pin"] == pin, "PC 审批通知显示的必须是同一个识别码"
         resolve_approval(True)
         ws.send(self.answer_tofu_challenge(ws.recv(timeout=5)))
+        return pin
 
     # ---- 加解密 ----
 
@@ -393,17 +417,20 @@ class TestTofuHandshake:
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "connect"
 
-    def test_tofu_first_approval_request_has_pin(self, tofu_server):
-        """审批事件携带 4 位 PIN 和客户端 IP。"""
+    def test_tofu_first_sealed_pin_arrives_before_approval(self, tofu_server):
+        """识别码先到、审批后到：用户开始核对之前，手机上必须已经有码了。"""
         host, port, queue, sc = tofu_server
         phone = PhoneSimulator()
 
         with ws_connect(ws_url(host, port, sc)) as ws:
-            ws.send(frame_encode(phone.make_tofu_first_auth(pin="5678")))
+            ws.send(frame_encode(phone.make_tofu_first_auth()))
+            # 尚未审批就已收到第 2 步的密封帧（审批请求此刻还排在队里或还没发）
+            pin = phone.read_sealed_pin(ws.recv(timeout=5))
+            assert re.fullmatch(r"\d{4}", pin), f"识别码应为 4 位数字: {pin}"
+
             msg_type, text = queue.get(timeout=5)
             assert msg_type == "approval_request"
-            assert text["pin"] == "5678"
-            assert "ip" in text
+            assert text["pin"] == pin
             resolve_approval(True)
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
             msg_type, text = queue.get(timeout=2)
@@ -416,6 +443,7 @@ class TestTofuHandshake:
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(frame_encode(phone.make_tofu_first_auth()))
+            phone.read_sealed_pin(ws.recv(timeout=5))
             msg_type, text = queue.get(timeout=5)
             assert msg_type == "approval_request"
             resolve_approval(False)
@@ -468,6 +496,7 @@ class TestTofuHandshake:
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(frame_encode(phone.make_tofu_first_auth()))
+            phone.read_sealed_pin(ws.recv(timeout=5))
             msg_type, text = queue.get(timeout=5)
             assert msg_type == "approval_request"
 
@@ -477,3 +506,67 @@ class TestTofuHandshake:
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
             msg_type, text = queue.get(timeout=2)
             assert msg_type == "connect"
+
+
+class TestTofuEavesdropper:
+    """design §5.5.1：窃听者拿走 auth 也没用——两边的识别码对不上。
+
+    旧实现里识别码由手机自选且明文传输：窃听到 ``pin=3847`` 后用自己的密钥对
+    连 PC，PC 审批通知上显示的与手机屏幕完全一致 ⇒ 一次被动窃听 + 一次主动
+    连接即确定性得手。现在识别码由 PC 指派、每连接独立，且从不上明文链路。
+    """
+
+    def _first_leg(self, host, port, queue, sc):
+        """跑一次「真机」连接，返回（真机模拟器，PC 指派的识别码）。"""
+        phone = PhoneSimulator()
+        ws = ws_connect(ws_url(host, port, sc))
+        ws.send(frame_encode(phone.make_tofu_first_auth()))
+        pin = phone.read_sealed_pin(ws.recv(timeout=5))
+        # 前一条连接断开留下的 "disconnect" 事件先出队，跳过等-event
+        while True:
+            msg_type, text = queue.get(timeout=5)
+            if msg_type == "approval_request":
+                break
+        assert text["pin"] == pin
+        resolve_approval(True)
+        ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
+        assert queue.get(timeout=2)[0] == "connect"
+        ws.close()
+        return phone, pin
+
+    def test_two_connections_get_different_pins(self, tofu_server):
+        """两条独立连接拿到两个独立随机的识别码——没有可控输入可以把它对齐。"""
+        host, port, queue, sc = tofu_server
+        _, pin_real = self._first_leg(host, port, queue, sc)
+        _, pin_other = self._first_leg(host, port, queue, sc)
+
+        assert re.fullmatch(r"\d{4}", pin_real)
+        assert re.fullmatch(r"\d{4}", pin_other)
+        assert pin_real != pin_other, (
+            "两条连接撞到同一个识别码（概率 1/10^4，重跑确认）；"
+            "若必现则说明识别码不再是 PC 独立随机指派"
+        )
+
+    def test_pin_field_in_auth_frame_is_ignored(self, tofu_server):
+        """窃听者（或旧式客户端）在 auth 里塞一个自定义识别码：服务端完全不读它。
+
+        这是「抄真机明文识别码、换个密钥对复用」这条攻击在新实现里的落点：
+        对端提供的 ``pin`` 字段不是真源，PC 指派的那一个才是。
+        """
+        host, port, queue, sc = tofu_server
+        phone = PhoneSimulator()
+
+        with ws_connect(ws_url(host, port, sc)) as ws:
+            auth = phone.make_tofu_first_auth()
+            auth["pin"] = "0000"      # 攻击者想让电脑显示这个码
+            ws.send(frame_encode(auth))
+
+            pin = phone.read_sealed_pin(ws.recv(timeout=5))
+            assert pin != "0000", "识别码必须由 PC 指派，不能采信 auth 帧里的值"
+
+            msg_type, text = queue.get(timeout=5)
+            assert msg_type == "approval_request"
+            assert text["pin"] == pin
+            resolve_approval(True)
+            ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
+            assert queue.get(timeout=2)[0] == "connect"

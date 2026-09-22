@@ -141,7 +141,8 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 | 帧 | 加密方式 |
 |---|---|
 | `auth`（URL fragment / TOFU 重连） | **明文帧**：`type` 明文（服务端要先知道这是 auth）；`data` 为 SealedBox 密文，内含 `algo` 与手机临时 X25519 公钥，均不出现在线上明文 |
-| `auth`（TOFU 首次） | **明文帧**：手机尚无 PC 公钥、无从密封，故 `algo` / `pk`(bin) / `pin` 三项明文（见 §5） |
+| `auth`（TOFU 首次） | **明文帧**：手机尚无 PC 公钥、无从密封，故 `algo` / `pk`(bin) 两项明文（见 §5）。**不带识别码**——识别码由 PC 指派、密封下发（`e2ee-always-on-design.md` §5.5.1） |
+| `sealed`（TOFU 首次第 2 步） | **明文帧**：`type` 明文，`data` 为 SealedBox(phone_public) 密文，内含 PC 指派给本连接的 4 位识别码与握手 `nonce` |
 | `auth_challenge` 及之后所有帧 | **对称整帧加密**（含 `type`），Provider 输出直接上帧。**例外**：TOFU 首次的 `auth_challenge` 用 `SealedBox(phone_public)` 加密（此时手机还没有 Provider） |
 
 - **会话状态是权威**：`is_encrypted` **恒为真**，接收端永远知道该解；**绝不"解密失败就当明文"**（安全论证见 `crypto-design.md` §7）。
@@ -149,7 +150,7 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 - **`needs_auth` 恒为真**：所有连接都必须完成握手，**不存在"连上即进数据帧"的路径**。
 - **`auth.data` 统一编码为 `bin`**：保证该字段类型唯一，接收端不需要按模式分支判断是 str 还是 bin。
 - **握手失败分三类**（详见第 5 / 7 节）：**认证前**（解封失败 / `algo` 不在列表）此刻无密钥可用 → 不回消息层帧，直接 WS close 4001 + reason；**TOFU 审批被拒 / 超时** → WS close 4032；**认证后**（`auth_proof` 的 `nonce` 不符 / 超时）已有会话密钥 → 回**加密的** `error(code:"auth")` 再关闭。
-- **信任模型**：PC 公钥 = 带外 bearer token，能密封即认证；TOFU 首次用"人工审批 + 4 位识别码核对"临时替代信任锚，审批后 PC 公钥存入手机 `localStorage` 成为后续的 token（`crypto-design.md` §2 / §3.5）。
+- **信任模型**：PC 公钥 = 带外 bearer token，能密封即认证；TOFU 首次用"人工审批 + 4 位识别码核对"临时替代信任锚，审批后 PC 公钥存入手机 `localStorage` 成为后续的 token（`crypto-design.md` §2 / §3.5）。该识别码**由 PC 指派后密封下发**：它既不在 auth 帧里，也不在任何未经加密的字段里，手机全程不发送它（`e2ee-always-on-design.md` §5.5.1）。
 
 ### 4.1 密钥交换独立成类（算法无关）
 
@@ -182,9 +183,12 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 手机                                                  服务端
  │  WS 连接
  │
- │──── auth ──────────────────────────────────────────►│  明文帧  {"type":"auth","algo":"xchacha20","pk":<bin>,"pin":"3847"}
- │                                                      │  ← 主界面显示审批通知（识别码 + 来源 IP）
- │  手机屏幕大字显示识别码 3847                            │  ← 用户核对两边识别码一致 → 点「允许」
+ │──── auth ──────────────────────────────────────────►│  明文帧  {"type":"auth","algo":"xchacha20","pk":<bin>}
+ │                                                      │  ← PC 随机指派 4 位识别码（每连接独立）
+ │◄─── sealed ──────────────────────────────────────────│  明文帧  {"type":"sealed","data":<bin SealedBox(phone_pk)>}
+ │  手机解封 → 大字显示识别码，**不回任何帧**
+ │                                                      │  ← 主界面显示审批通知（同一个识别码 + 来源 IP）
+ │                                                      │  ← 用户核对两边识别码一致 → 点「允许」
  │                                                      │  ← 批准后才做 ECDH + 建 Provider
  │◄─── auth_challenge ─────────────────────────────────│  SealedBox(phone_pk): {"data":<bin {pc_pk,nonce}>}
  │──── auth_proof ────────────────────────────────────►│  加密帧  Provider.encrypt({"type":"auth_proof","nonce":<bin>})
@@ -195,9 +199,9 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
  │  ── 拒绝 / 30s 未操作 ──────────────────────────────►│  WS close 4032（reason="rejected" / "timeout"）
 ```
 
-- `auth_challenge` **必须等审批通过才发**：它是 PC 公钥（= token）的唯一带内分发通道，提前暴露等于让未授权的连接方拿到 token 绕过审批（`crypto-design.md` §3.5）。
+- `auth_challenge` **必须等审批通过才发**：它是 PC 公钥（= token）的唯一带内分发通道，提前暴露等于让未授权的连接方拿到 token 绕过审批（`crypto-design.md` §3.5）。同一条理由不适用于第 2 步的 `sealed`——它里面只有识别码与 nonce、**不含 PC 公钥**，所以可以在审批前下发（而且必须：用户开始核对之前，手机上得先有一个码）。
 - 审批在 ECDH **之前**：收到明文 auth 只解析字段，被拒绝的连接零密钥计算开销。
-- 手机发完 `auth` 后等挑战的上限是 **35s**（= PC 审批超时 30s + 5s 容错），超过即主动断开——`connectTimeout`（3s）只覆盖 WS 连接建立、在 `onopen` 时清除，不覆盖这段人工等待。
+- 手机发完 `auth` 后等挑战的上限是 **35s**（= PC 审批超时 30s + 5s 容错），起算点是 `auth` 发出那一刻，因此第 2 步（纯下行一张帧，正常毫秒级返回）与第 4 步共用这同一份预算。`connectTimeout`（3s）只覆盖 WS 连接建立、在 `onopen` 时清除，不覆盖这段人工等待。
 - PC 侧两次等待（`auth` / `auth_proof`）各自计一份 `AUTH_TIMEOUT`（10s），审批时长不占用任何一方——否则"用户点了允许、auth_proof 却立刻超时"。
 - TOFU 重连（localStorage 有 PC 公钥）完全走 5.1，**不需要审批**：能密封 SealedBox 即持有 token。
 
@@ -222,7 +226,7 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 
 | type | 说明 | payload 字段 |
 |---|---|---|
-| `auth` | 密钥交换（**必发**） | URL fragment / TOFU 重连：`data`(bin SealedBox)；TOFU 首次：`algo`(str)、`pk`(bin)、`pin`(str) |
+| `auth` | 密钥交换（**必发**） | URL fragment / TOFU 重连：`data`(bin SealedBox)；TOFU 首次：`algo`(str)、`pk`(bin) |
 | `auth_proof` | 回显握手 `nonce`，证明持有会话密钥（**必发**） | `nonce`(bin) |
 | `preview` | 输入预览 | `text` |
 | `send` | 文本上屏 | `text` |
@@ -238,6 +242,7 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 | type | 说明 | payload 字段 | 来源 |
 |---|---|---|---|
 | `auth_challenge` | 握手挑战：给出本连接的 `nonce` | URL fragment / TOFU 重连：`nonce`(bin)；TOFU 首次：`data`(bin SealedBox `{pc_pk,nonce}`) | 迁移已有 |
+| `sealed` | TOFU 首次：PC 指派给本连接的 4 位识别码（含同源 `nonce`） | `data`(bin SealedBox `{pin,nonce}`) | 新增（`e2ee-always-on-design.md` §5.5.1） |
 | `config` | 单键配置推送 | `key`、`value` | 迁移 `push_config` |
 | `reconnect` | 要求重新扫码 | `reason` | 迁移 `request_client_rescan` |
 | `rekey` | 密钥轮换 | — | 预留 |
@@ -268,8 +273,10 @@ s→c  {"type":"auth_challenge", "nonce":<bin>}                 ← 加密帧
 c→s  {"type":"auth_proof", "nonce":<bin>}                     ← 加密帧
 
 TOFU 首次（无信任锚）：
-c→s  {"type":"auth", "algo":"xchacha20", "pk":<bin>, "pin":"3847"}   ← 明文帧（三项均明文）
-s→c  {"type":"auth_challenge", "data":<bin SealedBox>}        ← 明文帧（内容为密文）
+c→s  {"type":"auth", "algo":"xchacha20", "pk":<bin>}           ← 明文帧（两项均明文，**不含识别码**）
+s→c  {"type":"sealed", "data":<bin SealedBox>}          ← 明文帧（内容为密文：PC 指派识别码 + nonce）
+c→s  （手机解封后只显示，**不回任何帧**）
+s→c  {"type":"auth_challenge", "data":<bin SealedBox>}        ← 明文帧（内容为密文，审批通过后才发）
 c→s  {"type":"auth_proof", "nonce":<bin>}                     ← 加密帧
 ```
 
@@ -280,8 +287,22 @@ c→s  {"type":"auth_proof", "nonce":<bin>}                     ← 加密帧
 - `algo` 取自二维码 fragment 的 `a=` 列表，服务端解封后校验其属于下发列表。**`algo` 只在密文里出现，从不以明文传输**。
 - 新协议已无 `none` 模式，因此 `data` 在认证路径下恒为 SealedBox 密文，不存在 token 分支。
 - 解封成功**不等于**认证通过，它只建立会话密钥；认证要等第三步（见下）。
-- **TOFU 首次没有 `data`**：手机还没有 PC 公钥、无从密封，故 `algo`(str) / `pk`(bin 32B 手机临时公钥) / `pin`(str 4 位识别码) 三项明文。服务端以"帧里有没有 `data`"区分两条路径：有 `data` ⇒ 解封建 Provider；无 `data` ⇒ 只解析字段、等审批。判据不含 `auth_method`——TOFU 重连也走 `data` 路径（`crypto-design.md` §3.5）。
-- `pin` 是给**用户**核对的识别码，不是密码学凭据：攻击者能看到它，但拿它没法通过审批——用户比对的是手机屏幕与 PC 主界面上的两个码是否**相同**（`e2ee-always-on-design.md` §5.5）。
+- **TOFU 首次没有 `data`**：手机还没有 PC 公钥、无从密封，故 `algo`(str) / `pk`(bin 32B 手机临时公钥) 两项明文。服务端以"帧里有没有 `data`"区分两条路径：有 `data` ⇒ 解封建 Provider；无 `data` ⇒ 只解析字段、指派识别码、等审批。判据不含 `auth_method`——TOFU 重连也走 `data` 路径（`crypto-design.md` §3.5）。
+
+**第 1.5 步 `sealed`（TOFU 首次专属；明文帧，内容为 SealedBox 密文）**
+
+服务端收到明文 auth 后立即下发：指派一个 4 位识别码，连同本次握手的 16 字节 `nonce` 一起用
+`SealedBox(phone_public)` 密封：
+
+```
+s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","nonce":<b64>}>}
+```
+
+- **只有持有 `phone_private` 的一方读得到**——这是它即便走在明文链路上仍算"带外凭据"的唯一理由。
+- 手机解封后**只做显示**，不回任何帧：链路上因此不存在可复制、可重放的识别码。
+- 里面那个 `nonce` 就是第 2 步 `auth_challenge` 要复用的同一个值，客户端据此校验两条下行帧出自同一个对端；不符即拒绝，不进握手。
+- 它可以在审批前下发，因为它**不含 PC 公钥**——PC 公钥（= token）仍然只在审批通过后才出现在线上。
+- 手机上没有"发回去"这一步：解封失败即按握手失败处理（不要把间歇性解密失败当成"重试就好"的问题）。
 
 **第二步 `auth_challenge`（加密；TOFU 首次为 SealedBox）**
 
@@ -293,6 +314,7 @@ c→s  {"type":"auth_proof", "nonce":<bin>}                     ← 加密帧
 - 该 `nonce` 是**消息层的握手随机数**，与 `crypto-design.md` §6 密文布局里的 AEAD nonce（24 字节、由库自动生成、消息层不可见）没有关系。
 - **它不重复"我已经承认你的材料"这件事**：手机能解开这一帧，本身就是"PC 持有正确会话密钥"的证明，不需要再加一句话；`nonce` 在这里的唯一职责是提供新鲜度。
 - **TOFU 首次必须等审批通过才发**，且用 `SealedBox(phone_pk)` 加密 `{"pk":<PC 公钥>,"nonce":<16B>}`——此刻手机还没有 Provider，无法收对称加密帧；同时这也保证 PC 公钥（= token）不会在审批前泄露给对端。手机解封后即可得到 PC 公钥、派生会话密钥，并把 PC 公钥存入 `localStorage`。拒绝 / 超时（30s）时服务端发 `WS close: code=4032`（`reason="rejected"` / `"timeout"`）。
+- **TOFU 首次的 `nonce` 不再现场生成**：它复用第 1.5 步 `sealed` 帧里那一个——两条下行帧由此绑定在同一个对端上，手机检验二者逐字节相同后才进握手。
 
 **第三步 `auth_proof`（加密）**
 
@@ -594,7 +616,7 @@ c→s  {"type":"auth_proof", "nonce":<bin>}                     ← 加密帧
 | 5 | 新增 `key` / `mouse` / `status` | 真机（`key` / `mouse` 已落地，`status` 未做） |
 | 6 | 面板 UI（按钮集内置） | 真机 |
 | 7 | `file` / `photo` 分块 | 真机 |
-| 8 | 加密与认证解耦（设计见 `e2ee-always-on-design.md`）：移除 `none` / `PlainProvider` / token 路径，`auth_method` 取代 `e2ee_algorithm`，新增 TOFU 首次握手（明文 auth + 审批 + SealedBox 挑战）与 `close 4032` | `test_e2ee.py`（三种握手路径）＋ `test_e2ee_server.py::TestTofuHandshake`（审批 / 拒绝 / 重连 / 审批慢于 AUTH_TIMEOUT）＋ 配置迁移测试 |
+| 8 | 加密与认证解耦（设计见 `e2ee-always-on-design.md`）：移除 `none` / `PlainProvider` / token 路径，`auth_method` 取代 `e2ee_algorithm`，新增 TOFU 首次握手（明文 auth → PC 指派并密封下发识别码 → 审批 → SealedBox 挑战）与 `close 4032` | `test_e2ee.py`（三种握手路径＋窃听者一组）＋ `test_e2ee_server.py::TestTofuHandshake`（下发顺序 / 审批 / 拒绝 / 重连 / 审批慢于 AUTH_TIMEOUT）＋ `test_e2ee_server.py::TestTofuEavesdropper` ＋ 配置迁移测试 |
 
 > **进度（2026-09-22）**：阶段 1–3、8 已落地（编解码封装、加密层重构、三步握手、加密与认证解耦），阶段 4–7 见各行内备注。
 

@@ -387,8 +387,14 @@ async def _handle_auth(websocket, session) -> bool:
     三种路径：
       URL fragment / TOFU 重连：auth(SealedBox) → create_provider →
         auth_challenge(Provider加密) → auth_proof
-      TOFU 首次：auth(明文pk+pin) → 审批 → complete_tofu_auth →
-        auth_challenge(SealedBox加密) → auth_proof
+      TOFU 首次：auth(明文pk) → sealed(nonce+PIN, SealedBox) → 审批 →
+        complete_tofu_auth → auth_challenge(SealedBox加密) → auth_proof
+
+    TOFU 首次的识别码**由 PC 指派并密封下发**（e2ee-always-on-design.md §5.5.1）：
+    auth 帧里没有它，手机端也不具备决定它的能力（它还没有 pc_public、无从密封），
+    因此它不可能被同网段的窃听者抄走复用，也不存在"用可控输入撞同一个码"的枚举
+    空间。下发顺序必须是「先 sealed 后审批」——用户开始核对之前，手机上必须已经
+    有了一个只属于这条连接的识别码。
 
     所有失败都发生在 `_manager.connect()` 之前（调用方在返回 False 时短路），
     这正是「重放 auth 帧顶掉真机连接」那条 DoS 被顺带消掉的原因。
@@ -418,19 +424,27 @@ async def _handle_auth(websocket, session) -> bool:
         return False
 
     try:
-        algo, session_key, pin, phone_pk = session.receive_auth(data)
+        # 注意：第三个返回值（识别码）在这里被故意丢弃——审批用的是 session.pin，
+        # 那才是唯一的真源。虽然此刻二者相等，但从帧里取值会暗示「它由对端提供」。
+        algo, session_key, _, phone_pk = session.receive_auth(data)
     except CryptoError as e:
         reason = str(e) or "auth data processing failed"
         logger.warning(f"Auth rejected: {reason}, closing 4001")
         await websocket.close(code=4001, reason=_close_reason(reason))
         return False
 
-    if pin is not None:
-        # TOFU 首次：等待用户审批（尚未做 ECDH）
+    if session.is_tofu_first:
+        # TOFU 首次：先把 PC 指派的识别码密封下发给这一方，再进入人工审批。
+        # 识别码本身由 session 生成（不由对端提供），可与后续挑战共用同一个 nonce。
+        try:
+            await websocket.send_bytes(session.make_sealed_pin())
+        except Exception as e:
+            logger.warning(f"Failed to send sealed pin: {e}")
+            return False
         client_ip = websocket.client.host if websocket.client else "unknown"
         try:
             approved = await asyncio.wait_for(
-                _await_approval(pin, client_ip),
+                _await_approval(session.pin, client_ip),
                 timeout=APPROVAL_TIMEOUT
             )
         except asyncio.TimeoutError:
