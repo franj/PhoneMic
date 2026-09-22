@@ -336,40 +336,129 @@ class TestAuthMethodToggle:
 class TestTofuApprovalUi:
     """TOFU 审批通知 UI 测试。"""
 
+    @pytest.fixture
+    def shown(self, dashboard, qtbot):
+        """已显示的 dashboard：子控件的 isVisible/几何只有父窗口显示后才有意义。"""
+        with qtbot.waitExposed(dashboard):
+            dashboard.show()
+        qtbot.wait(50)      # 让布局跑完一轮，几何才稳定
+        return dashboard
+
     def test_approval_frame_hidden_by_default(self, dashboard):
         """审批通知默认隐藏。"""
         assert dashboard._approval_frame.isVisible() is False
 
-    def test_show_approval_request_displays_frame(self, dashboard, qtbot):
+    def test_show_approval_request_displays_frame(self, shown):
         """显示审批请求后通知框可见。"""
-        with qtbot.waitExposed(dashboard):
-            dashboard.show()
-        dashboard.show_approval_request("1234", "192.168.1.100")
-        assert dashboard._approval_frame.isVisible() is True
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown._approval_frame.isVisible() is True
 
-    def test_hide_approval_request_hides_frame(self, dashboard):
+    def test_hide_approval_request_hides_frame(self, shown):
         """隐藏审批请求后通知框不可见。"""
-        dashboard.show_approval_request("1234", "192.168.1.100")
-        dashboard.hide_approval_request()
-        assert dashboard._approval_frame.isVisible() is False
+        shown.show_approval_request("1234", "192.168.1.100")
+        shown.hide_approval_request()
+        assert shown._approval_frame.isVisible() is False
 
-    def test_approval_callback_invoked_on_accept(self, dashboard):
+    def test_pin_shown_digit_by_digit(self, shown):
+        """识别码逐位分隔显示——便于与手机屏幕上的数字逐一核对。"""
+        shown.show_approval_request("3847", "192.168.1.100")
+        assert shown._approval_pin_label.text() == "3 8 4 7"
+
+    def test_pin_font_is_large_and_bold(self, shown):
+        """识别码字号明显大于正文（审批场景下要一眼可读）。"""
+        assert shown._approval_pin_label.font().pointSize() >= 24
+        assert shown._approval_pin_label.font().bold() is True
+        assert shown._approval_pin_label.font().pointSize() > shown.ip_label.font().pointSize()
+
+    def test_approval_replaces_ip_and_info_block(self, shown):
+        """审批通知与地址栏/说明区同位互斥：显示时让位，隐藏时归还。"""
+        assert shown.ip_label.isVisible() is True
+
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown.ip_label.isVisible() is False
+        assert shown.info_label.isVisible() is False
+        assert shown.cf_info_label.isVisible() is False
+        assert shown._approval_frame.isVisible() is True
+
+        shown.hide_approval_request()
+        assert shown.ip_label.isVisible() is True
+        assert shown.info_label.isVisible() is True
+        assert shown._approval_frame.isVisible() is False
+
+    def test_info_label_restored_by_mode_after_approval(self, shown):
+        """让位后的归还按当前模式还原：CF 模式还回 CF 说明而非局域网说明。"""
+        shown._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        shown.on_switch_completed()
+        shown._sync_menu_checks()
+
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown.cf_info_label.isVisible() is False
+
+        shown.hide_approval_request()
+        assert shown.cf_info_label.isVisible() is True
+        assert shown.info_label.isVisible() is False
+
+    def test_mode_change_keeps_info_hidden_while_approving(self, shown):
+        """审批进行中刷新界面（模式切换等路径会走 _apply_mode_ui）不得让说明标签回位。
+
+        否则说明标签会与审批面板同时占住同一块位置，把面板挤下去。
+        """
+        shown.show_approval_request("1234", "192.168.1.100")
+
+        shown._apply_mode_ui()
+
+        assert shown.info_label.isVisible() is False
+        assert shown.cf_info_label.isVisible() is False
+        assert shown.ip_label.isVisible() is False
+        assert shown._approval_frame.isVisible() is True
+
+    def test_ip_shown_in_approval_panel(self, shown):
+        """来源 IP 仍是核对凭据之一（识别码之外的辅助信息）。"""
+        shown.show_approval_request("1234", "10.0.0.7")
+        assert "10.0.0.7" in shown._approval_info.text()
+
+    def test_approval_panel_fits_fixed_window(self, shown):
+        """审批面板必须完整放得下——主界面尺寸固定，放不下会静默裁掉内容。
+
+        这是几何验收而非显隐断言：setFixedSize 下父布局空间不足时会把控件压到
+        最小尺寸，控件仍处于"可见"状态，内容却已被裁掉（用户看到半个按钮）。
+
+        判据用 minimumHeight 而不是 sizeHint：面板高度已由
+        ``QLayout.SetMinimumSize`` 钉住，minimumHeight 才是确定性的下限。
+        """
+        shown.show_approval_request("3847", "192.168.1.100")
+        frame = shown._approval_frame
+
+        assert frame.height() >= frame.minimumHeight()
+        for btn in (shown._approval_accept_btn, shown._approval_deny_btn):
+            assert btn.height() >= btn.sizeHint().height()
+
+        # 识别码与说明都不换行：宽度不够就会被水平裁掉，必须逐个守住
+        for label in (shown._approval_pin_label, shown._approval_info,
+                      shown._approval_title):
+            assert label.width() >= label.sizeHint().width(), label.text()
+
+        # 面板底边仍在窗口内容区内（不越过中央控件边界）
+        bottom = frame.mapTo(shown.centralWidget(), frame.rect().bottomLeft()).y()
+        assert bottom <= shown.centralWidget().height()
+
+    def test_approval_callback_invoked_on_accept(self, shown):
         """点击允许后调用回调（参数为 True）。"""
         result = []
-        dashboard.set_approval_callback(lambda approved: result.append(approved))
-        dashboard.show_approval_request("5678", "10.0.0.1")
-        dashboard._approval_accept_btn.click()
+        shown.set_approval_callback(lambda approved: result.append(approved))
+        shown.show_approval_request("5678", "10.0.0.1")
+        shown._approval_accept_btn.click()
         assert result == [True]
-        assert dashboard._approval_frame.isVisible() is False
+        assert shown._approval_frame.isVisible() is False
 
-    def test_approval_callback_invoked_on_deny(self, dashboard):
+    def test_approval_callback_invoked_on_deny(self, shown):
         """点击拒绝后调用回调（参数为 False）。"""
         result = []
-        dashboard.set_approval_callback(lambda approved: result.append(approved))
-        dashboard.show_approval_request("5678", "10.0.0.1")
-        dashboard._approval_deny_btn.click()
+        shown.set_approval_callback(lambda approved: result.append(approved))
+        shown.show_approval_request("5678", "10.0.0.1")
+        shown._approval_deny_btn.click()
         assert result == [False]
-        assert dashboard._approval_frame.isVisible() is False
+        assert shown._approval_frame.isVisible() is False
 
 
 class TestRestartServiceMenu:

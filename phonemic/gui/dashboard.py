@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics, QPixmap, QAction, QActionGroup, QPainter, QColor, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTextBrowser, QFrame, QMessageBox,
+    QTextBrowser, QFrame, QMessageBox, QLayout,
     QApplication, QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
 
@@ -109,21 +109,39 @@ class Dashboard(QMainWindow):
     def show_approval_request(self, pin: str, client_ip: str) -> None:
         """显示 TOFU 审批通知（主界面内嵌，非弹窗）。
 
-        新请求替换旧的待审批通知，避免重复打扰。
+        通知占用地址栏/说明区那一块，因此同时把 ip_label 与说明标签让出去
+        （见 _set_main_info_visible）；新请求直接替换旧的待审批通知，不排队、不打扰。
         """
         self._approval_title.setText(self.i18n.tr("dashboard.approval_title"))
+        # 逐位空格分隔：隔着距离也能一眼念出，便于与手机屏幕上的数字逐一核对
+        self._approval_pin_label.setText(" ".join(pin) if pin else "----")
         self._approval_info.setText(
-            self.i18n.tr("dashboard.approval_pin", pin=pin) + "  " +
-            self.i18n.tr("dashboard.approval_ip", ip=client_ip)
-        )
+            self.i18n.tr("dashboard.approval_detail", ip=client_ip))
         self._approval_accept_btn.setText(self.i18n.tr("dashboard.approval_accept"))
         self._approval_deny_btn.setText(self.i18n.tr("dashboard.approval_deny"))
+        self._set_main_info_visible(False)
         self._approval_frame.setVisible(True)
         self._approval_frame.update()
 
     def hide_approval_request(self) -> None:
-        """隐藏审批通知。"""
+        """隐藏审批通知，并把地址栏/说明区还回来。"""
         self._approval_frame.setVisible(False)
+        self._set_main_info_visible(True)
+
+    def _set_main_info_visible(self, visible: bool) -> None:
+        """审批通知与地址栏/说明区互斥显示。
+
+        让位时两者都藏起来（含 CF 说明），恢复时按当前模式还原应有的那一条——
+        与 _apply_mode_ui 的显隐规则保持一致，但不依赖它（它会在切换中提前返回）。
+        """
+        self.ip_label.setVisible(visible)
+        if not visible:
+            self.info_label.setVisible(False)
+            self.cf_info_label.setVisible(False)
+            return
+        is_lan = self._mode == TunnelMode.LAN
+        self.info_label.setVisible(is_lan)
+        self.cf_info_label.setVisible(not is_lan)
 
     def _resolve_approval(self, approved: bool) -> None:
         """用户点击允许/拒绝后调用回调并隐藏通知。"""
@@ -181,6 +199,69 @@ class Dashboard(QMainWindow):
         self._set_ip_text(f"http://{ip}:{port}")
         layout.addWidget(self.ip_label)
 
+        # ----- TOFU 审批通知（主界面内嵌，非弹窗）-----
+        # 与地址栏/说明区**同位**：审批期间把 ip_label 与说明标签整块让给审批通知
+        # （见 _set_main_info_visible），既不把主界面撑高，也让注意力落在识别码上。
+        self._approval_frame = QFrame()
+        self._approval_frame.setFrameShape(QFrame.Box)
+        self._approval_frame.setStyleSheet(
+            "QFrame { border: 2px solid #4CAF50; border-radius: 6px; background: #f1f8e9; }")
+        self._approval_frame.setVisible(False)
+        approval_layout = QVBoxLayout(self._approval_frame)
+        approval_layout.setContentsMargins(4, 4, 4, 4)
+        approval_layout.setSpacing(3)
+        # 主界面尺寸固定（setFixedSize），审批面板要靠"最小尺寸"把高度钉住：
+        # 否则父布局空间不足时会静默压扁它，按钮/识别码被裁掉一半。
+        approval_layout.setSizeConstraint(QLayout.SetMinimumSize)
+
+        self._approval_title = QLabel()
+        self._approval_title.setAlignment(Qt.AlignCenter)
+        self._approval_title.setStyleSheet(
+            "font-weight: bold; color: #2e7d32; font-size: 12px; border: none;")
+        approval_layout.addWidget(self._approval_title)
+
+        # 识别码：审批场景下唯一需要用户"读出来核对"的信息。字号拉到 30pt（正文
+        # 的约 4 倍）+ 加粗 + 逐位空格分隔，隔着一段距离也能一眼念出。
+        # 面板总高受主界面固定高度约束——它要正好塞进地址栏+说明区让出的空间，
+        # 因此说明文字必须单行（见 locales 的 approval_detail 长度）。
+        self._approval_pin_label = QLabel()
+        self._approval_pin_label.setAlignment(Qt.AlignCenter)
+        pin_font = self._approval_pin_label.font()
+        pin_font.setPointSize(30)
+        pin_font.setBold(True)
+        self._approval_pin_label.setFont(pin_font)
+        self._approval_pin_label.setStyleSheet("color: #1b5e20; border: none;")
+        approval_layout.addWidget(self._approval_pin_label)
+
+        self._approval_info = QLabel()
+        self._approval_info.setAlignment(Qt.AlignCenter)
+        # 刻意不换行：换行会让面板高度随可用宽度浮动（heightForWidth 不透过
+        # QFrame 传递），固定高度窗口下难以保证不被裁。文案长度由 locales 控制，
+        # 契约由 test_approval_panel_fits_fixed_window 的宽度断言守住。
+        self._approval_info.setStyleSheet("color: #33691e; font-size: 11px; border: none;")
+        approval_layout.addWidget(self._approval_info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self._approval_accept_btn = QPushButton()
+        self._approval_accept_btn.setMinimumHeight(28)
+        self._approval_accept_btn.setStyleSheet(
+            "QPushButton { background: #4CAF50; color: white; border: none; "
+            "border-radius: 4px; font-size: 13px; font-weight: bold; }")
+        self._approval_accept_btn.clicked.connect(lambda: self._resolve_approval(True))
+        btn_row.addWidget(self._approval_accept_btn)
+
+        self._approval_deny_btn = QPushButton()
+        self._approval_deny_btn.setMinimumHeight(28)
+        self._approval_deny_btn.setStyleSheet(
+            "QPushButton { background: #e53935; color: white; border: none; "
+            "border-radius: 4px; font-size: 13px; }")
+        self._approval_deny_btn.clicked.connect(lambda: self._resolve_approval(False))
+        btn_row.addWidget(self._approval_deny_btn)
+        approval_layout.addLayout(btn_row)
+
+        layout.addWidget(self._approval_frame)
+
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
         self.cf_info_label.setAlignment(Qt.AlignCenter)
@@ -204,37 +285,6 @@ class Dashboard(QMainWindow):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.update_connection_status(False)
         layout.addWidget(self.status_label)
-
-        # ----- TOFU 审批通知（主界面内嵌，非弹窗）-----
-        self._approval_frame = QFrame()
-        self._approval_frame.setFrameShape(QFrame.Box)
-        self._approval_frame.setStyleSheet("QFrame { border: 1px solid #4CAF50; border-radius: 4px; background: #f1f8e9; }")
-        self._approval_frame.setVisible(False)
-        approval_layout = QVBoxLayout(self._approval_frame)
-        approval_layout.setContentsMargins(10, 8, 10, 8)
-        approval_layout.setSpacing(4)
-
-        self._approval_title = QLabel()
-        self._approval_title.setStyleSheet("font-weight: bold; color: #2e7d32;")
-        approval_layout.addWidget(self._approval_title)
-
-        self._approval_info = QLabel()
-        self._approval_info.setStyleSheet("color: #558b2f; font-size: 11px;")
-        approval_layout.addWidget(self._approval_info)
-
-        btn_row = QHBoxLayout()
-        self._approval_accept_btn = QPushButton()
-        self._approval_accept_btn.setStyleSheet("background: #4CAF50; color: white; border: none; padding: 4px 16px; border-radius: 3px;")
-        self._approval_accept_btn.clicked.connect(lambda: self._resolve_approval(True))
-        btn_row.addWidget(self._approval_accept_btn)
-
-        self._approval_deny_btn = QPushButton()
-        self._approval_deny_btn.setStyleSheet("background: #e53935; color: white; border: none; padding: 4px 16px; border-radius: 3px;")
-        self._approval_deny_btn.clicked.connect(lambda: self._resolve_approval(False))
-        btn_row.addWidget(self._approval_deny_btn)
-        approval_layout.addLayout(btn_row)
-
-        layout.addWidget(self._approval_frame)
 
         layout.addStretch()
 
@@ -262,6 +312,11 @@ class Dashboard(QMainWindow):
                 self._refresh_qr()
             else:
                 self._set_ip_text(self.i18n.tr("dashboard.cf_connecting"))
+
+        # 审批通知在显示中时把说明标签再让回去：本方法会被模式切换/重连等路径调用，
+        # 不补这一手就会让说明标签与审批面板同时占着同一块位置。
+        if self._approval_frame.isVisible():
+            self._set_main_info_visible(False)
 
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
