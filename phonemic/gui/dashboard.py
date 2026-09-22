@@ -528,8 +528,9 @@ class Dashboard(QMainWindow):
 
         # 重启服务（两种模式都可用）：按当前模式把服务重来一遍——省掉用户
         # 「先切到局域网、再切回 Cloudflare」那套操作（切到已选中的模式是空操作）。
-        # 加密模式下会换新身份（新的 secret 路径与密钥对 → 新二维码），手机端需
-        # 重新扫码；CF 模式还会换上新的临时域名，是隧道被回收后的自救路径。
+        # 重启会换新身份（新的 secret 路径与密钥对 → 新二维码），手机端需重新配对：
+        # 扫码认证重新扫二维码，手动审批则再点一次「允许」；CF 模式还会换上新的
+        # 临时域名，是隧道被回收后的自救路径。
         self.act_restart_service = QAction(self.i18n.tr("dashboard.menu_restart_service"), self)
         self.act_restart_service.triggered.connect(self._on_restart_service)
         network_menu.addAction(self.act_restart_service)
@@ -587,7 +588,8 @@ class Dashboard(QMainWindow):
     def _on_restart_service(self) -> None:
         """点击「重启服务」：按当前模式把服务重来一遍。
 
-        会换新身份（加密模式下 secret 路径与密钥对都变），手机端需重新扫码。
+        会换新身份（secret 路径与密钥对都变），手机端需重新配对：扫码认证重新扫
+        二维码，手动审批则再点一次「允许」。
         这里先清掉 `_tunnel_url` 并擦掉二维码：否则 CF 重启失败时，界面会把
         已经作废的旧域名当成有效地址继续显示，用户扫了也连不上。
         """
