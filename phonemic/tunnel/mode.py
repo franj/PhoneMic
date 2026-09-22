@@ -30,15 +30,14 @@ def set_mode(mode: TunnelMode) -> None:
     sm = SettingsManager.instance()
     sm.set("tunnel_mode", mode.value)
 
-def effective_algorithm(algo: str, mode: TunnelMode) -> str:
-    """根据当前模式返回最终生效的加密设置。
 
-    返回值为 "none"（不加密）或 "auto"（加密，具体算法由客户端协商）。
-    历史配置值 xsalsa20/xchacha20 一律归一化为 auto。
-    Cloudflare 模式下明文传输存在互联网中间人风险，
-    即使用户配置为 none，也强制加密，配置保持原值不修改。
+def effective_auth_method(auth_method: str, mode: TunnelMode) -> str:
+    """根据当前模式返回最终生效的认证方式。
+
+    返回值为 "tofu"（手动审批）或 "url_fragment"（扫码认证）。
+    Cloudflare 公网可达，TOFU 首次连接无信任锚，强制 url_fragment。
+    LAN 模式下尊重用户选择。
     """
-    algo = "none" if algo == "none" else "auto"
-    if mode == TunnelMode.CLOUDFLARE and algo == "none":
-        return "auto"
-    return algo
+    if mode == TunnelMode.CLOUDFLARE:
+        return "url_fragment"
+    return auth_method

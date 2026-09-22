@@ -229,107 +229,236 @@ class TestUrlDisplay:
         assert dashboard.ip_label.alignment() == Qt.AlignCenter
 
 
-class TestEncryptionModeRestriction:
-    """Cloudflare 模式必须加密：none 选项禁用，配置为 none 时实际强制加密。"""
+class TestAuthModeRestriction:
+    """Cloudflare 模式强制 url_fragment：TOFU 选项禁用。"""
 
-    def test_algo_none_enabled_in_lan_by_default(self, dashboard):
-        assert dashboard.act_algo_none.isEnabled() is True
+    def test_auth_tofu_enabled_in_lan_by_default(self, dashboard):
+        assert dashboard.act_auth_tofu.isEnabled() is True
 
-    def test_algo_none_disabled_in_cf_mode(self, dashboard):
+    def test_auth_tofu_disabled_in_cf_mode(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is False
+        assert dashboard.act_auth_tofu.isEnabled() is False
 
-    def test_algo_none_re_enabled_back_to_lan(self, dashboard):
+    def test_auth_tofu_re_enabled_back_to_lan(self, dashboard):
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         dashboard._on_mode_clicked(TunnelMode.LAN)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is True
+        assert dashboard.act_auth_tofu.isEnabled() is True
 
-    def test_cf_with_config_none_shows_encrypted_checked(self, dashboard):
-        """配置为 none 时进入 CF 模式：none 禁用 + 加密勾选。"""
-        # 模拟配置为 none 的场景
-        dashboard._algorithm = "none"
+    def test_cf_with_tofu_config_shows_url_fragment_checked(self, dashboard):
+        """配置为 tofu 时进入 CF 模式：TOFU 禁用 + url_fragment 勾选。"""
+        dashboard._auth_method = "tofu"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
-        assert dashboard.act_algo_none.isEnabled() is False
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+        assert dashboard.act_auth_tofu.isEnabled() is False
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
-    def test_clicking_none_in_cf_mode_does_not_change_algorithm(self, dashboard):
-        """CF 模式下点 none 应被拒绝，配置不变。"""
-        dashboard._algorithm = "auto"
+    def test_clicking_tofu_in_cf_mode_does_not_change_auth_method(self, dashboard):
+        """CF 模式下点 TOFU 应被拒绝，配置不变。"""
+        dashboard._auth_method = "url_fragment"
         dashboard._on_mode_clicked(TunnelMode.CLOUDFLARE)
         dashboard.on_switch_completed()
         dashboard._sync_menu_checks()
-        dashboard._on_algorithm_clicked("none")
-        # 应保持 auto（加密），未切到 none
-        assert dashboard._algorithm == "auto"
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+        dashboard._on_auth_method_clicked("tofu")
+        assert dashboard._auth_method == "url_fragment"
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
 
-class TestEncryptionToggle:
-    """加密菜单只有 加密/不加密 两项，具体算法由客户端协商。"""
+class TestAuthMethodToggle:
+    """认证方式菜单只有 TOFU 手动审批 / 扫码认证 两项，加密永远开启。"""
 
-    def test_menu_has_no_algorithm_items(self, dashboard):
-        """不再暴露具体算法菜单项。"""
+    def test_menu_has_no_legacy_algo_items(self, dashboard):
+        """不再暴露旧的加密/明文菜单项。"""
+        assert not hasattr(dashboard, "act_algo_none")
+        assert not hasattr(dashboard, "act_algo_encrypted")
         assert not hasattr(dashboard, "act_algo_xsalsa20")
         assert not hasattr(dashboard, "act_algo_xchacha20")
 
-    def test_default_is_none(self, dashboard):
-        """默认不加密（LAN 模式）。"""
-        assert dashboard.act_algo_none.isChecked() is True
-        assert dashboard.act_algo_encrypted.isChecked() is False
+    def test_default_is_tofu(self, dashboard):
+        """默认 TOFU 手动审批（LAN 模式）。"""
+        assert dashboard.act_auth_tofu.isChecked() is True
+        assert dashboard.act_auth_url_fragment.isChecked() is False
 
-    def test_clicking_encrypted_persists_auto(self, dashboard):
-        """点击加密：配置写入 auto，加密项勾选。"""
-        dashboard._on_algorithm_clicked("auto")
-        assert dashboard._algorithm == "auto"
-        assert dashboard.sm.get("e2ee_algorithm") == "auto"
-        assert dashboard.act_algo_encrypted.isChecked() is True
-        assert dashboard.act_algo_none.isChecked() is False
+    def test_clicking_url_fragment_persists(self, dashboard):
+        """点击扫码认证：配置写入 url_fragment。"""
+        dashboard._on_auth_method_clicked("url_fragment")
+        assert dashboard._auth_method == "url_fragment"
+        assert dashboard.sm.get("auth_method") == "url_fragment"
+        assert dashboard.act_auth_url_fragment.isChecked() is True
+        assert dashboard.act_auth_tofu.isChecked() is False
 
-    def test_clicking_none_back_in_lan(self, dashboard):
-        """LAN 模式下可从加密切回不加密。"""
-        dashboard._on_algorithm_clicked("auto")
-        dashboard._on_algorithm_clicked("none")
-        assert dashboard._algorithm == "none"
-        assert dashboard.sm.get("e2ee_algorithm") == "none"
-        assert dashboard.act_algo_none.isChecked() is True
+    def test_clicking_tofu_back_in_lan(self, dashboard):
+        """LAN 模式下可从扫码认证切回 TOFU。"""
+        dashboard._on_auth_method_clicked("url_fragment")
+        dashboard._on_auth_method_clicked("tofu")
+        assert dashboard._auth_method == "tofu"
+        assert dashboard.sm.get("auth_method") == "tofu"
+        assert dashboard.act_auth_tofu.isChecked() is True
 
-    def test_status_shows_negotiated_algorithm(self, dashboard):
-        """加密连接时状态栏显示协商出的具体算法（信息透明，菜单不让用户选）。"""
-        dashboard._algorithm = "auto"
+    def test_status_shows_auth_method_and_negotiated_algo(self, dashboard):
+        """状态栏显示认证方式 + 协商出的算法。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True, "xchacha20")
         assert "XChaCha20" in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_encrypted_algo", algo="XChaCha20") \
-            in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_tofu") in dashboard.status_label.text()
 
-    def test_status_encrypted_without_negotiated_algo(self, dashboard):
-        """未携带协商算法（如模式切换后刷新）时退化为通用 加密 文案。"""
-        dashboard._algorithm = "auto"
+    def test_status_url_fragment_with_algo(self, dashboard):
+        """扫码认证模式下状态栏显示扫码 + 算法。"""
+        dashboard._auth_method = "url_fragment"
+        dashboard.update_connection_status(True, "xchacha20")
+        assert "XChaCha20" in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_url_fragment") in dashboard.status_label.text()
+
+    def test_status_connected_without_negotiated_algo(self, dashboard):
+        """未携带协商算法时只显示认证方式。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True)
         assert "XChaCha20" not in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_encrypted") in dashboard.status_label.text()
+        assert dashboard.i18n.tr("dashboard.status_auth_tofu") in dashboard.status_label.text()
 
     def test_status_negotiated_algo_cleared_on_disconnect(self, dashboard):
-        """断开后清空协商结果，明文模式不显示算法。"""
-        dashboard._algorithm = "auto"
+        """断开后清空协商结果。"""
+        dashboard._auth_method = "tofu"
         dashboard.update_connection_status(True, "xchacha20")
         assert dashboard._negotiated_algo == "xchacha20"
         dashboard.update_connection_status(False)
         assert dashboard._negotiated_algo is None
-        dashboard._algorithm = "none"
-        dashboard.update_connection_status(True)
-        assert "XChaCha20" not in dashboard.status_label.text()
-        assert dashboard.i18n.tr("dashboard.status_plaintext") in dashboard.status_label.text()
 
     def test_algo_display_name_fallback_for_unknown_algo(self, dashboard):
         """locale 缺失的算法名回退为原始算法名（未来新增算法无需先加 locale）。"""
         assert dashboard._algo_display_name("xchacha20") == "XChaCha20"
-        assert dashboard._algo_display_name("aes-256-gcm") == "aes-256-gcm"
+
+
+class TestTofuApprovalUi:
+    """TOFU 审批通知 UI 测试。"""
+
+    @pytest.fixture
+    def shown(self, dashboard, qtbot):
+        """已显示的 dashboard：子控件的 isVisible/几何只有父窗口显示后才有意义。"""
+        with qtbot.waitExposed(dashboard):
+            dashboard.show()
+        qtbot.wait(50)      # 让布局跑完一轮，几何才稳定
+        return dashboard
+
+    def test_approval_frame_hidden_by_default(self, dashboard):
+        """审批通知默认隐藏。"""
+        assert dashboard._approval_frame.isVisible() is False
+
+    def test_show_approval_request_displays_frame(self, shown):
+        """显示审批请求后通知框可见。"""
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown._approval_frame.isVisible() is True
+
+    def test_hide_approval_request_hides_frame(self, shown):
+        """隐藏审批请求后通知框不可见。"""
+        shown.show_approval_request("1234", "192.168.1.100")
+        shown.hide_approval_request()
+        assert shown._approval_frame.isVisible() is False
+
+    def test_pin_shown_digit_by_digit(self, shown):
+        """识别码逐位分隔显示——便于与手机屏幕上的数字逐一核对。"""
+        shown.show_approval_request("3847", "192.168.1.100")
+        assert shown._approval_pin_label.text() == "3 8 4 7"
+
+    def test_pin_font_is_large_and_bold(self, shown):
+        """识别码字号明显大于正文（审批场景下要一眼可读）。"""
+        assert shown._approval_pin_label.font().pointSize() >= 24
+        assert shown._approval_pin_label.font().bold() is True
+        assert shown._approval_pin_label.font().pointSize() > shown.ip_label.font().pointSize()
+
+    def test_approval_replaces_ip_and_info_block(self, shown):
+        """审批通知与地址栏/说明区同位互斥：显示时让位，隐藏时归还。"""
+        assert shown.ip_label.isVisible() is True
+
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown.ip_label.isVisible() is False
+        assert shown.info_label.isVisible() is False
+        assert shown.cf_info_label.isVisible() is False
+        assert shown._approval_frame.isVisible() is True
+
+        shown.hide_approval_request()
+        assert shown.ip_label.isVisible() is True
+        assert shown.info_label.isVisible() is True
+        assert shown._approval_frame.isVisible() is False
+
+    def test_info_label_restored_by_mode_after_approval(self, shown):
+        """让位后的归还按当前模式还原：CF 模式还回 CF 说明而非局域网说明。"""
+        shown._on_mode_clicked(TunnelMode.CLOUDFLARE)
+        shown.on_switch_completed()
+        shown._sync_menu_checks()
+
+        shown.show_approval_request("1234", "192.168.1.100")
+        assert shown.cf_info_label.isVisible() is False
+
+        shown.hide_approval_request()
+        assert shown.cf_info_label.isVisible() is True
+        assert shown.info_label.isVisible() is False
+
+    def test_mode_change_keeps_info_hidden_while_approving(self, shown):
+        """审批进行中刷新界面（模式切换等路径会走 _apply_mode_ui）不得让说明标签回位。
+
+        否则说明标签会与审批面板同时占住同一块位置，把面板挤下去。
+        """
+        shown.show_approval_request("1234", "192.168.1.100")
+
+        shown._apply_mode_ui()
+
+        assert shown.info_label.isVisible() is False
+        assert shown.cf_info_label.isVisible() is False
+        assert shown.ip_label.isVisible() is False
+        assert shown._approval_frame.isVisible() is True
+
+    def test_ip_shown_in_approval_panel(self, shown):
+        """来源 IP 仍是核对凭据之一（识别码之外的辅助信息）。"""
+        shown.show_approval_request("1234", "10.0.0.7")
+        assert "10.0.0.7" in shown._approval_info.text()
+
+    def test_approval_panel_fits_fixed_window(self, shown):
+        """审批面板必须完整放得下——主界面尺寸固定，放不下会静默裁掉内容。
+
+        这是几何验收而非显隐断言：setFixedSize 下父布局空间不足时会把控件压到
+        最小尺寸，控件仍处于"可见"状态，内容却已被裁掉（用户看到半个按钮）。
+
+        判据用 minimumHeight 而不是 sizeHint：面板高度已由
+        ``QLayout.SetMinimumSize`` 钉住，minimumHeight 才是确定性的下限。
+        """
+        shown.show_approval_request("3847", "192.168.1.100")
+        frame = shown._approval_frame
+
+        assert frame.height() >= frame.minimumHeight()
+        for btn in (shown._approval_accept_btn, shown._approval_deny_btn):
+            assert btn.height() >= btn.sizeHint().height()
+
+        # 识别码与说明都不换行：宽度不够就会被水平裁掉，必须逐个守住
+        for label in (shown._approval_pin_label, shown._approval_info,
+                      shown._approval_title):
+            assert label.width() >= label.sizeHint().width(), label.text()
+
+        # 面板底边仍在窗口内容区内（不越过中央控件边界）
+        bottom = frame.mapTo(shown.centralWidget(), frame.rect().bottomLeft()).y()
+        assert bottom <= shown.centralWidget().height()
+
+    def test_approval_callback_invoked_on_accept(self, shown):
+        """点击允许后调用回调（参数为 True）。"""
+        result = []
+        shown.set_approval_callback(lambda approved: result.append(approved))
+        shown.show_approval_request("5678", "10.0.0.1")
+        shown._approval_accept_btn.click()
+        assert result == [True]
+        assert shown._approval_frame.isVisible() is False
+
+    def test_approval_callback_invoked_on_deny(self, shown):
+        """点击拒绝后调用回调（参数为 False）。"""
+        result = []
+        shown.set_approval_callback(lambda approved: result.append(approved))
+        shown.show_approval_request("5678", "10.0.0.1")
+        shown._approval_deny_btn.click()
+        assert result == [False]
+        assert shown._approval_frame.isVisible() is False
 
 
 class TestRestartServiceMenu:

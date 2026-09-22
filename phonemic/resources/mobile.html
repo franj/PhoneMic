@@ -63,6 +63,39 @@
             background: #fff3b0;
             color: #8a6d00;
         }
+        /* TOFU 审批等待浮层：盖住聊天区，显示识别码供用户与 PC 核对 */
+        #approval-overlay {
+            display: none;
+            position: absolute;
+            left: 0; right: 0; top: 0; bottom: 0;
+            background: rgba(255, 255, 255, 0.97);
+            z-index: 20;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            text-align: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        #approval-overlay.visible { display: flex; }
+        #approval-overlay .approval-title {
+            font-size: 15px;
+            color: #2255aa;
+            font-weight: 500;
+        }
+        #approval-overlay .approval-pin {
+            font-size: 48px;
+            font-weight: 700;
+            letter-spacing: 10px;
+            color: #1a1a1a;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+        }
+        #approval-overlay .approval-hint {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.6;
+        }
         #chat-list {
             flex: 1;
             overflow-y: auto;
@@ -540,6 +573,12 @@
 <body data-page-node-id="ozgAGjuilWqVKDdnG8ntQq">
 <div id="app" data-page-node-id="mmmqOPqHEqtHhp8ZYUGa1u">
     <div id="status-bar" data-page-node-id="oWFzYhoNPDhNSNebGhhZlI"></div>
+    <!-- TOFU 审批等待浮层：识别码大字显示，供用户与 PC 主界面核对 -->
+    <div id="approval-overlay" data-page-node-id="tofuApprovalOverlay">
+        <div class="approval-title" id="approval-title"></div>
+        <div class="approval-pin" id="approval-pin"></div>
+        <div class="approval-hint" id="approval-hint"></div>
+    </div>
     <div id="chat-list" data-page-node-id="8Nymt2h4GWDacOgDyXHTSo">
         <!-- Spacer 占位符置于顶部 -->
         <div id="chat-spacer" class="chat-spacer" data-page-node-id="9yOVA5lEKLYVOeKXwhkoQ8"></div>
@@ -1551,23 +1590,43 @@
     }
 
     // ========== 4. WebSocket 客户端 ==========
-    // CryptoProvider 类（NaClBoxProvider, XChaCha20Provider, PlainProvider, PROVIDER_CLASSES）
+    // CryptoProvider 类（NaClBoxProvider, XChaCha20Provider, PROVIDER_CLASSES）
     // 定义在 crypto_providers.js 中，通过 <script src> 加载。
-    // SecureClient 负责协调：URL 解析、算法选择、base64 编码、消息组装
+    // SecureClient 负责协调：URL 解析、认证方式选择、TOFU 握手、消息组装
+    //
+    // 新架构（e2ee-always-on-design.md）：
+    // - 加密永远开启，不存在明文模式
+    // - URL fragment 认证：k=<pubkey>&a=<algos> → SealedBox auth → Provider challenge → auth_proof
+    // - TOFU 首次：无 k= fragment → 明文 auth(algo+pk+pin) → SealedBox challenge → auth_proof
+    // - TOFU 重连：localStorage 有 PC 公钥 → SealedBox auth（与 URL fragment 一致）
     class SecureClient {
         constructor() {
             this._provider = null;
-            this._pcPublicKeyB64 = null;
+            this._pcPublicKeyB64 = null;   // URL fragment 中的 PC 公钥
             this._pcPublicKeyRaw = null;
-            this._selectedAlgo = 'none';
+            this._selectedAlgo = 'xchacha20';
             this._ready = false;
             this._authenticated = false;
             this._b64Variant = null;
-            // 防重放 seq 由 CryptoProvider 内部承载（AAD/前缀），此处不感知
+            // 认证方式：'url_fragment' | 'tofu_first' | 'tofu_reconnect'
+            this._authMode = 'tofu_first';
+            // TOFU 首次：是否处于审批等待中
+            this._awaitingTofuApproval = false;
+            // TOFU 首次的 4 位识别码（手机屏幕显示、PC 审批通知显示，供用户核对）
+            this._pin = null;
+            // localStorage key 前缀
+            this._storageKey = 'phonemic.pc_public_key';
         }
-        get needsAuth() { return this._pcPublicKeyB64 !== null; }
-        get isEncrypted() { return this._selectedAlgo !== 'none'; }
+        /** 是否需要 auth 握手——永远为 true（加密永远开启）。 */
+        get needsAuth() { return true; }
+        /** 加密永远开启。 */
+        get isEncrypted() { return true; }
         get isAuthenticated() { return this._authenticated; }
+        get authMode() { return this._authMode; }
+        /** 是否处于 TOFU 首次连接（需 PC 审批）。 */
+        get isTofuFirst() { return this._authMode === 'tofu_first'; }
+        /** TOFU 首次连接的 4 位识别码（供 UI 显示）。 */
+        get pin() { return this._pin; }
         // 服务端下发的算法列表与本地无交集（版本不匹配等），无法建立加密通道
         get algoUnsupported() { return this._selectedAlgo === null; }
 
@@ -1581,18 +1640,47 @@
                 return;
             }
             this._createProvider();
-            if (this._provider.initKeypair) this._provider.initKeypair();
-            if (this._pcPublicKeyRaw) this._provider.setPcPublicKey(this._pcPublicKeyRaw);
-            console.debug('[SEC] sodium ready, algorithm:', this._selectedAlgo);
+            this._provider.initKeypair();
+
+            // 根据认证模式决定是否预先设置 PC 公钥
+            if (this._authMode === 'url_fragment' || this._authMode === 'tofu_reconnect') {
+                this._provider.setPcPublicKey(this._pcPublicKeyRaw);
+            }
+            console.debug('[SEC] sodium ready, algorithm:', this._selectedAlgo,
+                          'authMode:', this._authMode);
         }
 
         _parseUrlFragment() {
             const hash = location.hash;
             const kMatch = hash.match(/[#&]k=([^&]+)/);
-            if (kMatch) this._pcPublicKeyB64 = kMatch[1];
             const aMatch = hash.match(/[#&]a=([^&]+)/);
+
+            if (kMatch) {
+                // URL fragment 认证：有 PC 公钥，直接用
+                this._pcPublicKeyB64 = kMatch[1];
+                this._pcPublicKeyRaw = sodium.from_base64(kMatch[1], this._b64Variant);
+                this._authMode = 'url_fragment';
+            } else {
+                // 无 k=：TOFU 模式。检查 localStorage 是否有保存的 PC 公钥
+                const stored = localStorage.getItem(this._storageKey);
+                if (stored) {
+                    try {
+                        this._pcPublicKeyB64 = stored;
+                        this._pcPublicKeyRaw = sodium.from_base64(stored, this._b64Variant);
+                        this._authMode = 'tofu_reconnect';
+                    } catch (e) {
+                        console.warn('[SEC] Invalid stored PC public key, starting fresh TOFU');
+                        localStorage.removeItem(this._storageKey);
+                        this._authMode = 'tofu_first';
+                    }
+                } else {
+                    this._authMode = 'tofu_first';
+                }
+            }
+
             // a= 为服务端支持的算法优先级列表（逗号分隔），按序选择第一个自身支持的
-            const offered = aMatch ? aMatch[1].split(',').map(s => s.trim()) : ['none'];
+            // TOFU 首次也用此列表选择算法（从明文 auth 的 algo 字段告知服务端）
+            const offered = aMatch ? aMatch[1].split(',').map(s => s.trim()) : ['xchacha20', 'xsalsa20'];
             this._selectedAlgo = this._selectAlgorithm(offered);
         }
 
@@ -1606,49 +1694,86 @@
         _createProvider() {
             const Cls = PROVIDER_CLASSES[this._selectedAlgo];
             this._provider = new Cls();
-            if (this._pcPublicKeyB64) {
-                if (this._selectedAlgo === 'none') {
-                    this._provider.setToken(this._pcPublicKeyB64);
-                } else {
-                    this._pcPublicKeyRaw = sodium.from_base64(this._pcPublicKeyB64, this._b64Variant);
-                }
-            }
         }
 
         _toB64(bytes) { return sodium.to_base64(bytes, this._b64Variant); }
         _fromB64(str) { return sodium.from_base64(str, this._b64Variant); }
+
+        /**
+         * 生成 4 位识别码（TOFU 首次连接用）。
+         */
+        _generatePin() {
+            const buf = sodium.randombytes_buf(2);
+            const val = new DataView(buf.buffer, buf.byteOffset, buf.byteLength).getUint16(0, false);
+            return String(val % 10000).padStart(4, '0');
+        }
 
         makeAuth() {
             const auth = { type: 'auth' };
             // 每个连接是独立会话：握手开始时归零 Provider 内部 seq 计数器
             //（服务端每连接新建 Provider，从 0 计数，两端必须对齐）
             if (this._provider && this._provider.reset) this._provider.reset();
+
+            if (this._authMode === 'tofu_first') {
+                // TOFU 首次：明文 auth，携带 algo + pk + pin
+                this._awaitingTofuApproval = true;
+                this._pin = this._generatePin();
+                console.debug('[SEC] TOFU first auth: pin=' + this._pin);
+                return plaintextAuthData(
+                    this._selectedAlgo, this._provider.phonePublicKey, this._pin);
+            }
+            // URL fragment / TOFU 重连：SealedBox 密封 auth
             const authData = this._provider.makeAuthData();
             if (authData instanceof Uint8Array) {
-                // 加密模式：密封 blob 内含 {"algo","pk"}，线上不泄露算法
-                // msgpack 原生 bin 类型，密文直接入帧，不再 base64 包裹
-                auth.data = authData;
-            } else if (authData) {
-                // none+CF：token 明文携带，无密封层，需标明 algo=none
-                auth.algo = 'none';
                 auth.data = authData;
             }
             return auth;
         }
 
         /**
-         * 握手第二、三步：解密 auth_challenge，回显其中的 nonce。
+         * 握手第二、三步：处理 auth_challenge 并生成 auth_proof。
          *
-         * 只有加密模式才走这里——明文模式（none+CF）没有会话密钥、服务端不发
-         * 挑战，第一个数据帧（config）即确认。
+         * 两种路径：
+         * - URL fragment / TOFU 重连：auth_challenge 是 Provider 加密的，直接解密
+         * - TOFU 首次：auth_challenge 是 SealedBox(phone_public) 加密的，
+         *   先用手机私钥解封得到 PC 公钥 + nonce，再创建 Provider、回 auth_proof
          *
-         * @returns {Uint8Array|null} 要发回的 auth_proof 线上字节；服务端判定
-         *   失败（加密的 error code="auth"）或帧无法识别时返回 null。
+         * @returns {Uint8Array|null} 要发回的 auth_proof 线上字节；失败时返回 null。
          */
         makeAuthProof(rawBytes) {
+            // TOFU 首次路径：SealedBox challenge
+            if (this._authMode === 'tofu_first' && this._awaitingTofuApproval) {
+                try {
+                    const frame = MessagePack.decode(rawBytes);
+                    if (!frame || frame.type !== 'auth_challenge' || !(frame.data instanceof Uint8Array)) {
+                        console.error('[SEC] TOFU: unexpected challenge frame:', frame && frame.type);
+                        return null;
+                    }
+                    // 用手机私钥解封 SealedBox → PC 公钥 + nonce
+                    const { pcPublicKey, nonce } = unsealTofuChallenge(
+                        frame.data, this._provider.phonePrivateKey);
+                    // 现在知道了 PC 公钥，设置到 Provider 中（会派生会话密钥）
+                    this._provider.setPcPublicKey(pcPublicKey);
+                    // 保存 PC 公钥到 localStorage，下次重连走 SealedBox 路径
+                    const pkB64 = this._toB64(pcPublicKey);
+                    localStorage.setItem(this._storageKey, pkB64);
+                    this._pcPublicKeyB64 = pkB64;
+                    this._pcPublicKeyRaw = pcPublicKey;
+                    this._authMode = 'tofu_reconnect';
+                    this._awaitingTofuApproval = false;
+                    this._authenticated = true;
+                    console.debug('[SEC] TOFU first approval OK, PC key stored');
+                    // 回 auth_proof（Provider 加密，seq=0）
+                    return this.encrypt({ type: 'auth_proof', nonce: nonce });
+                } catch (e) {
+                    console.error('[SEC] TOFU challenge decrypt failed:', e);
+                    return null;
+                }
+            }
+
+            // URL fragment / TOFU 重连路径：Provider 加密的 challenge
             let msg;
             try {
-                // 下行的 0 号加密帧，走统一解密路径（seq=0 校验并推进 _rxSeq）
                 msg = this.decrypt(rawBytes);
             } catch (e) {
                 console.error('[SEC] auth_challenge decrypt failed:', e);
@@ -1659,28 +1784,34 @@
                               msg && msg.type, msg && msg.code);
                 return null;
             }
-            // 乐观判定接入（与 TLS 1.3 客户端 Finished 同形）：被拒由随后的
-            // error(code="auth") 或 4001 关闭体现，不等一条「成功」回执。
+            // 乐观判定接入：被拒由随后的 error(code="auth") 或 4001 关闭体现
             this._authenticated = true;
             console.debug('[SEC] Auth challenge answered, authenticated optimistically');
             return this.encrypt({ type: 'auth_proof', nonce: msg.nonce });
         }
 
         encrypt(msg) {
-            // 产出线上字节：加密模式整帧加密，明文模式直接 msgpack 编码。
-            // 无外层信封——是否加密由会话状态机决定，不靠帧内容判别。
+            // 加密永远开启：整帧加密，无外层信封
             const pt = MessagePack.encode(msg);
-            if (!this.isEncrypted) return pt;
-            // seq 由 Provider 在加密层自动打上，不进应用层报文
             return this._provider.encrypt(pt);
         }
 
         decrypt(rawBytes) {
-            // 还原应用层报文：加密帧先解密，明文帧直接解码。
-            // 重放/乱序/篡改由 Provider 校验并抛错，此处不重复检查。
-            if (!this.isEncrypted) return MessagePack.decode(rawBytes);
+            // 加密永远开启：整帧解密
+            // 重放/乱序/篡改由 Provider 校验并抛错
             const pt = this._provider.decrypt(rawBytes);
             return MessagePack.decode(pt);
+        }
+
+        /**
+         * 清除保存的 PC 公钥（如认证被拒绝时，下次重新走 TOFU 首次流程）。
+         */
+        clearStoredKey() {
+            localStorage.removeItem(this._storageKey);
+            this._pcPublicKeyB64 = null;
+            this._pcPublicKeyRaw = null;
+            this._authMode = 'tofu_first';
+            this._awaitingTofuApproval = false;
         }
     }
 
@@ -1690,6 +1821,10 @@
     // 「文件选择器在飞」标记的有效期（ms）：只兜「页面再没回过前台」这种极端情况，
     // 避免标记永久挂住、把之后再发生的真断连也一起静默掉。
     const PICKER_CTX_MS = 300000;
+    // TOFU 首次连接：手机发完 auth 后等 auth_challenge 的上限。
+    // 时间构成 = PC 审批超时（APPROVAL_TIMEOUT=30s）+ 5s 容错（审批后的处理与往返）。
+    // 与 connectTimeout（3s）不重叠：后者只管 WS 连接建立、onopen 时即清除。
+    const AUTH_CHALLENGE_TIMEOUT_MS = 35000;
 
     // WSClient 在 hub 上额外发出的两个**本地信号**（与下行帧共用一个 hub，见 1.3 节）：
     //   WS_CLOSE  —— 连接真的断了。**不受静默宽限期影响**：事务级的等待（等 ack / 等
@@ -1718,6 +1853,8 @@
             this._pickerAt = 0;          // 唤起文件选择器的时刻（0 = 无），见 beginPickerContext
             this._skipNextDelay = false;
             this.authRejected = false;
+            // TOFU 首次：等 auth_challenge 的计时器（PC 审批需人工介入，故远超 connectTimeout）
+            this._authChallengeTimer = null;
             this._lastClose = null;   // 最近一次 onclose 的现场（code/reason/clean/stale）
             // 下行帧分发（SignalHub：多订阅者互不覆盖，见 1.3 节）
             this.hub = new SignalHub();
@@ -1829,11 +1966,6 @@
                 this._showAuthRejected(false);
                 return;
             }
-            // 加密模式但 URL 中没有密钥（如浏览器丢失 hash）：重连无法恢复，直接提示重新扫码
-            if (this.secure.isEncrypted && !this.secure.needsAuth) {
-                this._showAuthRejected(false);
-                return;
-            }
             const t0 = Date.now();
             this._setDebugStatus(t('dbg_connect_start'));
             this._clearConnectTimer();
@@ -1857,31 +1989,33 @@
                     this._clearConnectTimer();
                     const t1 = Date.now();
                     console.info(t('log_ws_connected'), `(${t1 - t0}ms)`);
-                    this._setDebugStatus(t('dbg_handshake_ok', {ms: t1 - t0}));
+                    this._setDebugStatus(t('dbg_handshake_wait'));
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    if (this.secure.needsAuth) {
-                        const authMsg = this.secure.makeAuth();
-                        this.ws.send(MessagePack.encode(authMsg));
-                        // algo 在密封 blob 内，线上不可见；此处仅记录本地协商结果
-                        console.debug('[SEC] Auth sent, algo:', this.secure._selectedAlgo);
-                    } else {
-                        this.isConnected = true;
-                        const t2 = Date.now();
-                        this._setDebugStatus(t('dbg_ready_plain', {ms: t2 - t0}));
-                        this._notifyStatusChange(true);
+                    // 加密永远开启：auth 握手是必经之路
+                    const authMsg = this.secure.makeAuth();
+                    this.ws.send(MessagePack.encode(authMsg));
+                    console.debug('[SEC] Auth sent, algo:', this.secure._selectedAlgo,
+                                  'mode:', this.secure.authMode);
+                    // TOFU 首次：手机发完 auth 后要等 PC 用户审批，期间显示识别码
+                    // 并另起等待超时（3s 的 connectTimeout 远不够人工审批）
+                    if (this.secure.isTofuFirst) {
+                        this._showApprovalWait(this.secure.pin);
+                        this._startAuthChallengeTimer();
                     }
                 };
                 this.ws.onmessage = (event) => {
                     try {
                         const rawBytes = new Uint8Array(event.data);
 
-                        // 握手未完成且是加密模式：等的是 auth_challenge，回 auth_proof 才算接入
-                        //（明文模式没有会话密钥、服务端不发挑战，直接落到下面的数据帧路径，
-                        //  第一个 config 即确认；两者都是「乐观接入、连接被关即失败」）
-                        if (!this.isConnected && this.secure.isEncrypted) {
+                        // 握手未完成：等 auth_challenge，回 auth_proof 才算接入
+                        //（加密永远开启，服务端必发挑战；握手失败由 4001/4032 关闭）
+                        if (!this.isConnected) {
                             const t2 = Date.now();
                             const proof = this.secure.makeAuthProof(rawBytes);
                             if (proof) {
+                                // 挑战已到（TOFU 即代表审批通过）：撤掉等待计时器与识别码浮层
+                                this._clearAuthChallengeTimer();
+                                this._hideApprovalWait();
                                 this.ws.send(proof);
                                 this.isConnected = true;
                                 this._setDebugStatus(t('dbg_auth_ok', {ms: t2 - t0}));
@@ -1889,6 +2023,8 @@
                             } else {
                                 // 服务端判定失败（error code=auth）或帧不可识别：
                                 // 重试结果相同，停止自动重连并提示重新扫码
+                                this._clearAuthChallengeTimer();
+                                this._hideApprovalWait();
                                 this.authRejected = true;
                                 this._showAuthRejected(true);
                                 this.ws.close();
@@ -1896,7 +2032,7 @@
                             return;
                         }
 
-                        // 已认证：下行数据帧（加密=裸密文，明文=msgpack），解密失败即丢弃
+                        // 已认证：下行数据帧（整帧密文），解密失败即丢弃
                         let inner;
                         try {
                             inner = this.secure.decrypt(rawBytes);
@@ -1942,16 +2078,33 @@
                     };
                     this.isConnected = false;
                     this.secure._authenticated = false;
+                    // 连接结束：撤掉审批等待计时器与识别码浮层（下面各分支自行决定提示文案）
+                    this._clearAuthChallengeTimer();
+                    this._hideApprovalWait();
                     // 事务级断连信号：先于下面那套「要不要告诉界面」的判断发出，且与它无关。
                     // 静默宽限期只决定**界面表不表态**，改变不了「这条连接已经断了」的事实
                     // —— 正在等 ack 的那个传输必须据此立刻收尾，不能陪着等宽限期。
                     // stale（旧 socket 的迟到 onclose）不发：那不代表当前连接断了。
                     if (!stale) this.hub.emit(WS_CLOSE, { code, reason });
-                    // 4001 = 握手认证失败（服务端在密钥建立前就关闭：解封失败、algo 不在
-                    // 列表、明文 token 不符都走这条路）→ 重试结果相同，停止自动重连
-                    if (code === 4001 && !this.authRejected) {
+                    // 4001 = 握手认证失败（SealedBox 解封失败、algo 不在列表等）
+                    // 4001 + 本地存有 PC 公钥 = PC 侧密钥已变更（重启/换模式），
+                    // 旧公钥作废 → 清除本地公钥并自动重连，走 TOFU 首次路径重新审批。
+                    // 无需用户手动操作（e2ee-always-on-design.md §8.6）。
+                    if (code === 4001 && this.secure.authMode === 'tofu_reconnect') {
+                        this.secure.clearStoredKey();
+                        this._notifyStatusChange(false, t('auth_key_changed_text'));
+                        this._scheduleReconnect();
+                        return;
+                    }
+                    // 4001（无本地公钥）/ 4032（TOFU 审批被拒绝或超时）：重试结果相同，
+                    // 停止自动重连并提示用户
+                    if ((code === 4001 || code === 4032) && !this.authRejected) {
                         this.authRejected = true;
-                        this._showAuthRejected(true);
+                        if (code === 4032) {
+                            // 审批失败：清掉可能残留的公钥，下次重新走首次流程
+                            this.secure.clearStoredKey();
+                        }
+                        this._showAuthRejected(true, code);
                     }
                     if (this.authRejected) return; // 保持认证失败提示，不再自动重连
                     // 只有「唤起文件选择器」这条路径的断连才进静默窗口（见 _startGrace）；
@@ -2050,11 +2203,58 @@
             // 才能 removeEventListener（那是 whenReady 里唯一需要手工配对的地方）。
             this.hub.emit(WS_STATUS, { connected, message });
         }
-        _showAuthRejected(hasKey) {
-            let text = hasKey ? t('auth_rejected_text') : t('auth_nokey_text');
-            // 仅"页面缺少密钥"与微信内置浏览器丢失 hash 相关，认证失败与浏览器无关不提示
-            if (!hasKey && /MicroMessenger/i.test(navigator.userAgent)) {
-                text += '。' + t('auth_wechat_hint');
+        /**
+         * TOFU 首次：启动 auth_challenge 等待计时器。
+         *
+         * PC 端要等用户核对识别码并点「接受」，30s 审批超时是常态上限，
+         * 故这里取 APPROVAL_TIMEOUT + 5s 容错。超时即主动断开，把结论
+         * 明确告诉用户（而不是无限等一个可能永远不来的挑战）。
+         */
+        _startAuthChallengeTimer() {
+            this._clearAuthChallengeTimer();
+            this._authChallengeTimer = setTimeout(() => {
+                this._authChallengeTimer = null;
+                console.warn('[SEC] TOFU: auth_challenge timeout, closing');
+                this._notifyStatusChange(false, t('auth_approval_timeout_text'));
+                if (this.ws) {
+                    try { this.ws.close(); } catch (e) {}
+                }
+            }, AUTH_CHALLENGE_TIMEOUT_MS);
+        }
+        _clearAuthChallengeTimer() {
+            if (this._authChallengeTimer) {
+                clearTimeout(this._authChallengeTimer);
+                this._authChallengeTimer = null;
+            }
+        }
+        /** 显示审批等待浮层（识别码大字 + 提示）。 */
+        _showApprovalWait(pin) {
+            const overlay = document.getElementById('approval-overlay');
+            if (!overlay) return;
+            const titleEl = document.getElementById('approval-title');
+            const pinEl = document.getElementById('approval-pin');
+            const hintEl = document.getElementById('approval-hint');
+            if (titleEl) titleEl.textContent = t('auth_approval_title');
+            if (pinEl) pinEl.textContent = pin || '----';
+            if (hintEl) hintEl.textContent = t('auth_approval_hint');
+            overlay.classList.add('visible');
+        }
+        _hideApprovalWait() {
+            const overlay = document.getElementById('approval-overlay');
+            if (overlay) overlay.classList.remove('visible');
+        }
+        _showAuthRejected(hasKey, closeCode) {
+            let text;
+            if (closeCode === 4032) {
+                text = t('auth_tofu_rejected_text');
+            } else if (hasKey) {
+                text = t('auth_rejected_text');
+            } else {
+                text = t('auth_nokey_text');
+                // 仅"页面缺少密钥"与微信内置浏览器丢失 hash 相关，认证失败与浏览器无关不提示
+                if (/MicroMessenger/i.test(navigator.userAgent)) {
+                    text += '。' + t('auth_wechat_hint');
+                }
             }
             this._notifyStatusChange(false, text);
         }
@@ -2068,7 +2268,7 @@
          */
         sendFrame(frame) {
             if (!this.isConnected || !this.isOpen()) return false;
-            // encrypt 已产出线上字节（加密=密文 / 明文=msgpack），直接上帧
+            // encrypt 已产出线上字节（整帧加密），直接上帧
             this.ws.send(this.secure.encrypt(frame));
             return true;
         }

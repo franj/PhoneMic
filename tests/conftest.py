@@ -12,7 +12,17 @@
   （例如本机 9910 被 Code.exe 占用），表现为"单独跑通过、全量跑失败"。
 """
 
+import base64
+import json
 import socket
+from hashlib import blake2b
+
+from nacl.bindings import crypto_scalarmult
+from nacl.public import PrivateKey, PublicKey, SealedBox
+
+from phonemic.tunnel.crypto import create_provider
+from phonemic.tunnel.frame import decode as frame_decode
+from phonemic.tunnel.frame import encode as frame_encode
 
 _HOST = "127.0.0.1"
 
@@ -52,3 +62,60 @@ def get_test_port(max_tries: int = 500) -> int:
     raise RuntimeError(
         f"在 {max_tries} 次尝试内未找到空闲端口（起始端口 {_START_PORT}）"
     )
+
+
+class PhoneSimulator:
+    """模拟手机端（URL fragment 认证 / TOFU 重连路径），用 PyNaCl 代替 libsodium.js。
+
+    与 JS 端 SecureClient / CryptoProvider 行为一致：
+    - auth：`SealedBox(pc_public)` 密封 `{"algo","pk"}`（algo 不明文传输）
+    - 会话密钥：ECDH + blake2b(32) 派生，交给 CryptoProvider
+    - 防重放 seq 由 Provider 在加密层承载，不进应用层 JSON
+
+    加密永远开启，因此没有明文分支（e2ee-always-on-design.md）。
+    TOFU **首次**连接（明文 auth + 审批）的模拟见 `test_e2ee_server.py`。
+    """
+
+    def __init__(self, pc_public_key_b64: str, algo: str = "xsalsa20"):
+        self._algo = algo
+        pc_pub_bytes = base64.urlsafe_b64decode(pc_public_key_b64 + "==")
+        self._pc_public = PublicKey(pc_pub_bytes)
+        self._phone_private = PrivateKey.generate()
+        self._phone_public = self._phone_private.public_key
+        shared = crypto_scalarmult(bytes(self._phone_private), pc_pub_bytes)
+        session_key = blake2b(shared, digest_size=32).digest()
+        self._provider = create_provider(algo, session_key)
+
+    def make_auth(self, algo: str = None) -> dict:
+        """密封 {"algo","pk"}。
+
+        每次握手（= 新连接/新会话）开始时归零 seq 计数器，与服务端对齐。
+        """
+        algo = algo or self._algo
+        self._provider.reset()
+        inner = json.dumps({
+            "algo": algo,
+            "pk": base64.urlsafe_b64encode(bytes(self._phone_public)).decode().rstrip("="),
+        }).encode("utf-8")
+        # msgpack 的 bin 类型承载密封 blob，不再 base64 包裹
+        return {"type": "auth", "data": SealedBox(self._pc_public).encrypt(inner)}
+
+    def encrypt(self, msg: dict) -> bytes:
+        # 产出线上字节：整帧加密，无外层信封（seq 由 Provider 自动打上）
+        return bytes(self._provider.encrypt(frame_encode(msg)))
+
+    def decrypt(self, raw: bytes) -> dict:
+        # 还原应用层报文：整帧解密（重放/乱序/篡改由 Provider 抛错）
+        return frame_decode(self._provider.decrypt(raw))
+
+    def handshake(self, ws) -> dict:
+        """在一条连接上跑完三步握手，返回挑战帧内容。
+
+        auth_challenge 是下行首帧（服务端 tx_seq=0，整帧加密），必须在此解密消费，
+        手机端 rx 计数才能与服务端后续下行帧（config 等）对齐。
+        """
+        ws.send(frame_encode(self.make_auth()))
+        challenge = self.decrypt(ws.recv(timeout=5))
+        assert challenge["type"] == "auth_challenge", challenge
+        ws.send(self.encrypt({"type": "auth_proof", "nonce": challenge["nonce"]}))
+        return challenge

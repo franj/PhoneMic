@@ -26,7 +26,8 @@ from phonemic.bridge_interface import EventBridge
 from phonemic.gui.file import FileReceiver
 from phonemic.gui.photo import PhotoReceiver
 from phonemic.server.transfer import TransferQueue
-from phonemic.tunnel.e2ee import AUTH_TIMEOUT, SecureChannel
+from phonemic.tunnel.e2ee import AUTH_TIMEOUT, APPROVAL_TIMEOUT, SecureChannel
+from phonemic.tunnel.crypto.errors import CryptoError
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
@@ -183,6 +184,58 @@ def set_secure_channel(sc: SecureChannel) -> None:
     _secure_channel = sc
 
 
+# ---------- TOFU 审批机制 ----------
+
+# 当前待审批的 Future（同一时间只允许一个待审批请求，新请求替换旧的）
+_pending_approval: Optional[asyncio.Future] = None
+
+
+def resolve_approval(approved: bool) -> None:
+    """Dashboard（Qt 线程）调用：解决当前待审批的 TOFU 请求。
+
+    通过 ``loop.call_soon_threadsafe`` 将结果投递到 asyncio 事件循环，
+    唤醒正在 ``_await_approval`` 中等待的 WebSocket handler。
+    """
+    global _pending_approval
+    if _pending_approval is not None and not _pending_approval.done():
+        if _event_loop is not None:
+            _event_loop.call_soon_threadsafe(_set_approval_result, approved)
+    else:
+        logger.debug("resolve_approval called but no pending approval")
+
+
+def _set_approval_result(approved: bool) -> None:
+    """在事件循环线程中设置 Future 结果。"""
+    global _pending_approval
+    if _pending_approval is not None and not _pending_approval.done():
+        _pending_approval.set_result(approved)
+
+
+async def _await_approval(pin: str, client_ip: str) -> bool:
+    """等待 dashboard 审批 TOFU 连接请求。
+
+    向 bridge 发射 ``approval_request`` 事件，dashboard 据此显示审批通知。
+    调用 ``resolve_approval()`` 设置结果。新请求替换旧的待审批 Future。
+    """
+    global _pending_approval
+    loop = asyncio.get_running_loop()
+    _pending_approval = loop.create_future()
+    _manager.bridge.emit("approval_request", {"pin": pin, "ip": client_ip})
+    logger.info(f"TOFU approval requested: pin={pin}, ip={client_ip}")
+    return await _pending_approval
+
+
+def cancel_pending_approval() -> None:
+    """取消当前待审批请求（如客户端断开连接时）。"""
+    global _pending_approval
+    if _pending_approval is not None and not _pending_approval.done():
+        if _event_loop is not None:
+            _event_loop.call_soon_threadsafe(
+                lambda: _pending_approval.set_result(False) if not _pending_approval.done() else None
+            )
+
+
+
 def get_secret_path() -> str:
     """返回当前安全通道的 secret_path（未设置时为空串）。
 
@@ -299,10 +352,10 @@ def _close_reason(reason: str, limit: int = 100) -> str:
 
 
 async def _recv_handshake_frame(websocket, deadline: float):
-    """在握手的绝对截止时刻前读取一条 binary 帧。
+    """在给定截止时刻前读取一条 binary 帧。
 
-    两次握手等待（auth / auth_proof）共用同一个 deadline，因此慢速或恶意的
-    客户端无法靠「每一步都拖到超时」把握手时长翻倍。
+    deadline 按「单次等待」计算：auth 与 auth_proof 各有一份（见 _handle_auth），
+    TOFU 首次连接的审批等待夹在两者之间、不占用任何一方的时间预算。
 
     Returns:
         ``(raw_bytes, None)`` 成功；``(None, reason)`` 失败（reason 供日志）。
@@ -329,27 +382,23 @@ async def _recv_handshake_frame(websocket, deadline: float):
 
 
 async def _handle_auth(websocket, session) -> bool:
-    """S0：三步握手 —— auth（明文）→ auth_challenge → auth_proof（后两条加密）。
+    """S0：握手 —— auth → [审批] → auth_challenge → auth_proof。
 
-    加密模式下只有第三步通过才算握手完成；`none+CF` 的明文 token 没有会话
-    密钥、做不了密钥确认，auth 一过即完成。`none+LAN` 直接返回 True。
+    三种路径：
+      URL fragment / TOFU 重连：auth(SealedBox) → create_provider →
+        auth_challenge(Provider加密) → auth_proof
+      TOFU 首次：auth(明文pk+pin) → 审批 → complete_tofu_auth →
+        auth_challenge(SealedBox加密) → auth_proof
 
     所有失败都发生在 `_manager.connect()` 之前（调用方在返回 False 时短路），
-    这正是「重放 auth 帧顶掉真机连接」那条 DoS 被顺带消掉的原因。失败分两类，
-    判据是「此刻能不能加密」：
-
-      认证前（解封失败 / algo 不在下发列表）：还没有密钥，只能直接 close 4001；
-      认证后（nonce 不符 / 超时）：密钥已在手，回加密的 error(code="auth")。
+    这正是「重放 auth 帧顶掉真机连接」那条 DoS 被顺带消掉的原因。
 
     Returns:
-        True 表示握手完成（或该模式无需认证），可进入 S1
+        True 表示握手完成，可进入 S1
     """
-    if not session.needs_auth:
-        return True
-
     deadline = time.monotonic() + AUTH_TIMEOUT
 
-    # ---- 第 1 步：auth（唯一明文帧）----
+    # ---- 第 1 步：auth ----
     raw, err = await _recv_handshake_frame(websocket, deadline)
     if raw is None:
         logger.warning(f"Auth: {err}, closing")
@@ -368,28 +417,48 @@ async def _handle_auth(websocket, session) -> bool:
         await websocket.close(code=1000)
         return False
 
-    if not session.receive_auth(data):
-        reason = session.reject_reason or "auth failed"
+    try:
+        algo, session_key, pin, phone_pk = session.receive_auth(data)
+    except CryptoError as e:
+        reason = str(e) or "auth data processing failed"
         logger.warning(f"Auth rejected: {reason}, closing 4001")
-        # 认证前失败：没有任何会话密钥，也就没有任何能加密回给对端的内容
         await websocket.close(code=4001, reason=_close_reason(reason))
         return False
 
-    # none+CF：明文 token 认证，无会话密钥可用 → 做不了密钥确认
-    if not session.is_encrypted:
-        logger.info("Auth succeeded (plaintext token)")
-        return True
+    if pin is not None:
+        # TOFU 首次：等待用户审批（尚未做 ECDH）
+        client_ip = websocket.client.host if websocket.client else "unknown"
+        try:
+            approved = await asyncio.wait_for(
+                _await_approval(pin, client_ip),
+                timeout=APPROVAL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            approved = False
+        if not approved:
+            cancel_pending_approval()
+            reason = "timeout" if not approved else "rejected"
+            logger.warning(f"TOFU approval {reason}, closing 4032")
+            await websocket.close(code=4032, reason=reason)
+            return False
+        # 审批通过：现在才做 ECDH + 创建 Provider
+        session.complete_tofu_auth(algo, phone_pk)
+        # 审批等待动辄数十秒，握手 deadline 早已过期——auth_proof 必须拿到
+        # 一份全新的预算，否则「用户点了接受、握手却立刻超时」。
+        # AUTH_TIMEOUT 的语义是「单次等待的上限」，不是「整轮握手的墙钟预算」。
+        deadline = time.monotonic() + AUTH_TIMEOUT
+    else:
+        # URL fragment / TOFU 重连：session_key 已就绪
+        session.create_provider(algo, session_key)
 
-    # ---- 第 2 步：auth_challenge（加密帧）----
-    challenge = session.make_auth_challenge()
-    await websocket.send_bytes(session.wrap(challenge))
+    # ---- 第 2 步：auth_challenge ----
+    challenge_bytes = session.make_auth_challenge()
+    await websocket.send_bytes(challenge_bytes)
 
-    # ---- 第 3 步：auth_proof（加密帧）----
+    # ---- 第 3 步：auth_proof ----
     raw, err = await _recv_handshake_frame(websocket, deadline)
     proof = session.unwrap(raw) if raw is not None else None
-    if not session.verify_auth_proof(proof, challenge["nonce"]):
-        # 认证后失败：密钥已在手，用加密的 error 帧带完整语义
-        #（close reason 只有 123 字节上限，部分中间商还会丢弃）
+    if not session.verify_auth_proof(proof):
         logger.warning(f"Auth proof rejected: {err or 'nonce mismatch'}, closing")
         await websocket.send_bytes(session.wrap({"type": "error", "code": "auth"}))
         await websocket.close(code=1000)
@@ -412,13 +481,9 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
     """
     message = session.unwrap(raw)
     if message is None:
-        # 明文模式下帧非法只丢弃；加密模式下解密失败说明对端状态已错乱
-        if session.is_encrypted:
-            logger.warning("Decryption failed, closing")
-            await websocket.close(code=1000)
-            return False
-        logger.warning("Invalid frame, ignored")
-        return True
+        logger.warning("Decryption failed, closing")
+        await websocket.close(code=1000)
+        return False
 
     # 拒绝重复 auth
     if message.get("type") == "auth":

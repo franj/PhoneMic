@@ -1,6 +1,11 @@
 # PhoneMic 加密与认证解耦设计
 
-状态：**设计稿**。本文档描述对 `crypto-design.md` 和 `wire-protocol.md` 的架构变更——将"加密"与"认证"从绑定关系解耦，加密成为基线（永远开启），认证变为独立选项。
+状态：**已实现**（分支 `feature/e2ee-always-on`）。本文档描述对 `crypto-design.md` 和 `wire-protocol.md` 的架构变更——将"加密"与"认证"从绑定关系解耦，加密成为基线（永远开启），认证变为独立选项。两份下游文档已按 §11 实现影响清单同步更新。
+
+实现落地时的两处偏离（以代码为准）：
+
+- §8.1 的 `plaintextAuthData()` **已实现**在 `crypto_providers.js`，但 §8.2 伪代码里的 `_provider.generatePin()` / `_showPin()` / `deriveSessionKey()` 未按字面引入：识别码生成放在 `SecureClient._generatePin()`，Provider 通过 `setPcPublicKey()` 惰性派生会话密钥（`_deriveSharedKey()`），手机端识别码显示由 `WSClient` 的审批浮层统一负责。
+- §5.4 的"两次等待共享一个 deadline"已被推翻：`AUTH_TIMEOUT` 语义收窄为**单次**等待上限。审批等待（最长 30s）夹在 `auth` 与 `auth_proof` 之间，若共用一份预算，用户点「允许」时 deadline 已过期、握手会立刻超时。
 
 ---
 

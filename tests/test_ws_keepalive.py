@@ -9,7 +9,8 @@ tests/test_ws_keepalive.py — phonemic/server/api.py 应用层保活单元测�
   不再被误杀的**核心保证**；
 - `pong` 在白名单内（不回 error），未知类型仍回 error（防回归）。
 
-纯单测不碰网络：websocket 与 session 均为替身，`_manager` 置空使其走明文编码。
+纯单测不碰网络：websocket 与 session 均为替身，`_manager` 置空使 `_send_frame`
+直接 `frame_encode`（不经会话加密包装），下行帧因而能被 `frame_decode` 读回。
 """
 import asyncio
 import threading
@@ -84,9 +85,15 @@ class _FakeWS:
 
 
 class _FakeSession:
-    """最小 session 替身：unwrap 直接返回预置消息（明文模式，不做加解密）。"""
+    """最小 session 替身：unwrap 直接返回预置消息，不实现真实的 AEAD 解密封装。
 
-    is_encrypted = False
+    `is_encrypted` 恒为 True 才符合新语义（docs/e2ee-always-on-design.md §8.4：
+    加密永远开启，不存在明文分支，`is_encrypted` 的 False 分支已删除）。判活用例
+    不关心加解密，这里保留该属性只是为了与真实 SecureSession 的对外形状一致——
+    它不再表示「明文模式」，明文模式本身已不存在。
+    """
+
+    is_encrypted = True
 
     def __init__(self, message):
         self._message = message

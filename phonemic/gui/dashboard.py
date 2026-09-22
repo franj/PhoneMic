@@ -6,13 +6,14 @@ import qrcode
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics, QPixmap, QAction, QActionGroup, QPainter, QColor, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QLabel, QTextBrowser, QFrame, QMessageBox,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QTextBrowser, QFrame, QMessageBox, QLayout,
     QApplication, QDialog, QRadioButton, QCheckBox, QDialogButtonBox
 )
 
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
 from phonemic.utils.paths import get_app_root, get_build_info, is_frozen
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
@@ -65,7 +66,7 @@ class Dashboard(QMainWindow):
         self._mode_switch_callback: Optional[Callable[[TunnelMode], None]] = None
         self._restart_service_callback: Optional[Callable[[], None]] = None
         self._secure_channel = None  # SecureChannel 引用，由外部设置
-        self._algorithm: str = self.sm.get("e2ee_algorithm", "none")
+        self._auth_method: str = self.sm.get("auth_method", "tofu")
         self._negotiated_algo: Optional[str] = None  # 本次连接握手协商出的算法，由 connect 事件携带
         self._algorithm_change_callback: Optional[Callable[[str], None]] = None
         # connection 状态栏的两个入参：connected 此前只在 update_connection_status()
@@ -98,8 +99,56 @@ class Dashboard(QMainWindow):
         self._refresh_qr()
 
     def set_algorithm_change_callback(self, callback: Callable[[str], None]):
-        """设置算法变更回调函数。"""
+        """设置认证方式变更回调函数。"""
         self._algorithm_change_callback = callback
+
+    def set_approval_callback(self, callback: Callable[[bool], None]):
+        """设置 TOFU 审批结果回调函数（调用 resolve_approval）。"""
+        self._approval_callback = callback
+
+    def show_approval_request(self, pin: str, client_ip: str) -> None:
+        """显示 TOFU 审批通知（主界面内嵌，非弹窗）。
+
+        通知占用地址栏/说明区那一块，因此同时把 ip_label 与说明标签让出去
+        （见 _set_main_info_visible）；新请求直接替换旧的待审批通知，不排队、不打扰。
+        """
+        self._approval_title.setText(self.i18n.tr("dashboard.approval_title"))
+        # 逐位空格分隔：隔着距离也能一眼念出，便于与手机屏幕上的数字逐一核对
+        self._approval_pin_label.setText(" ".join(pin) if pin else "----")
+        self._approval_info.setText(
+            self.i18n.tr("dashboard.approval_detail", ip=client_ip))
+        self._approval_accept_btn.setText(self.i18n.tr("dashboard.approval_accept"))
+        self._approval_deny_btn.setText(self.i18n.tr("dashboard.approval_deny"))
+        self._set_main_info_visible(False)
+        self._approval_frame.setVisible(True)
+        self._approval_frame.update()
+
+    def hide_approval_request(self) -> None:
+        """隐藏审批通知，并把地址栏/说明区还回来。"""
+        self._approval_frame.setVisible(False)
+        self._set_main_info_visible(True)
+
+    def _set_main_info_visible(self, visible: bool) -> None:
+        """审批通知与地址栏/说明区互斥显示。
+
+        让位时两者都藏起来（含 CF 说明），恢复时按当前模式还原应有的那一条——
+        与 _apply_mode_ui 的显隐规则保持一致，但不依赖它（它会在切换中提前返回）。
+        """
+        self.ip_label.setVisible(visible)
+        if not visible:
+            self.info_label.setVisible(False)
+            self.cf_info_label.setVisible(False)
+            return
+        is_lan = self._mode == TunnelMode.LAN
+        self.info_label.setVisible(is_lan)
+        self.cf_info_label.setVisible(not is_lan)
+
+    def _resolve_approval(self, approved: bool) -> None:
+        """用户点击允许/拒绝后调用回调并隐藏通知。"""
+        self.hide_approval_request()
+        cb = getattr(self, "_approval_callback", None)
+        if cb:
+            cb(approved)
 
     def set_mouse_debug_window(self, win):
         """注入独立调试窗口（临时工具），由「程序」菜单打开。"""
@@ -149,6 +198,69 @@ class Dashboard(QMainWindow):
         self.ip_label.setFixedHeight(fm.lineSpacing() * 3 + 4)     # 固定 3 行高，可调
         self._set_ip_text(f"http://{ip}:{port}")
         layout.addWidget(self.ip_label)
+
+        # ----- TOFU 审批通知（主界面内嵌，非弹窗）-----
+        # 与地址栏/说明区**同位**：审批期间把 ip_label 与说明标签整块让给审批通知
+        # （见 _set_main_info_visible），既不把主界面撑高，也让注意力落在识别码上。
+        self._approval_frame = QFrame()
+        self._approval_frame.setFrameShape(QFrame.Box)
+        self._approval_frame.setStyleSheet(
+            "QFrame { border: 2px solid #4CAF50; border-radius: 6px; background: #f1f8e9; }")
+        self._approval_frame.setVisible(False)
+        approval_layout = QVBoxLayout(self._approval_frame)
+        approval_layout.setContentsMargins(4, 4, 4, 4)
+        approval_layout.setSpacing(3)
+        # 主界面尺寸固定（setFixedSize），审批面板要靠"最小尺寸"把高度钉住：
+        # 否则父布局空间不足时会静默压扁它，按钮/识别码被裁掉一半。
+        approval_layout.setSizeConstraint(QLayout.SetMinimumSize)
+
+        self._approval_title = QLabel()
+        self._approval_title.setAlignment(Qt.AlignCenter)
+        self._approval_title.setStyleSheet(
+            "font-weight: bold; color: #2e7d32; font-size: 12px; border: none;")
+        approval_layout.addWidget(self._approval_title)
+
+        # 识别码：审批场景下唯一需要用户"读出来核对"的信息。字号拉到 30pt（正文
+        # 的约 4 倍）+ 加粗 + 逐位空格分隔，隔着一段距离也能一眼念出。
+        # 面板总高受主界面固定高度约束——它要正好塞进地址栏+说明区让出的空间，
+        # 因此说明文字必须单行（见 locales 的 approval_detail 长度）。
+        self._approval_pin_label = QLabel()
+        self._approval_pin_label.setAlignment(Qt.AlignCenter)
+        pin_font = self._approval_pin_label.font()
+        pin_font.setPointSize(30)
+        pin_font.setBold(True)
+        self._approval_pin_label.setFont(pin_font)
+        self._approval_pin_label.setStyleSheet("color: #1b5e20; border: none;")
+        approval_layout.addWidget(self._approval_pin_label)
+
+        self._approval_info = QLabel()
+        self._approval_info.setAlignment(Qt.AlignCenter)
+        # 刻意不换行：换行会让面板高度随可用宽度浮动（heightForWidth 不透过
+        # QFrame 传递），固定高度窗口下难以保证不被裁。文案长度由 locales 控制，
+        # 契约由 test_approval_panel_fits_fixed_window 的宽度断言守住。
+        self._approval_info.setStyleSheet("color: #33691e; font-size: 11px; border: none;")
+        approval_layout.addWidget(self._approval_info)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self._approval_accept_btn = QPushButton()
+        self._approval_accept_btn.setMinimumHeight(28)
+        self._approval_accept_btn.setStyleSheet(
+            "QPushButton { background: #4CAF50; color: white; border: none; "
+            "border-radius: 4px; font-size: 13px; font-weight: bold; }")
+        self._approval_accept_btn.clicked.connect(lambda: self._resolve_approval(True))
+        btn_row.addWidget(self._approval_accept_btn)
+
+        self._approval_deny_btn = QPushButton()
+        self._approval_deny_btn.setMinimumHeight(28)
+        self._approval_deny_btn.setStyleSheet(
+            "QPushButton { background: #e53935; color: white; border: none; "
+            "border-radius: 4px; font-size: 13px; }")
+        self._approval_deny_btn.clicked.connect(lambda: self._resolve_approval(False))
+        btn_row.addWidget(self._approval_deny_btn)
+        approval_layout.addLayout(btn_row)
+
+        layout.addWidget(self._approval_frame)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))
@@ -201,16 +313,20 @@ class Dashboard(QMainWindow):
             else:
                 self._set_ip_text(self.i18n.tr("dashboard.cf_connecting"))
 
+        # 审批通知在显示中时把说明标签再让回去：本方法会被模式切换/重连等路径调用，
+        # 不补这一手就会让说明标签与审批面板同时占着同一块位置。
+        if self._approval_frame.isVisible():
+            self._set_main_info_visible(False)
+
     def _sync_menu_checks(self) -> None:
         """根据当前模式同步菜单勾选状态。"""
         self.act_lan.setChecked(self._mode == TunnelMode.LAN)
         self.act_cf.setChecked(self._mode == TunnelMode.CLOUDFLARE)
-        # Cloudflare 模式下禁用明文（none）选项
-        self.act_algo_none.setEnabled(self._mode == TunnelMode.LAN)
-        # 复选框跟随实际生效的加密状态（CF + 配置 none 实际强制加密）
-        eff = effective_algorithm(self._algorithm, self._mode)
-        self.act_algo_none.setChecked(eff == "none")
-        self.act_algo_encrypted.setChecked(eff == "auto")
+        # Cloudflare 模式下禁用 TOFU（公网无信任锚，强制扫码认证）
+        self.act_auth_tofu.setEnabled(self._mode == TunnelMode.LAN)
+        eff = effective_auth_method(self._auth_method, self._mode)
+        self.act_auth_tofu.setChecked(eff == "tofu")
+        self.act_auth_url_fragment.setChecked(eff == "url_fragment")
 
     def _set_busy(self, busy: bool) -> None:
         """进入/退出「切换中·重启中」状态：期间禁止再次触发网络菜单的操作。
@@ -240,19 +356,18 @@ class Dashboard(QMainWindow):
         if self._mode_switch_callback:
             self._mode_switch_callback(target_mode)
 
-    def _on_algorithm_clicked(self, algo: str) -> None:
-        """点击加密开关菜单项（"none" 不加密 / "auto" 加密，具体算法由客户端协商）。"""
-        if algo == self._algorithm:
+    def _on_auth_method_clicked(self, auth_method: str) -> None:
+        """点击认证方式菜单项（"tofu" 手动审批 / "url_fragment" 扫码认证）。"""
+        if auth_method == self._auth_method:
             return
-        # Cloudflare 模式拒绝明文，防止明文 token 在公网泄漏
-        if algo == "none" and self._mode == TunnelMode.CLOUDFLARE:
-            # QActionGroup exclusive 会自动勾选 none，恢复到实际生效的勾选状态
+        # Cloudflare 模式拒绝 TOFU，公网无信任锚
+        if auth_method == "tofu" and self._mode == TunnelMode.CLOUDFLARE:
             self._sync_menu_checks()
             return
-        self._algorithm = algo
-        self.sm.set("e2ee_algorithm", algo)
+        self._auth_method = auth_method
+        self.sm.set("auth_method", auth_method)
         if self._algorithm_change_callback:
-            self._algorithm_change_callback(algo)
+            self._algorithm_change_callback(auth_method)
         self._refresh_qr()
         self.update_connection_status(self.connected)
         self._sync_menu_checks()
@@ -384,21 +499,22 @@ class Dashboard(QMainWindow):
 
         network_menu.addSeparator()
 
-        # 加密方式平铺：只暴露加密/不加密，具体算法由客户端从 a= 列表协商
-        algo_group = QActionGroup(self)
-        algo_group.setExclusive(True)
+        # 认证方式：TOFU（手动审批）或 URL fragment（扫码认证）
+        # 加密永远开启，此处仅选择认证方式；CF 模式强制 url_fragment
+        auth_group = QActionGroup(self)
+        auth_group.setExclusive(True)
 
-        self.act_algo_none = QAction(self.i18n.tr("dashboard.algo_none"), self)
-        self.act_algo_none.setCheckable(True)
-        self.act_algo_none.triggered.connect(lambda: self._on_algorithm_clicked("none"))
-        algo_group.addAction(self.act_algo_none)
-        network_menu.addAction(self.act_algo_none)
+        self.act_auth_tofu = QAction(self.i18n.tr("dashboard.auth_tofu"), self)
+        self.act_auth_tofu.setCheckable(True)
+        self.act_auth_tofu.triggered.connect(lambda: self._on_auth_method_clicked("tofu"))
+        auth_group.addAction(self.act_auth_tofu)
+        network_menu.addAction(self.act_auth_tofu)
 
-        self.act_algo_encrypted = QAction(self.i18n.tr("dashboard.algo_encrypted"), self)
-        self.act_algo_encrypted.setCheckable(True)
-        self.act_algo_encrypted.triggered.connect(lambda: self._on_algorithm_clicked("auto"))
-        algo_group.addAction(self.act_algo_encrypted)
-        network_menu.addAction(self.act_algo_encrypted)
+        self.act_auth_url_fragment = QAction(self.i18n.tr("dashboard.auth_url_fragment"), self)
+        self.act_auth_url_fragment.setCheckable(True)
+        self.act_auth_url_fragment.triggered.connect(lambda: self._on_auth_method_clicked("url_fragment"))
+        auth_group.addAction(self.act_auth_url_fragment)
+        network_menu.addAction(self.act_auth_url_fragment)
 
         network_menu.addSeparator()
 
@@ -412,8 +528,9 @@ class Dashboard(QMainWindow):
 
         # 重启服务（两种模式都可用）：按当前模式把服务重来一遍——省掉用户
         # 「先切到局域网、再切回 Cloudflare」那套操作（切到已选中的模式是空操作）。
-        # 加密模式下会换新身份（新的 secret 路径与密钥对 → 新二维码），手机端需
-        # 重新扫码；CF 模式还会换上新的临时域名，是隧道被回收后的自救路径。
+        # 重启会换新身份（新的 secret 路径与密钥对 → 新二维码），手机端需重新配对：
+        # 扫码认证重新扫二维码，手动审批则再点一次「允许」；CF 模式还会换上新的
+        # 临时域名，是隧道被回收后的自救路径。
         self.act_restart_service = QAction(self.i18n.tr("dashboard.menu_restart_service"), self)
         self.act_restart_service.triggered.connect(self._on_restart_service)
         network_menu.addAction(self.act_restart_service)
@@ -471,7 +588,8 @@ class Dashboard(QMainWindow):
     def _on_restart_service(self) -> None:
         """点击「重启服务」：按当前模式把服务重来一遍。
 
-        会换新身份（加密模式下 secret 路径与密钥对都变），手机端需重新扫码。
+        会换新身份（secret 路径与密钥对都变），手机端需重新配对：扫码认证重新扫
+        二维码，手动审批则再点一次「允许」。
         这里先清掉 `_tunnel_url` 并擦掉二维码：否则 CF 重启失败时，界面会把
         已经作废的旧域名当成有效地址继续显示，用户扫了也连不上。
         """
@@ -525,16 +643,14 @@ class Dashboard(QMainWindow):
             self._negotiated_algo = None
         if connected:
             text = '<span style="color:green;">●</span> ' + self.i18n.tr("dashboard.status_connected")
-            if effective_algorithm(self._algorithm, self._mode) == "none":
-                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_plaintext") + '</span>'
-            elif self._negotiated_algo and self._negotiated_algo != "none":
-                # 算法由客户端协商决定，状态栏透明展示实际算法
+            # 加密永远开启，状态栏展示认证方式 + 协商算法
+            eff_auth = effective_auth_method(self._auth_method, self._mode)
+            auth_display = self.i18n.tr("dashboard.status_auth_tofu" if eff_auth == "tofu" else "dashboard.status_auth_url_fragment")
+            text += ' <span style="color:#666;">| ' + auth_display
+            if self._negotiated_algo and self._negotiated_algo != "none":
                 algo_display = self._algo_display_name(self._negotiated_algo)
-                text += ' <span style="color:#666;">| ' + self.i18n.tr(
-                    "dashboard.status_encrypted_algo", algo=algo_display) + '</span>'
-            else:
-                # 尚未收到协商结果（如模式切换后状态刷新）时退化为通用文案
-                text += ' <span style="color:#666;">| ' + self.i18n.tr("dashboard.status_encrypted") + '</span>'
+                text += ' / ' + algo_display
+            text += '</span>'
         else:
             text = '<span style="color:red;">●</span> ' + self.i18n.tr("dashboard.status_disconnected")
 

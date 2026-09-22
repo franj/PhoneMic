@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_algorithm
+from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
 
 
 class TestTunnelMode:
@@ -55,24 +55,18 @@ class TestSetMode:
             mock_sm.set.assert_called_once_with("tunnel_mode", "cloudflare")
 
 
-class TestEffectiveAlgorithm:
-    """effective_algorithm 返回 "none"/"auto"，CF 模式强制加密。"""
+class TestEffectiveAuthMethod:
+    """effective_auth_method 返回 "tofu"/"url_fragment"，CF 模式强制 url_fragment。"""
 
-    def test_lan_none_stays_none(self):
-        assert effective_algorithm("none", TunnelMode.LAN) == "none"
+    def test_lan_tofu_stays_tofu(self):
+        assert effective_auth_method("tofu", TunnelMode.LAN) == "tofu"
 
-    def test_lan_auto_stays_auto(self):
-        assert effective_algorithm("auto", TunnelMode.LAN) == "auto"
+    def test_lan_url_fragment_stays_url_fragment(self):
+        assert effective_auth_method("url_fragment", TunnelMode.LAN) == "url_fragment"
 
-    def test_cf_none_forced_to_auto(self):
-        """CF 模式下配置 none 强制加密。"""
-        assert effective_algorithm("none", TunnelMode.CLOUDFLARE) == "auto"
+    def test_cf_tofu_forced_to_url_fragment(self):
+        """CF 模式下 tofu 被强制为 url_fragment。"""
+        assert effective_auth_method("tofu", TunnelMode.CLOUDFLARE) == "url_fragment"
 
-    def test_cf_auto_stays_auto(self):
-        assert effective_algorithm("auto", TunnelMode.CLOUDFLARE) == "auto"
-
-    def test_legacy_values_normalized_to_auto(self):
-        """历史配置值 xsalsa20/xchacha20 统一归一化为 auto。"""
-        assert effective_algorithm("xsalsa20", TunnelMode.LAN) == "auto"
-        assert effective_algorithm("xchacha20", TunnelMode.LAN) == "auto"
-        assert effective_algorithm("xsalsa20", TunnelMode.CLOUDFLARE) == "auto"
+    def test_cf_url_fragment_stays_url_fragment(self):
+        assert effective_auth_method("url_fragment", TunnelMode.CLOUDFLARE) == "url_fragment"
