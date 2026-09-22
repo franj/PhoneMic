@@ -1851,6 +1851,11 @@
             localStorage.removeItem(this._storageKey);
             this._pcPublicKeyB64 = null;
             this._pcPublicKeyRaw = null;
+            // Provider 里那份 PC 公钥（以及由它派生的会话密钥）同样作废：
+            // 它是上一任密钥对留下的，留着会让手机拿旧会话密钥加密 auth_proof
+            if (this._provider && this._provider.setPcPublicKey) {
+                this._provider.setPcPublicKey(null);
+            }
             this._authMode = 'tofu_first';
             this._awaitingSealedPin = false;
             this._awaitingTofuApproval = false;

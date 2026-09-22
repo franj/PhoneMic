@@ -270,6 +270,22 @@ class SecureSession:
         self._authenticated = True
         return True
 
+    def proof_rejection_reason(self, proof_msg: Optional[dict]) -> str:
+        """给日志用的拒因：区分「解不开」与「nonce 不符」两种完全不同的问题。
+
+        auth_proof 解不开几乎总是**会话密钥不一致**（典型触发：对端换过 PC
+        密钥对、却仍拿着上一任公钥派生的会话密钥），把它记成 nonce mismatch
+        会把排查带偏——nonce 只是跟着一起对不上而已。
+        """
+        if proof_msg is None:
+            return "undecryptable (session key mismatch?)"
+        if proof_msg.get("type") != "auth_proof":
+            return f"unexpected frame: {proof_msg.get('type')!r}"
+        got = proof_msg.get("nonce")
+        if not isinstance(got, (bytes, bytearray)):
+            return "missing nonce"
+        return "nonce mismatch"
+
     # ---- 数据加解密 ----
 
     def wrap(self, message: dict) -> bytes:

@@ -135,7 +135,18 @@ class NaClBoxProvider {
     get phonePublicKey() { return this._phonePublicKey; }
     /** 获取手机私钥原始字节（TOFU 首次解密 challenge 用）。 */
     get phonePrivateKey() { return this._phonePrivate; }
-    setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
+    /**
+     * 设置 PC 公钥，并让已缓存的会话密钥**作废**。
+     *
+     * 作废是必须的：服务重启会换掉 PC 密钥对，重配对后 PC 公钥也随之改变。
+     * 若 _sharedKey 仍留着上一任公钥派生的值，手机就会拿旧密钥去加密
+     * auth_proof，服务端解不开——日志表现为「nonce mismatch」，且只有刷新
+     * 页面才恢复。缓存键是会话密钥，它的输入变了就必须重算。
+     */
+    setPcPublicKey(rawBytes) {
+        this._pcPublicKey = rawBytes;
+        this._sharedKey = null;
+    }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
         return sealedAuthData('xsalsa20', this._phonePublicKey, this._pcPublicKey);
@@ -204,7 +215,13 @@ class XChaCha20Provider {
     get phonePublicKey() { return this._phonePublicKey; }
     /** 获取手机私钥原始字节（TOFU 首次解密 challenge 用）。 */
     get phonePrivateKey() { return this._phonePrivate; }
-    setPcPublicKey(rawBytes) { this._pcPublicKey = rawBytes; }
+    /**
+     * 设置 PC 公钥，并让已缓存的会话密钥**作废**（理由同 NaClBoxProvider）。
+     */
+    setPcPublicKey(rawBytes) {
+        this._pcPublicKey = rawBytes;
+        this._sharedKey = null;
+    }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
         return sealedAuthData('xchacha20', this._phonePublicKey, this._pcPublicKey);

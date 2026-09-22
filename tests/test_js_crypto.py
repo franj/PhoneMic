@@ -220,6 +220,38 @@ class TestNaClBoxProvider:
         """)
         assert json.loads(result)["text"] == "world"
 
+    def test_set_pc_public_key_invalidates_cached_session_key(self, crypto_page):
+        """换掉 PC 公钥必须让缓存的会话密钥作废（理由见 XChaCha20Provider 同名用例）。"""
+        result = crypto_page.evaluate("""
+            () => {
+                const phone = new NaClBoxProvider();
+                phone.initKeypair();
+                const pcA = sodium.crypto_box_keypair();
+                const pcB = sodium.crypto_box_keypair();
+                phone.setPcPublicKey(pcA.publicKey);
+                phone.encrypt(sodium.from_string('with-a'));    /* 派生并缓存 */
+                phone.setPcPublicKey(pcB.publicKey);            /* 换成 B */
+                const ct = phone.encrypt(sodium.from_string('with-b'));
+
+                const nonceSize = sodium.crypto_box_NONCEBYTES;
+                const nonce = ct.slice(0, nonceSize);
+                const body = ct.slice(nonceSize);
+                const keyFor = (pcPriv) => sodium.crypto_generichash(
+                    32, sodium.crypto_scalarmult(pcPriv, phone._phonePublicKey));
+                let textB = null, threwWithA = false;
+                try {
+                    textB = sodium.to_string(sodium.crypto_box_open_easy_afternm(
+                        body, nonce, keyFor(pcB.privateKey)).slice(8));
+                } catch (e) { textB = 'FAILED: ' + e.message; }
+                try {
+                    sodium.crypto_box_open_easy_afternm(body, nonce, keyFor(pcA.privateKey));
+                } catch (e) { threwWithA = true; }
+                return { textB: textB, threwWithA: threwWithA };
+            }
+        """)
+        assert result["textB"] == "with-b", "换公钥后必须用新公钥派生的密钥加密"
+        assert result["threwWithA"] is True, "旧会话密钥不应继续生效"
+
     def test_cross_platform_js_encrypt_py_decrypt(self, crypto_page):
         """跨平台：JS 手机端加密 → Python PC 端解密。"""
         pc_priv = PrivateKey.generate()
@@ -382,6 +414,45 @@ class TestXChaCha20Provider:
             }
         """)
         assert json.loads(result)["text"] == "xchacha-rt"
+
+    def test_set_pc_public_key_invalidates_cached_session_key(self, crypto_page):
+        """换掉 PC 公钥（服务重启后重配对）必须让缓存的会话密钥作废。
+
+        ``_sharedKey`` 是懒派生的：命中缓存就直接返回，而它的输入含 PC 公钥。
+        手机在同一个页面内往往已经用**上一任** PC 公钥派生过会话密钥，此时只
+        清 localStorage 不重置 Provider，手机就会拿旧密钥加密 auth_proof——
+        服务端解不开，日志上表现为 "Auth proof rejected"，且刷新页面才恢复。
+        """
+        result = crypto_page.evaluate("""
+            () => {
+                const phone = new XChaCha20Provider();
+                phone.initKeypair();
+                const pcA = sodium.crypto_box_keypair();
+                const pcB = sodium.crypto_box_keypair();
+                phone.setPcPublicKey(pcA.publicKey);
+                phone.encrypt(sodium.from_string('with-a'));    /* 派生并缓存 */
+                phone.setPcPublicKey(pcB.publicKey);            /* 换成 B */
+                const ct = phone.encrypt(sodium.from_string('with-b'));
+
+                const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+                const nonce = ct.slice(0, nonceSize);
+                const body = ct.slice(nonceSize);
+                const keyFor = (pcPriv) => sodium.crypto_generichash(
+                    32, sodium.crypto_scalarmult(pcPriv, phone._phonePublicKey));
+                let textB = null, threwWithA = false;
+                try {
+                    textB = sodium.to_string(sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+                        null, body, seqToBytes(1), nonce, keyFor(pcB.privateKey)));
+                } catch (e) { textB = 'FAILED: ' + e.message; }
+                try {
+                    sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+                        null, body, seqToBytes(1), nonce, keyFor(pcA.privateKey));
+                } catch (e) { threwWithA = true; }
+                return { textB: textB, threwWithA: threwWithA };
+            }
+        """)
+        assert result["textB"] == "with-b", "换公钥后必须用新公钥派生的密钥加密"
+        assert result["threwWithA"] is True, "旧会话密钥不应继续生效"
 
     def test_cross_platform_js_encrypt_py_decrypt(self, crypto_page):
         """跨平台：JS XChaCha20 加密 → Python 解密。"""

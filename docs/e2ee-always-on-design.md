@@ -969,6 +969,7 @@ if (closeCode === 4001) {
 - **自动重连**：收到 4001 且 localStorage 有旧 key → 清除 localStorage → 自动重连（走 TOFU 首次路径）。用户不需要手动操作。
 - **手机端 UI 区分**：重连场景（之前有 localStorage）显示"PC 密钥已变更，等待重新审批"；全新连接显示"等待 PC 审批"。仅 UI 文案不同，协议层完全一致。
 - **PC 端不区分**：PC 收到的 TOFU auth 帧与全新连接的 auth 帧完全相同（`{algo, pk}`），PC 无法也不需要区分两者。审批通知统一显示"新连接请求 + 识别码"。
+- ⚠️ **Provider 里缓存的会话密钥必须随 PC 公钥一起作废**：`_sharedKey` 是懒派生的（`_deriveSharedKey()` 命中缓存就返回），而它的输入含 `_pcPublicKey`。手机在一个页面内可能已经用**上一任** PC 公钥派生过会话密钥，此时只清 localStorage、不重置 Provider，手机就会拿旧密钥加密 `auth_proof`——服务端解不开，日志上表现为 `Auth proof rejected` 且**换个浏览器标签也不会自愈**。因此 `setPcPublicKey()` 内部一律把 `_sharedKey` 置空，`clearStoredKey()` 也顺带调一次 `setPcPublicKey(null)`。
 
 ### 8.7 其他 localStorage 清理场景
 

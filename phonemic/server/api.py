@@ -351,6 +351,25 @@ def _close_reason(reason: str, limit: int = 100) -> str:
     return reason.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
 
 
+async def _try_send_bytes(websocket, payload: bytes, what: str) -> bool:
+    """尽力发一帧；对端已断开时不让异常冒泡成 ASGI 层的一屏 traceback。
+
+    握手失败的收尾常常发生在「对端已经关掉连接」之后（多数失败正是对端先关
+    的），此时 send 会抛 ``WebSocketDisconnect`` / ``ClientDisconnected``。握手
+    本身已经判定失败，这类异常唯一合理的归宿是日志里的一行，而不是 uvicorn
+    打出来的整条栈——那会让人以为服务端崩了。
+
+    Returns:
+        True 表示发出去了，False 表示连接已不可用（调用方按失败处理即可）。
+    """
+    try:
+        await websocket.send_bytes(payload)
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to send {what}: {e}")
+        return False
+
+
 async def _recv_handshake_frame(websocket, deadline: float):
     """在给定截止时刻前读取一条 binary 帧。
 
@@ -436,10 +455,8 @@ async def _handle_auth(websocket, session) -> bool:
     if session.is_tofu_first:
         # TOFU 首次：先把 PC 指派的识别码密封下发给这一方，再进入人工审批。
         # 识别码本身由 session 生成（不由对端提供），可与后续挑战共用同一个 nonce。
-        try:
-            await websocket.send_bytes(session.make_sealed_pin())
-        except Exception as e:
-            logger.warning(f"Failed to send sealed pin: {e}")
+        if not await _try_send_bytes(websocket, session.make_sealed_pin(), "sealed pin"):
+            logger.warning("Failed to send sealed pin, closing")
             return False
         client_ip = websocket.client.host if websocket.client else "unknown"
         try:
@@ -467,14 +484,20 @@ async def _handle_auth(websocket, session) -> bool:
 
     # ---- 第 2 步：auth_challenge ----
     challenge_bytes = session.make_auth_challenge()
-    await websocket.send_bytes(challenge_bytes)
+    if not await _try_send_bytes(websocket, challenge_bytes, "auth_challenge"):
+        logger.warning("Failed to send auth_challenge, closing")
+        return False
 
     # ---- 第 3 步：auth_proof ----
     raw, err = await _recv_handshake_frame(websocket, deadline)
     proof = session.unwrap(raw) if raw is not None else None
     if not session.verify_auth_proof(proof):
-        logger.warning(f"Auth proof rejected: {err or 'nonce mismatch'}, closing")
-        await websocket.send_bytes(session.wrap({"type": "error", "code": "auth"}))
+        # 拒因按「解不开 / nonce 不符」分开记：解不开几乎都是会话密钥不一致，
+        # 笼统报 nonce mismatch 会把排查带偏（见 SecureSession.proof_rejection_reason）
+        reason = err or session.proof_rejection_reason(proof)
+        logger.warning(f"Auth proof rejected: {reason}, closing")
+        await _try_send_bytes(
+            websocket, session.wrap({"type": "error", "code": "auth"}), "auth error")
         await websocket.close(code=1000)
         return False
 
