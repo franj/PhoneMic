@@ -196,11 +196,12 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
  │
  │  手机把 pc_pk 存入 localStorage（信任锚，后续重连走 5.1）
  │
- │  ── 拒绝 / 30s 未操作 ──────────────────────────────►│  WS close 4032（reason="rejected" / "timeout"）
+ │  ── 拒绝 / 30s 未操作 / 被取代 / 手机掉线 ─────────────►│  WS close 4032（reason= rejected / timeout / superseded / disconnected）
 ```
 
 - `auth_challenge` **必须等审批通过才发**：它是 PC 公钥（= token）的唯一带内分发通道，提前暴露等于让未授权的连接方拿到 token 绕过审批（`crypto-design.md` §3.5）。同一条理由不适用于第 2 步的 `sealed`——它里面只有识别码与 nonce、**不含 PC 公钥**，所以可以在审批前下发（而且必须：用户开始核对之前，手机上得先有一个码）。
 - 审批在 ECDH **之前**：收到明文 auth 只解析字段，被拒绝的连接零密钥计算开销。
+- 审批是**一条连接一个实例**、进队列后由用户按 id 结算（`e2ee-always-on-design.md` §7.4）：同一 IP 的新连接取代该 IP 的旧请求（`superseded`）；用户批准一条会作废其余待审批请求（`superseded`）；对端断开立刻摘除（`disconnected`）。这四个 reason 只是 close 帧的文案，**不改变线上帧格式**。
 - 手机发完 `auth` 后等挑战的上限是 **35s**（= PC 审批超时 30s + 5s 容错），起算点是 `auth` 发出那一刻，因此第 2 步（纯下行一张帧，正常毫秒级返回）与第 4 步共用这同一份预算。`connectTimeout`（3s）只覆盖 WS 连接建立、在 `onopen` 时清除，不覆盖这段人工等待。
 - PC 侧两次等待（`auth` / `auth_proof`）各自计一份 `AUTH_TIMEOUT`（10s），审批时长不占用任何一方——否则"用户点了允许、auth_proof 却立刻超时"。
 - TOFU 重连（localStorage 有 PC 公钥）完全走 5.1，**不需要审批**：能密封 SealedBox 即持有 token。
@@ -313,7 +314,7 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 - 因此**不要把 `ts` 之类既有字段升格成它**：毫秒级时间戳原则上会碰撞（同一毫秒内的两条连接 → 同一个值），而且会把一个纯装饰字段悄悄变成安全关键字段，日后无人查得出来。
 - 该 `nonce` 是**消息层的握手随机数**，与 `crypto-design.md` §6 密文布局里的 AEAD nonce（24 字节、由库自动生成、消息层不可见）没有关系。
 - **它不重复"我已经承认你的材料"这件事**：手机能解开这一帧，本身就是"PC 持有正确会话密钥"的证明，不需要再加一句话；`nonce` 在这里的唯一职责是提供新鲜度。
-- **TOFU 首次必须等审批通过才发**，且用 `SealedBox(phone_pk)` 加密 `{"pk":<PC 公钥>,"nonce":<16B>}`——此刻手机还没有 Provider，无法收对称加密帧；同时这也保证 PC 公钥（= token）不会在审批前泄露给对端。手机解封后即可得到 PC 公钥、派生会话密钥，并把 PC 公钥存入 `localStorage`。拒绝 / 超时（30s）时服务端发 `WS close: code=4032`（`reason="rejected"` / `"timeout"`）。
+- **TOFU 首次必须等审批通过才发**，且用 `SealedBox(phone_pk)` 加密 `{"pk":<PC 公钥>,"nonce":<16B>}`——此刻手机还没有 Provider，无法收对称加密帧；同时这也保证 PC 公钥（= token）不会在审批前泄露给对端。手机解封后即可得到 PC 公钥、派生会话密钥，并把 PC 公钥存入 `localStorage`。审批未通过时服务端发 `WS close: code=4032`，reason ∈ `rejected`（用户拒绝）/ `timeout`（30s 无操作）/ `superseded`（被同 IP 的新连接取代或被用户批准的别条清场）/ `disconnected`（对端已断开）。
 - **TOFU 首次的 `nonce` 不再现场生成**：它复用第 1.5 步 `sealed` 帧里那一个——两条下行帧由此绑定在同一个对端上，手机检验二者逐字节相同后才进握手。
 
 **第三步 `auth_proof`（加密）**
@@ -330,7 +331,7 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 | 时机 | 触发 | 处理 |
 |---|---|---|
 | **认证前** | `SealedBox` 解不开、或解封后的 `algo` 不在下发列表 | **不回任何消息层帧**，直接 `WS close: code=4001, reason=<拒绝原因>`。原因由 `e2ee.py` 给出（`missing auth data` / `invalid auth data encoding` / `key exchange failed: …` / `algorithm '…' not allowed`），`api._close_reason()` 按**字节**裁到 100 以内——close 帧的 reason 上限是 123 字节，按字符裁会让非 ASCII 撑爆它 |
-| **TOFU 审批** | 用户点「拒绝」，或 30s 内无操作 | `WS close: code=4032, reason="rejected"` / `"timeout"`。此时尚未做 ECDH、也未发 `auth_challenge`，**没有任何密钥可用**，故同样只能 close。手机端收到 4032 后停止自动重连并提示 |
+| **TOFU 审批** | 用户点「拒绝」，或 30s 内无操作，或该请求被同 IP 的新连接取代，或对端断开 | `WS close: code=4032`，reason ∈ `rejected` / `timeout` / `superseded` / `disconnected`。此时尚未做 ECDH、也未发 `auth_challenge`，**没有任何密钥可用**，故同样只能 close。手机端收到 4032 后停止自动重连并提示 |
 | **认证后** | `auth_proof` 的 `nonce` 不符，或等不到该帧（超时） | 已持有会话密钥 → 回**加密的** `error(code:"auth")`，然后关闭连接 |
 
 - 认证前用 close 帧而非明文 `auth_ack(rejected)`，是为了不破坏"绝不解密失败就当明文"的原则：手机端收到 `auth` 后等待的要么是**一条能解密的加密帧**，要么是**连接关闭**，无需"先试解密、失败再当明文解析"。close reason 在密钥建立前本就明文，泄露无害。
@@ -577,7 +578,7 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 |---|---|---|---|
 | 认证前（等 `auth`） | 非 `auth` 帧 / 无法解包 | MALFORMED | **不回消息层帧**，关闭连接（close 1000） |
 | 认证前（等 `auth`） | `auth` 解封失败 / `algo` 不在列表 | AUTH_REJECT | **不回消息层帧**，`close(4001, reason)` |
-| 认证前（TOFU 等审批） | 用户拒绝 / 30s 超时 | APPROVAL_REJECT | **不回消息层帧**，`close(4032, reason="rejected"/"timeout")` |
+| 认证前（TOFU 等审批） | 用户拒绝 / 30s 超时 / 被同 IP 新连接取代 / 对端断开 | APPROVAL_REJECT | **不回消息层帧**，`close(4032, reason ∈ rejected/timeout/superseded/disconnected)` |
 | 已认证 | binary 解包 / 解密成功（provider 内部已校验 seq 单调，外部不可见） | OK | 按分派表处理 |
 | 已认证 | 解密抛 `ReplayError`（仅前缀路径；AAD 路径下重放表现为 MAC 失败，归入下一行） | REPLAY | 丢弃，回 `error(code:"replay")` |
 | 已认证 | 解密失败 | DECRYPT_FAIL | 丢弃，回 `error(code:"decrypt")`；连续 N 次断连 |

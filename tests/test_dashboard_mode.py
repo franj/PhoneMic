@@ -334,7 +334,13 @@ class TestAuthMethodToggle:
 
 
 class TestTofuApprovalUi:
-    """TOFU 审批通知 UI 测试。"""
+    """TOFU 审批通知 UI 测试。
+
+    界面是**快照的纯函数**：收到 ``show_approval_snapshot(items)`` 就整片重绘，
+    只显示 ``items[0]``，按钮回调带的是那条的 **id**。因此"看到的识别码"与
+    "按下去的请求"必然同源——这是本类里最要紧的一条契约（见
+    ``test_switch_to_next_item_redraws_pin`` 与 ``test_click_targets_displayed_id``）。
+    """
 
     @pytest.fixture
     def shown(self, dashboard, qtbot):
@@ -344,24 +350,39 @@ class TestTofuApprovalUi:
         qtbot.wait(50)      # 让布局跑完一轮，几何才稳定
         return dashboard
 
+    @staticmethod
+    def _snap(*pairs):
+        """构造服务端下发的快照（新的在前）。pairs 形如 ("3847", "10.0.0.7")。"""
+        return [
+            # remaining：服务端给的剩余秒数，界面据此画标题里的倒计时
+            {"id": f"req-{i}", "pin": pin, "ip": ip, "remaining": 30}
+            for i, (pin, ip) in enumerate(pairs)
+        ]
+
     def test_approval_frame_hidden_by_default(self, dashboard):
         """审批通知默认隐藏。"""
         assert dashboard._approval_frame.isVisible() is False
 
-    def test_show_approval_request_displays_frame(self, shown):
-        """显示审批请求后通知框可见。"""
-        shown.show_approval_request("1234", "192.168.1.100")
+    def test_snapshot_displays_frame(self, shown):
+        """收到非空快照后通知框可见。"""
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
         assert shown._approval_frame.isVisible() is True
+
+    def test_empty_snapshot_hides_frame(self, shown):
+        """空快照即收起——「撤销」也是快照的一种，不另发隐藏事件。"""
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
+        shown.show_approval_snapshot([])
+        assert shown._approval_frame.isVisible() is False
 
     def test_hide_approval_request_hides_frame(self, shown):
         """隐藏审批请求后通知框不可见。"""
-        shown.show_approval_request("1234", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
         shown.hide_approval_request()
         assert shown._approval_frame.isVisible() is False
 
     def test_pin_shown_digit_by_digit(self, shown):
         """识别码逐位分隔显示——便于与手机屏幕上的数字逐一核对。"""
-        shown.show_approval_request("3847", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(("3847", "192.168.1.100")))
         assert shown._approval_pin_label.text() == "3 8 4 7"
 
     def test_pin_font_is_large_and_bold(self, shown):
@@ -374,7 +395,7 @@ class TestTofuApprovalUi:
         """审批通知与地址栏/说明区同位互斥：显示时让位，隐藏时归还。"""
         assert shown.ip_label.isVisible() is True
 
-        shown.show_approval_request("1234", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
         assert shown.ip_label.isVisible() is False
         assert shown.info_label.isVisible() is False
         assert shown.cf_info_label.isVisible() is False
@@ -391,7 +412,7 @@ class TestTofuApprovalUi:
         shown.on_switch_completed()
         shown._sync_menu_checks()
 
-        shown.show_approval_request("1234", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
         assert shown.cf_info_label.isVisible() is False
 
         shown.hide_approval_request()
@@ -403,7 +424,7 @@ class TestTofuApprovalUi:
 
         否则说明标签会与审批面板同时占住同一块位置，把面板挤下去。
         """
-        shown.show_approval_request("1234", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(("1234", "192.168.1.100")))
 
         shown._apply_mode_ui()
 
@@ -414,7 +435,7 @@ class TestTofuApprovalUi:
 
     def test_ip_shown_in_approval_panel(self, shown):
         """来源 IP 仍是核对凭据之一（识别码之外的辅助信息）。"""
-        shown.show_approval_request("1234", "10.0.0.7")
+        shown.show_approval_snapshot(self._snap(("1234", "10.0.0.7")))
         assert "10.0.0.7" in shown._approval_info.text()
 
     def test_approval_panel_fits_fixed_window(self, shown):
@@ -425,40 +446,299 @@ class TestTofuApprovalUi:
 
         判据用 minimumHeight 而不是 sizeHint：面板高度已由
         ``QLayout.SetMinimumSize`` 钉住，minimumHeight 才是确定性的下限。
+
+        用 **3 条**的满配形态验收：并发提示文字与「全部拒绝」按钮都要出现——
+        它们只在最需要显示的时候才占位置，也正是最容易把面板撑爆的时候。
         """
-        shown.show_approval_request("3847", "192.168.1.100")
+        shown.show_approval_snapshot(self._snap(
+            ("3847", "192.168.1.100"),
+            ("1234", "192.168.1.101"),
+            ("5678", "192.168.1.102"),
+        ))
         frame = shown._approval_frame
 
         assert frame.height() >= frame.minimumHeight()
-        for btn in (shown._approval_accept_btn, shown._approval_deny_btn):
+        for btn in (shown._approval_accept_btn, shown._approval_deny_btn,
+                    shown._approval_deny_all_btn):
+            assert btn.isVisible() is True
             assert btn.height() >= btn.sizeHint().height()
 
-        # 识别码与说明都不换行：宽度不够就会被水平裁掉，必须逐个守住
+        # 识别码、说明、风险提示都不换行：宽度不够就会被水平裁掉，必须逐个守住
         for label in (shown._approval_pin_label, shown._approval_info,
-                      shown._approval_title):
+                      shown._approval_title, shown._approval_risk_label):
             assert label.width() >= label.sizeHint().width(), label.text()
 
         # 面板底边仍在窗口内容区内（不越过中央控件边界）
         bottom = frame.mapTo(shown.centralWidget(), frame.rect().bottomLeft()).y()
         assert bottom <= shown.centralWidget().height()
 
-    def test_approval_callback_invoked_on_accept(self, shown):
-        """点击允许后调用回调（参数为 True）。"""
+    def test_callback_receives_request_id_on_accept(self, shown):
+        """点击允许：回调收到 (id, True)——id 是**当前显示**那条的。"""
         result = []
-        shown.set_approval_callback(lambda approved: result.append(approved))
-        shown.show_approval_request("5678", "10.0.0.1")
+        shown.set_approval_callback(lambda rid, ok: result.append((rid, ok)))
+        shown.show_approval_snapshot(self._snap(("5678", "10.0.0.1")))
         shown._approval_accept_btn.click()
-        assert result == [True]
+        assert result == [("req-0", True)]
+
+    def test_callback_receives_request_id_on_deny(self, shown):
+        """点击拒绝：回调收到 (id, False)。"""
+        result = []
+        shown.set_approval_callback(lambda rid, ok: result.append((rid, ok)))
+        shown.show_approval_snapshot(self._snap(("5678", "10.0.0.1")))
+        shown._approval_deny_btn.click()
+        assert result == [("req-0", False)]
+
+    def test_panel_waits_for_server_snapshot_after_click(self, shown):
+        """点击后界面**不自行撤下面板**：撤下由服务端推来的快照决定。
+
+        否则会出现「已经点了允许、面板没了、连接却没建立」的无反馈状态——用户
+        只能靠猜。服务端结算后立刻推新快照（下一条或空），界面照它画即可。
+        """
+        shown.set_approval_callback(lambda rid, ok: None)
+        shown.show_approval_snapshot(self._snap(("5678", "10.0.0.1")))
+        shown._approval_accept_btn.click()
+
+        assert shown._approval_frame.isVisible() is True
+
+        shown.show_approval_snapshot([])          # 服务端结算后推来的空快照
         assert shown._approval_frame.isVisible() is False
 
-    def test_approval_callback_invoked_on_deny(self, shown):
-        """点击拒绝后调用回调（参数为 False）。"""
+
+class TestApprovalQueue:
+    """队列语义：只显示一条、结算后补位、并发过多时给提示与「全部拒绝」。"""
+
+    @pytest.fixture
+    def shown(self, dashboard, qtbot):
+        with qtbot.waitExposed(dashboard):
+            dashboard.show()
+        qtbot.wait(50)
+        return dashboard
+
+    @staticmethod
+    def _snap(*pairs):
+        return [
+            # remaining：服务端给的剩余秒数，界面据此画标题里的倒计时
+            {"id": f"req-{i}", "pin": pin, "ip": ip, "remaining": 30}
+            for i, (pin, ip) in enumerate(pairs)
+        ]
+
+    def test_head_is_displayed_when_queue_has_more(self, shown):
+        """队列里有多条时只显示队首（新的在前），标题给出总数。"""
+        shown.show_approval_snapshot(self._snap(
+            ("1111", "10.0.0.1"), ("2222", "10.0.0.2"), ("3333", "10.0.0.3")))
+
+        assert shown._approval_pin_label.text() == "1 1 1 1"
+        assert "10.0.0.1" in shown._approval_info.text()
+        assert "3" in shown._approval_title.text()
+
+    def test_switch_to_next_item_redraws_pin(self, shown):
+        """结算一条后补位显示下一条——**识别码必须整片重绘**。
+
+        4 位数字只要漏重绘一次就会残留成上一条的值，而用户是照着屏幕上的数字去
+        和手机核对的：那会让用户为"上一条的码"批准"下一条的请求"。这条是验收点。
+        """
+        shown.show_approval_snapshot(self._snap(
+            ("3847", "10.0.0.1"), ("5017", "10.0.0.2")))
+        assert shown._approval_pin_label.text() == "3 8 4 7"
+
+        # req-0 被别处结算（超时/掉线/用户点掉），服务端推来只剩 req-1 的快照
+        shown.show_approval_snapshot(
+            [{"id": "req-1", "pin": "5017", "ip": "10.0.0.2"}])
+
+        assert shown._approval_pin_label.text() == "5 0 1 7"
+        assert "10.0.0.2" in shown._approval_info.text()
+
+    def test_click_targets_displayed_id(self, shown):
+        """按钮作用的 id 必须与屏幕上显示的识别码出自同一份快照。"""
         result = []
-        shown.set_approval_callback(lambda approved: result.append(approved))
-        shown.show_approval_request("5678", "10.0.0.1")
+        shown.set_approval_callback(lambda rid, ok: result.append((rid, ok)))
+        shown.show_approval_snapshot(self._snap(
+            ("3847", "10.0.0.1"), ("5017", "10.0.0.2")))
+        # 队首换人（req-0 已被结算）之后用户才点的按钮
+        shown.show_approval_snapshot(
+            [{"id": "req-1", "pin": "5017", "ip": "10.0.0.2"}])
+
         shown._approval_deny_btn.click()
-        assert result == [False]
-        assert shown._approval_frame.isVisible() is False
+
+        assert result == [("req-1", False)], "必须结算当前显示的那条（req-1）"
+
+    def test_no_risk_hint_below_threshold(self, shown):
+        """两条并发还不算异常（手机重连 + 旧页面残留），不吓唬用户。"""
+        shown.show_approval_snapshot(self._snap(
+            ("1111", "10.0.0.1"), ("2222", "10.0.0.2")))
+
+        assert shown._approval_risk_label.isVisible() is False
+        assert shown._approval_deny_all_btn.isVisible() is False
+
+    def test_risk_hint_and_deny_all_at_threshold(self, shown):
+        """达到阈值：出提示文字 + 「全部拒绝」，且**不是弹框**。
+
+        弹框会骚扰根本没在用程序的人（用户离开电脑时突然蹦一个框），而这条信息
+        只对"正在看界面的人"有意义——主界面面板常驻，回来一眼就能看到。
+        """
+        shown.show_approval_snapshot(self._snap(
+            ("1111", "10.0.0.1"), ("2222", "10.0.0.2"), ("3333", "10.0.0.3")))
+
+        assert shown._approval_risk_label.isVisible() is True
+        assert shown._approval_risk_label.text() != ""
+        assert shown._approval_deny_all_btn.isVisible() is True
+
+    def test_risk_hint_disappears_when_queue_shrinks(self, shown):
+        """队列缩回阈值以下：提示与按钮一起收回，不留残影。"""
+        shown.show_approval_snapshot(self._snap(
+            ("1111", "10.0.0.1"), ("2222", "10.0.0.2"), ("3333", "10.0.0.3")))
+        shown.show_approval_snapshot(self._snap(("1111", "10.0.0.1")))
+
+        assert shown._approval_risk_label.isVisible() is False
+        assert shown._approval_deny_all_btn.isVisible() is False
+
+    def test_deny_all_sends_none_id(self, shown):
+        """「全部拒绝」用 id=None 表达：一个决定，不是逐条模拟点击。"""
+        result = []
+        shown.set_approval_callback(lambda rid, ok: result.append((rid, ok)))
+        shown.show_approval_snapshot(self._snap(
+            ("1111", "10.0.0.1"), ("2222", "10.0.0.2"), ("3333", "10.0.0.3")))
+
+        shown._approval_deny_all_btn.click()
+
+        assert result == [(None, False)]
+
+    def test_click_without_snapshot_does_nothing(self, shown):
+        """队列为空时的点击是空操作（面板已收起，不该发出无 id 的结算）。"""
+        result = []
+        shown.set_approval_callback(lambda rid, ok: result.append((rid, ok)))
+
+        shown._resolve_approval(True)
+
+        assert result == []
+
+
+class TestApprovalCountdown:
+    """标题里的倒计时：**界面只负责显示**，超时的权威始终在服务端。"""
+
+    @pytest.fixture
+    def shown(self, dashboard, qtbot):
+        with qtbot.waitExposed(dashboard):
+            dashboard.show()
+        qtbot.wait(50)
+        return dashboard
+
+    @staticmethod
+    def _one(remaining=30):
+        """一条带剩余秒数的快照（服务端下发的相对时长）。"""
+        return [{"id": "req-1", "pin": "1234", "ip": "10.0.0.1",
+                 "remaining": remaining}]
+
+    def test_title_shows_seconds_from_snapshot(self, shown):
+        """标题行带上快照给的剩余秒数。"""
+        shown.show_approval_snapshot(self._one(30))
+
+        assert "30" in shown._approval_title.text()
+
+    def test_countdown_ticks_down_without_new_snapshot(self, shown):
+        """快照只在状态变更时下发，中间这一段秒数必须由界面自己走。
+
+        否则倒计时会一直停在快照到达的那一刻（30 → 30 → 30），比不显示更误导。
+        """
+        shown.show_approval_snapshot(self._one(30))
+        # 把本地锚点往前拨 7 秒，等价于"这份快照已经到手 7 秒了"
+        shown._approval_anchor -= 7
+        shown._tick_approval_countdown()
+
+        assert "23" in shown._approval_title.text()
+        assert "30" not in shown._approval_title.text()
+
+    def test_countdown_never_negative(self, shown):
+        """界面钟比服务端快时秒数到 0 为止，不出现负数。"""
+        shown.show_approval_snapshot(self._one(5))
+        shown._approval_anchor -= 99
+        shown._tick_approval_countdown()
+
+        assert shown._approval_seconds_left() == 0
+        assert "-" not in shown._approval_title.text()
+
+    def test_countdown_zero_does_not_hide_panel(self, shown):
+        """**倒计时归零不撤面板**，也不发任何结算。
+
+        撤下只能由服务端推来的空快照决定。界面自己撤会造出"面板没了、服务端还在
+        等"的错位——用户想点「允许」时按钮已经不在，只能重连。这条是本类存在的
+        理由：时钟可以有，权力不能有。
+        """
+        called = []
+        shown.set_approval_callback(lambda rid, ok: called.append((rid, ok)))
+        shown.show_approval_snapshot(self._one(3))
+        shown._approval_anchor -= 99
+        shown._tick_approval_countdown()
+
+        assert called == [], "倒计时归零不是一次结算"
+        assert shown._approval_frame.isVisible() is True
+        # 面板还开着，用户此刻点「允许」仍然作用在原来那条上
+        assert shown._approval_items[0]["id"] == "req-1"
+
+    def test_timer_keeps_running_at_zero(self, shown):
+        """归零只是停表（省掉无意义刷新），不是撤面板——面板仍在。"""
+        shown.show_approval_snapshot(self._one(1))
+        shown._approval_anchor -= 99
+        shown._tick_approval_countdown()
+
+        assert shown._approval_timer.isActive() is False
+        assert shown._approval_frame.isVisible() is True
+
+    def test_without_remaining_field_no_countdown(self, shown):
+        """快照没带剩余秒数时退化成纯标题，不显示一个凭空的 0。"""
+        shown.show_approval_snapshot([{"id": "req-1", "pin": "1234", "ip": "10.0.0.1"}])
+
+        assert shown._approval_title.text() == shown.i18n.tr("dashboard.approval_title")
+        assert shown._approval_timer.isActive() is False
+
+    def test_timer_stops_when_panel_hides(self, shown):
+        """空快照收起面板时定时器要停，别让它在后台空转。"""
+        shown.show_approval_snapshot(self._one(30))
+        assert shown._approval_timer.isActive() is True
+
+        shown.show_approval_snapshot([])
+
+        assert shown._approval_timer.isActive() is False
+
+    def test_new_snapshot_resets_countdown(self, shown):
+        """补位到下一条时倒计时跟着重置（剩余秒数来自新那条自己的 deadline）。"""
+        shown.show_approval_snapshot(self._one(30))
+        shown._approval_anchor -= 25                       # 秒数走到 5
+        assert shown._approval_seconds_left() == 5
+
+        shown.show_approval_snapshot(
+            [{"id": "req-2", "pin": "5678", "ip": "10.0.0.2", "remaining": 30}])
+
+        assert shown._approval_seconds_left() == 30
+        assert "5678" not in shown._approval_title.text()   # 识别码只在场内大字里
+        assert shown._approval_pin_label.text() == "5 6 7 8"
+
+    @pytest.mark.parametrize("locale", ["zh_CN", "zh_HK", "zh_TW", "en_US"])
+    def test_title_fits_in_every_locale(self, shown, monkeypatch, locale):
+        """倒计时并进标题行后，**4 个语言包都得放得下**（3 条满配是最挤的形态）。
+
+        ``test_approval_panel_fits_fixed_window`` 只跑当前系统语言，而最宽的是
+        en_US——"标题够不够宽"这件事必须逐个语言包守住，否则某个译文会悄悄撑破、
+        被固定尺寸窗口静默裁掉，只有那个语言的用户看得见。
+        """
+        import json
+        from phonemic.utils.paths import get_res_path
+
+        with open(get_res_path(f"locales/{locale}.json"), encoding="utf-8") as fh:
+            monkeypatch.setattr(shown.i18n, "_strings", json.load(fh))
+
+        shown.show_approval_snapshot([
+            {"id": f"req-{i}", "pin": pin, "ip": ip, "remaining": 30}
+            for i, (pin, ip) in enumerate((
+                ("3847", "192.168.1.100"),
+                ("1234", "192.168.1.101"),
+                ("5678", "192.168.1.102")))
+        ])
+
+        label = shown._approval_title
+        assert "30" in label.text(), label.text()
+        assert label.width() >= label.sizeHint().width(), (
+            f"[{locale}] 标题被裁：{label.text()!r}")
 
 
 class TestRestartServiceMenu:

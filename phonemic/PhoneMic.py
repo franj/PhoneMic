@@ -333,11 +333,12 @@ def main():
             algo = payload if isinstance(payload, str) else None
             dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
-        elif event_type == "approval_request":
-            # TOFU 首次连接审批请求：payload 为 {"pin": str, "ip": str}
-            # 主界面内嵌通知（非弹窗），新请求替换旧通知
+        elif event_type == "approval_snapshot":
+            # TOFU 审批队列的全量快照：payload = {"items": [{"id","pin","ip"}, ...],
+            # "pending": N}，新的在前。界面只显示 items[0]；空列表即收起面板——
+            # 撤销 / 换人 / 补位都不另发事件，界面因此可以是纯函数（见 dashboard）。
             if isinstance(payload, dict):
-                dashboard.show_approval_request(payload.get("pin", ""), payload.get("ip", ""))
+                dashboard.show_approval_snapshot(payload.get("items") or [])
         elif event_type == "disconnect":
             # 一轮会话到此为止：清掉可能停在 ABANDONED 的 direct 会话，
             # 否则下一轮会静默退化成「预览 + 悬浮窗」（原因见上屏方式变更处）。

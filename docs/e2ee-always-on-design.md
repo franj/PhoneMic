@@ -218,17 +218,23 @@ PC 收到 auth 后：
 1. 解析 auth 帧取出 `algo`、`phone_public`（手机公钥）。**不做 ECDH，不创建 Provider**——审批通过后才做。
 2. **指派识别码**：随机生成 4 位数字（每连接独立），连同本连接的 16 字节 nonce 用
    `SealedBox(phone_public)` 密封下发给这一方（第二步 `sealed`）。
-3. **暂停握手**，在 dashboard 主界面显示审批通知：**同一个识别码** + 连接来源 IP + 接受/拒绝按钮。
-4. 等待用户操作：
-   - **点"接受"** → 做 ECDH（`crypto_scalarmult(pc_private, phone_public)` → `shared` → `KDF` → `session_key`），创建 Provider，继续握手发 auth_challenge。
-   - **点"拒绝"** → `WS close(code=4032, reason="rejected")`。
+3. **暂停握手**，把这条申请登记进**审批队列**（一条连接 = 一个 `ApprovalRequest` 实例，见 §7.4），
+   在 dashboard 主界面显示队首那条：**同一个识别码** + 连接来源 IP + 接受/拒绝按钮。
+4. 等待用户操作（等待的是**这一条**实例的 future，不是"当前那条"）：
+   - **点"接受"** → 做 ECDH（`crypto_scalarmult(pc_private, phone_public)` → `shared` → `KDF` → `session_key`），创建 Provider，继续握手发 auth_challenge。**同时作废队列里其余待审批请求**（用户已经认定真机是哪一条，其余来源都不确定）。
+   - **点"拒绝"** → `WS close(code=4032, reason="rejected")`，队列里其余请求不受影响。
    - **超时（30s 无操作）** → 同拒绝处理，`close(code=4032, reason="timeout")`。
+   - **手机先断开** → 立刻从队列里摘掉（`reason="disconnected"`），不必等满 30s。
+   - **同 IP 来了新连接** → 旧那条被取代（`reason="superseded"`，见 §7.4）。
+5. **全部拒绝**：队列并发达到阈值时，界面上（不是弹框）多给一行风险提示与一个「全部拒绝」按钮。
 
 > **审批在 ECDH 之前**：收到 auth 后只提取明文字段（`algo`/`pk`），不做任何密钥计算。审批通过后才做 ECDH + 创建 Provider + 发 auth_challenge。被拒绝的连接零计算开销。
 >
 > **审批必须在发 auth_challenge 之前**：auth_challenge 里包含 PC 公钥（SealedBox 加密），只有审批通过后才发送。这确保 PC 公钥不暴露给未授权的连接方——PC 公钥在此架构中是 token，泄露意味着他人可绕过审批直接走认证路径重连。
 
-> **无痛显示，不弹窗**：审批通知在 dashboard 主界面的固定区域（如状态栏区域）显示，不使用模态弹窗。如果有人不断尝试连接，不会反复弹窗打扰用户——新请求替换旧的待审批通知（或排队），用户按自己的节奏处理。
+> **无痛显示，不弹窗**：审批通知在 dashboard 主界面的固定区域（地址栏/说明区那一块）显示，不使用模态弹窗。有人不断尝试连接时不会反复弹窗打扰用户——队列里排着，界面只显示队首那条，用户按自己的节奏处理；并发过多时在面板里加一行醒目文字（并发 ≥3 条时另有「全部拒绝」按钮），仍然不弹框：弹框会骚扰根本没在用程序的人。
+>
+> **界面是快照的纯函数**：PC 端每次状态变更（登记 / 结算 / 取代 / 断开 / 清空）都推一份**全量快照** `{items:[{id,pin,ip}], pending}`，界面照它整片重绘，按钮回调带回**队首那条的 id**。于是「屏幕上显示的识别码」与「被结算的请求」必然出自同一份快照——4 位数字只要漏重绘一次就会残留成上一条的值，那会让用户为"上一条的码"批准"下一条的请求"（§7.4）。
 
 **第四步 `auth_challenge`（SealedBox 加密）**
 
@@ -351,9 +357,9 @@ this.authChallengeTimeout = APPROVAL_TIMEOUT_SEC * 1000 + 5000;  // 35s = 30s �
 
 #### 实现
 
-**PC 端**（`api.py`）：审批等待逻辑见 §7.4 的完整伪代码。`APPROVAL_TIMEOUT = 30` 秒，通过 `asyncio.wait_for` 控制超时。审批通过后才做 ECDH + 创建 Provider + 发 auth_challenge。
+**PC 端**（`api.py`）：审批等待逻辑见 §7.4 的完整伪代码。`APPROVAL_TIMEOUT = 30` 秒，写在**这条请求实例自己的 deadline** 上（不是给整轮握手一份墙钟预算）。审批通过后才做 ECDH + 创建 Provider + 发 auth_challenge。
 
-`_await_approval` 是一个等待 dashboard 审批信号的异步函数（如 `asyncio.Future`），dashboard UI 通过回调设置结果。
+`_await_approval()` 等的是「这一条请求的 future 有结果」与「对端断开」里的先到者（`asyncio.wait(FIRST_COMPLETED)`，不轮询）；dashboard 通过 `resolve_approval(req_id, approved)` 按 id 结算（`call_soon_threadsafe` 投递到事件循环——注册表只被事件循环线程触碰）。
 
 **手机端**（`mobile.html`）：
 
@@ -687,53 +693,128 @@ def make_auth_challenge(self) -> bytes:
 
 ### 7.4 TOFU 审批机制
 
-#### PC 端流程
+#### 一条连接 = 一个审批实例
 
-`api.py` 的 `_websocket_endpoint()` 中，TOFU 首次连接的握手流程：
+审批状态只有一份真源：`ApprovalRegistry`（`api.py`）。每条待审批连接是一个
+`ApprovalRequest` 实例，自带 id、识别码、来源 IP、deadline，以及**握手协程正在等的那一个 future**。
+
+```
+ApprovalRequest:  id / pin / ip / websocket / created / deadline / future / state
+ApprovalDecision: approved + reason ∈ {accepted, rejected, timeout, superseded, disconnected}
+```
+
+这样定形的理由（旧实现的三个真实故障）：
+
+| 旧做法（一个模块级 Future + 四个自由函数） | 后果 |
+|---|---|
+| 两条连接并发，A 的请求被 B 覆盖 | 点「允许」同时落在 B 的 future 与 A 的等待上——看着"对上了"，实际靠时序巧合 |
+| A 先超时 → `cancel_pending_approval()` 打在"此刻的全局"（已经是 B）上 | **B 被误拒**，而界面上还显示着 B 的识别码、用户一个按钮都没点 |
+| `reason = "timeout" if not approved else "rejected"` | 恒取 timeout ⇒ 用户手动拒绝被记成超时，日志与对端看到的原因都是错的 |
+
+界面侧只拿到**不可变快照** `{"items": [{"id","pin","ip","remaining"}, ...], "pending": N}`（新的在前），
+按钮回调 `resolve_approval(id, decision)`；`id=None, decision=False` 表示「全部拒绝」。
+界面因此可以完全无状态：漏事件、乱序重绘都能靠下一份全量快照自愈。
+
+`remaining` 是**剩余秒数**（界面拿它画倒计时），刻意不给 `deadline` 绝对值：bridge 有
+`QueueEventBridge` 这种跨进程实现，届时两边的 `monotonic()` 不可比，绝对时刻会直接失效；
+给相对时长则界面只能做显示，"超时判定"仍唯一地归服务端。
+
+#### PC 端流程
 
 ```python
 session = _secure_channel.new_session()
 
 # S0：收 auth
 auth_msg = await _recv_handshake_frame(websocket, deadline)
-algo, session_key, pin, phone_pk = session.receive_auth(auth_msg)
+algo, session_key, _, phone_pk = session.receive_auth(auth_msg)
 
-if pin is not None:
-    # TOFU 首次：先下发 PC 指派的识别码，再等待用户审批（尚未做 ECDH）
-    await websocket.send_bytes(session.make_sealed_pin())
-    try:
-        approved = await asyncio.wait_for(
-            _await_approval(session.pin, client_ip),
-            timeout=APPROVAL_TIMEOUT
-        )
-    except asyncio.TimeoutError:
-        approved = False
-    if not approved:
-        await websocket.close(code=4032, reason="rejected" if not approved else "timeout")
-        return
+if session.is_tofu_first:
+    # TOFU 首次：先下发 PC 指派的识别码，再进入人工审批（尚未做 ECDH）
+    await _try_send_bytes(websocket, session.make_sealed_pin(), "sealed pin")
+
+    registry = _get_approval_registry()
+    # 登记即一个实例：同 IP 的旧请求在此刻被取代；deadline 挂在这一条自己身上
+    req = registry.request(session.pin, client_ip, websocket,
+                           timeout=APPROVAL_TIMEOUT)
+    decision = await _await_approval(req, websocket)
+    if not decision.approved:
+        # 拒因如实入账（rejected / timeout / superseded / disconnected）
+        logger.warning(f"TOFU approval {decision.reason}: id={req.id}, closing 4032")
+        await _close_quietly(websocket, 4032, decision.reason)
+        return False
     # 审批通过：现在才做 ECDH + 创建 Provider
     session.complete_tofu_auth(algo, phone_pk)
+    deadline = time.monotonic() + AUTH_TIMEOUT    # auth_proof 拿一份全新预算
 else:
     # 认证模式 / TOFU 重连：session_key 已就绪，直接创建 Provider
     session.create_provider(algo, session_key)
 
 # 以下握手与认证模式一致
-await _send_frame(websocket, session.make_auth_challenge())
+await _try_send_bytes(websocket, session.make_auth_challenge(), "auth_challenge")
 proof = await _recv_handshake_frame(websocket, deadline)
 if not session.verify_auth_proof(proof):
-    await _send_frame(websocket, session.wrap(msgpack.packb({"type":"error","code":"auth"})))
+    await _try_send_bytes(websocket, session.wrap({"type": "error", "code": "auth"}))
     await websocket.close()
     return
 ```
 
+`_await_approval()` 等的是「future 有结果」与「对端断开」两个事件里的**先到者**
+（`asyncio.wait(FIRST_COMPLETED)`，不轮询）：
+
+```python
+async def _await_approval(req, websocket):
+    watcher = loop.create_task(_watch_peer_gone(websocket))   # 只关心 disconnect
+    try:
+        done, _ = await asyncio.wait(
+            {req.future, watcher},
+            timeout=max(0.0, req.deadline - loop.time()),
+            return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        watcher.cancel(); await watcher
+    if req.future in done:
+        return req.future.result()                            # 用户点了 / 被别人结算
+    registry.expire(req.id, "disconnected" if watcher in done else "timeout")
+    return await req.future
+```
+
+审批等待期间协议规定手机不发任何帧（它只该显示识别码、然后等挑战），所以探测器
+读到什么都无关紧要，只关心 disconnect——这正是「手机掉线立刻从队列里消失」的实现，
+不必让界面挂着一个没人在等的请求等满 30s。
+
+#### 队列规则
+
+| 事件 | 对队列的影响 |
+|---|---|
+| 新请求登记 | 加入队列（新的在前）；**同 IP 的旧待审批请求被取代**（`superseded`） |
+| 用户点「接受」 | 结算这一条（`accepted`）；**其余待审批请求全部作废**（`superseded`） |
+| 用户点「拒绝」 | 只结算这一条（`rejected`），其余继续等 |
+| 「全部拒绝」 | 一次清空队列（逐条 `rejected`） |
+| 30s 无操作 | 只让**这一条**超时（`timeout`） |
+| 该连接断开 | 只摘掉**这一条**（`disconnected`）；服务停止时整队清空并推空快照 |
+
+- **同 IP 取代只针对 pending**：已认证的连接不在这张表里，**绝不能提前踢**——新连接还没认证，提前踢掉旧的就成了一段时间内谁都连不上（抢占由 `ConnectionManager.connect()` 在认证成功后完成）。这样定也是为了不让"自己的重连"把并发数抬过风险提示的阈值而误报。
+- **每一次状态变更都推全量快照**，空队列也推——「收起面板」由空快照表达，不另发隐藏事件：否则界面要自己判断"什么时候该撤下"，而那正是旧实现漏掉的一半（通知还在、请求早没了）。
+- 结算入口只有一个（`_settle`：先从表里 `pop` 成功的才算数）⇒ 天然幂等：重复点击、超时与断开同时到达都不会互相覆盖。幂等还挡住了一件事——用户手抖点两下「允许」，第二下不会把队列里新来的请求一起清掉。
+
 #### 审批 UI
 
-- dashboard 主界面内嵌审批通知（非模态弹窗），显示：
-  - 4 位识别码（大字显示）
+- dashboard 主界面内嵌审批面板（非模态弹窗），显示**队首**那条：
+  - 4 位识别码（30pt 大字、逐位空格分隔）
   - 连接来源 IP
-  - "接受" / "拒绝" 两个按钮
-- 审批超时（如 30s）自动拒绝。
-- 审批期间手机端显示"等待 PC 审批..."。
+  - 「允许」/「拒绝」两个按钮
+  - 队列总数（>1 时标题变成"认证请求（共 N 条）"）
+  - **剩余秒数倒计时**（并进标题行："认证请求 · 还剩 27 秒"）
+- 倒计时是**纯显示**，权力边界必须守住：
+  - 秒数由快照的 `remaining` + 界面本地 `monotonic()` 锚点推算，`QTimer` 每秒重画（快照只在状态变更时下发，中间这段得界面自己走，否则会停在快照到达的那一刻）。
+  - 界面**不持有 deadline、也不因倒计时归零而撤面板或发结算**——撤下只能由服务端推来的空快照决定。界面自己撤会造出"面板没了、服务端还在等"的错位：用户想点「允许」时按钮已经不在，只能重连。
+  - 归一为 0 只是停表（省掉无意义刷新）。反过来若界面钟偏快、显示 0 时服务端其实还差几十毫秒，用户此刻点「允许」仍然算数——因为结算只认 id。
+  - 不新起控件而是并进标题行：面板高度受主界面固定高度约束（`setFixedSize`），多一行就多一份被静默裁掉的风险，契约由 `test_approval_panel_fits_fixed_window` 守住。
+  - 快照缺 `remaining`（旧版后端/极简快照）时退化成纯标题，**不显示一个凭空的 0**。
+- 并发 ≥3 条（`APPROVAL_RISK_THRESHOLD`）另加：一行红色风险文字（建议改用扫码认证）+ 一个「全部拒绝」按钮。**不弹框**——弹框会骚扰根本没在用程序的人。
+- 每次收到快照都**整片重绘**（含识别码），按钮作用的是**快照里队首那条的 id**：因此"看到的码"与"按下去的请求"不会错位。
+- 点击后界面**不自行撤下面板**：撤下由服务端推来的新快照决定（下一条或空），避免"已点了接受、面板没了、连接却没建立"的无反馈状态。
+- 审批超时（30s）自动拒绝；审批期间手机端显示"等待 PC 审批..."。
+- 为什么是 3：正常用法最多 2 条（手机重连 + 旧页面残留），且同 IP 会互相取代；3 条意味着至少来自两个不同来源，这时才值得把注意力从"核对识别码"升到"改用扫码认证"。
 
 #### 手机端处理
 
@@ -745,9 +826,10 @@ if not session.verify_auth_proof(proof):
 
 TOFU 审批机制天然提供了挤占保护：
 
-- 任何新连接都必须经过 PC 用户审批才能注册。
-- 攻击者连上后，PC 弹出审批通知，用户看到不是自己手机的识别码 → 拒绝。
-- 当前活动连接不受影响——审批中的新连接处于 `S0_pin` 状态，不注册到 `_manager`。
+- 任何新连接都必须经过 PC 用户审批才能注册；审批中的连接不注册到 `_manager`。
+- 攻击者连上后，PC 界面上是它那条的识别码，用户看到与自己手机不同 → 拒绝。
+- 攻击者狂连的代价也只是队列变长：同一 IP 的连来自动互相取代，不同来源才会堆到风险提示阈值——那正是要提示用户"改用扫码认证"的信号。
+- 当前活动连接不受影响——审批中的新连接不注册到 `_manager`。
 - **不需要额外的挤占保护代码**——审批本身就是门禁。
 
 > URL fragment 认证模式（模式 2/3）保持现有挤占行为不变。能完成 SealedBox 握手的人持有 PC 公钥（信任锚），其连接权限与挤占权限在同一信任级别。
@@ -1086,21 +1168,26 @@ TOFU 首次连接相对现状是**明确的净改进**——消除了明文通�
 | `phonemic/tunnel/e2ee.py` | 修改 | `SecureChannel` 用 `auth_method` 替代 `_algorithm`；`SecureSession.receive_auth` / `make_auth_challenge` 增加 TOFU 分叉；删除 `_token` 路径；新增 `_generate_pin()` 与 `make_sealed_pin()`（§5.5.1） |
 | `phonemic/tunnel/mode.py` | 修改 | `effective_algorithm` → `effective_auth_method` |
 | `phonemic/utils/settings_manager.py` | 修改 | `e2ee_algorithm` → `auth_method` + 迁移逻辑 |
-| `phonemic/server/api.py` | 修改 | `_handle_auth` 无 `needs_auth=False` 跳过分支；auth 帧解析按 `auth_method` 分叉；TOFU 先下发密封识别码再进审批等待；`APPROVAL_TIMEOUT = 30` 常量 |
-| `phonemic/PhoneMic.py` | 修改 | `SecureChannel` 构造参数从 `algorithm=` 改为 `auth_method=` |
-| `phonemic/gui/dashboard.py` | 修改 | 加密开关 → 认证方式选择（TOFU / 扫码）；CF 模式下强制扫码；TOFU 审批通知 UI（主界面内嵌，非弹窗） |
+| `phonemic/server/api.py` | 修改 | `_handle_auth` 无 `needs_auth=False` 跳过分支；auth 帧解析按 `auth_method` 分叉；TOFU 先下发密封识别码再进审批等待；`APPROVAL_TIMEOUT = 30` 常量；新增 `ApprovalRequest` / `ApprovalDecision` / `ApprovalRegistry`（审批状态的唯一真源，见 §7.4） |
+| `phonemic/PhoneMic.py` | 修改 | `SecureChannel` 构造参数从 `algorithm=` 改为 `auth_method=`；`approval_snapshot` 事件转交界面 |
+| `phonemic/gui/dashboard.py` | 修改 | 加密开关 → 认证方式选择（TOFU / 扫码）；CF 模式下强制扫码；审批面板按**全量快照**整片重绘（主界面内嵌，非弹窗），并发 ≥3 条出风险文字与「全部拒绝」 |
 | `phonemic/resources/crypto_providers.js` | 修改 | 删除 `PlainProvider`；新增 `plaintextAuthData()` / `unsealAssignedPin()` / `sameBytes()` |
 | `phonemic/resources/mobile.html` | 修改 | `SecureClient.init` / `makeAuth` / `makeAuthProof` 增加分叉；sodium.js 无条件加载；**删除手机端识别码生成**，改由第 2 步 `receiveSealedPin()` 接收后显示；localStorage 持久化 |
 | `tests/test_e2ee.py` | 修改 | 移除 `none` 模式测试；新增 TOFU 握手测试与「窃听者」一组（§5.5.1） |
-| `tests/test_e2ee_server.py` | 修改 | 同上，并覆盖「识别码先到、审批后到」的顺序保证 |
+| `tests/test_e2ee_server.py` | 修改 | 同上，并覆盖「识别码先到、审批后到」的顺序保证；审批事件改读全量快照、按 id 结算 |
+| `tests/test_approval_registry.py` | 新增 | 审批注册表的并发语义（排队顺序、批准即清场、拒绝不牵连、同 IP 取代、超时/掉线入账、快照契约） |
+| `tests/test_dashboard_mode.py` | 修改 | 审批面板改为按快照渲染；新增队列类（整片重绘、id 归属、并发提示与「全部拒绝」） |
 
 ### 测试要点
 
 - TOFU 首次握手往返：`auth(明文 algo+pk) → sealed(PC 指派的识别码) → 审批 → auth_challenge(SealedBox) → auth_proof(加密) → config(加密)`
 - TOFU 首次 ECDH 一致性：PC 和手机独立计算 `session_key`，Provider 加解密往返成功
 - TOFU 重连握手：等同 URL fragment 认证，`auth(SealedBox) → auth_challenge(Provider加密) → auth_proof(加密)`
-- TOFU 审批拒绝：用户点"拒绝" → close 4032，手机端停止重连
+- TOFU 审批拒绝：用户点"拒绝" → close 4032（reason="rejected"），手机端停止重连
 - TOFU 审批超时：30s 无操作 → close 4032（reason="timeout"）
+- 审批队列（`tests/test_approval_registry.py`）：两条不同来源的请求同时排队（新的在前）；批准一条 ⇒ 其余 superseded；拒绝一条 ⇒ 其余不受影响；同一 id 重复点击不误伤新请求；同 IP 新连接取代旧请求（且不影响别的 IP）；掉线/超时各自如实入账；服务停止清空队列
+- 审批队列（端到端）：手机在等审批时断开 ⇒ 队列立刻推空快照（不必等满 30s）
+- 界面队列（`test_dashboard_mode.py::TestApprovalQueue`）：只显示队首、结算后**整片重绘**识别码、按钮作用的是当前显示的 id、并发 ≥3 条出风险文字 +「全部拒绝」、队列缩回后提示收回
 - TOFU 手机端等待超时：35s（30s 审批 + 5s 容错，自 auth 发出起算、覆盖第 2 步与第 4 步）后手机端主动断开
 - 识别码指派：auth 帧不含 `pin`；两条独立连接拿到两个不同识别码；对端塞进 auth 的 `pin` 字段被忽略
 - 识别码核对：手机显示的 = PC 审批通知显示的（同源）

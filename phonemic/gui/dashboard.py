@@ -1,9 +1,10 @@
 from typing import Callable, Optional
 import subprocess
 import sys
+import time
 
 import qrcode
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontMetrics, QPixmap, QAction, QActionGroup, QPainter, QColor, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -17,6 +18,12 @@ from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_
 from phonemic.utils.paths import get_app_root, get_build_info, is_frozen
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
+
+
+# 并发到几条就该提醒用户「可能有风险」。3 是这么定的：正常用法下最多出现 2 条
+# （手机重连 + 旧页面残留），同 IP 的新连接还会把旧的那条顶掉，所以 3 条意味着
+# 至少来自两个不同来源——这时才值得把注意力从"核对识别码"升到"改用扫码认证"。
+APPROVAL_RISK_THRESHOLD = 3
 
 
 def make_qr_pixmap(data: str, size: int = 250) -> QPixmap:
@@ -69,6 +76,16 @@ class Dashboard(QMainWindow):
         self._auth_method: str = self.sm.get("auth_method", "tofu")
         self._negotiated_algo: Optional[str] = None  # 本次连接握手协商出的算法，由 connect 事件携带
         self._algorithm_change_callback: Optional[Callable[[str], None]] = None
+        # TOFU 审批：界面侧只保存"最近一次快照"这一份不可变投影，自己不维护队列
+        # 状态——漏事件、乱序重绘都能靠下一次全量快照自愈（与 mobile.html 的
+        # SignalHub 同哲学）。按钮作用的那条请求 = _approval_items[0]。
+        self._approval_items: list = []
+        self._approval_callback: Optional[Callable[[Optional[str], bool], None]] = None
+        # 倒计时的两个入参：快照到达时的剩余秒数（服务端给的），与本地 monotonic
+        # 锚点。界面**不持有 deadline**——超时的权威在服务端，这里只把"还剩多久"
+        # 画出来，快照给的也是相对时长而非绝对时刻（绝对时刻跨进程就没意义了）。
+        self._approval_remaining: Optional[int] = None
+        self._approval_anchor: float = 0.0
         # connection 状态栏的两个入参：connected 此前只在 update_connection_status()
         # 里赋值（构造函数没给初值），任何在首次调用前读取 self.connected 的路径
         # 都会 AttributeError；这里补上 false，让重绘入口可以无条件自刷新。
@@ -102,31 +119,114 @@ class Dashboard(QMainWindow):
         """设置认证方式变更回调函数。"""
         self._algorithm_change_callback = callback
 
-    def set_approval_callback(self, callback: Callable[[bool], None]):
-        """设置 TOFU 审批结果回调函数（调用 resolve_approval）。"""
+    def set_approval_callback(self, callback: Callable[[Optional[str], bool], None]):
+        """设置 TOFU 审批结果回调。
+
+        回调签名 ``(request_id, approved)``：``request_id`` 是**界面当前显示那条**
+        请求的 id，服务端据此结算那一条——于是「用户看到的识别码」与「被结算的
+        请求」必然出自同一份快照。``request_id=None`` 且 ``approved=False`` 表示
+        「全部拒绝」（只有并发 ≥ APPROVAL_RISK_THRESHOLD 时界面才给这个入口）。
+        """
         self._approval_callback = callback
 
-    def show_approval_request(self, pin: str, client_ip: str) -> None:
-        """显示 TOFU 审批通知（主界面内嵌，非弹窗）。
+    def show_approval_snapshot(self, items) -> None:
+        """按全量快照重绘审批区（``items`` 为空即收起）。
 
-        通知占用地址栏/说明区那一块，因此同时把 ip_label 与说明标签让出去
-        （见 _set_main_info_visible）；新请求直接替换旧的待审批通知，不排队、不打扰。
+        快照来自服务端，形如 ``[{"id","pin","ip"}, ...]``，**新的在前**，界面只
+        显示第一条。整片重绘而不是"只替换变了的字段"：识别码是从上一条继承下来
+        的残留值，而用户是照着屏幕上的数字去和手机核对的——只要漏重绘一次，
+        就会出现「看到的码」与「按下去的请求」不是同一条，这种错位恰好能骗过
+        用户（也正是把 4 位数字拉成 30pt 的理由，不能让它是旧值）。
         """
-        self._approval_title.setText(self.i18n.tr("dashboard.approval_title"))
+        items = [it for it in (items or []) if isinstance(it, dict)]
+        if not items:
+            self.hide_approval_request()
+            return
+        self._approval_items = items
+
+        head = items[0]
+        total = len(items)
+        # 倒计时起点：快照给的剩余秒数 + 本地锚点，之后由 _approval_timer 每秒重画。
+        # 只在快照同时带了队列与秒数时才动定时器——缺字段（旧版后端、测试构造的
+        # 极简快照）就退化成"没有倒计时"，而不是显示一个凭空的 0。
+        remaining = head.get("remaining")
+        self._approval_remaining = remaining if isinstance(remaining, int) else None
+        self._approval_anchor = time.monotonic()
+        # 队列长度只体现在标题上（"认证请求（共 3 条）"）：界面永远只显示队首那条，
+        # 不给"上一条/下一条"的假翻页入口——按钮作用的那条必须和显示的那条一致。
+        self._refresh_approval_title()
+        if self._approval_remaining is None:
+            self._approval_timer.stop()
+        else:
+            self._approval_timer.start()
+        pin = head.get("pin") or ""
         # 逐位空格分隔：隔着距离也能一眼念出，便于与手机屏幕上的数字逐一核对
         self._approval_pin_label.setText(" ".join(pin) if pin else "----")
         self._approval_info.setText(
-            self.i18n.tr("dashboard.approval_detail", ip=client_ip))
+            self.i18n.tr("dashboard.approval_detail", ip=head.get("ip") or "?"))
         self._approval_accept_btn.setText(self.i18n.tr("dashboard.approval_accept"))
         self._approval_deny_btn.setText(self.i18n.tr("dashboard.approval_deny"))
+
+        # 并发过多：不弹框，只在面板里加一行醒目文字 + 一个「全部拒绝」。
+        # 弹框会骚扰根本没在用程序的人（对用户是纯打扰），而这条信息只对"正在
+        # 看界面的人"有意义；面板是常驻的，用户回来一眼能看到。
+        risky = total >= APPROVAL_RISK_THRESHOLD
+        self._approval_deny_all_btn.setVisible(risky)
+        self._approval_risk_label.setVisible(risky)
+        if risky:
+            self._approval_risk_label.setText(self.i18n.tr("dashboard.approval_risk"))
+            self._approval_deny_all_btn.setText(
+                self.i18n.tr("dashboard.approval_deny_all"))
+
         self._set_main_info_visible(False)
         self._approval_frame.setVisible(True)
         self._approval_frame.update()
 
     def hide_approval_request(self) -> None:
         """隐藏审批通知，并把地址栏/说明区还回来。"""
+        self._approval_items = []
+        self._approval_timer.stop()
+        self._approval_remaining = None
         self._approval_frame.setVisible(False)
         self._set_main_info_visible(True)
+
+    def _approval_seconds_left(self) -> Optional[int]:
+        """按本地锚点推算当前该显示的剩余秒数；快照没给秒数时返回 None。"""
+        if self._approval_remaining is None:
+            return None
+        elapsed = time.monotonic() - self._approval_anchor
+        return max(0, self._approval_remaining - int(elapsed))
+
+    def _refresh_approval_title(self) -> None:
+        """重画标题：队列长度 + 剩余秒数。
+
+        倒计时并进标题行而不是新起一个控件：面板高度受主界面固定高度约束，多一行
+        就多一份被静默裁掉的风险（契约见 test_approval_panel_fits_fixed_window）。
+        """
+        total = len(self._approval_items)
+        if total > 1:
+            text = self.i18n.tr("dashboard.approval_title_multi", total=total)
+        else:
+            text = self.i18n.tr("dashboard.approval_title")
+        seconds = self._approval_seconds_left()
+        if seconds is not None:
+            text = "{} · {}".format(
+                text, self.i18n.tr("dashboard.approval_countdown", seconds=seconds))
+        self._approval_title.setText(text)
+
+    def _tick_approval_countdown(self) -> None:
+        """每秒重画倒计时；归零即停表，但**不撤面板**。
+
+        停表只是省掉无意义的刷新；真正的收尾（超时结算 + 推空快照）在服务端。界面
+        自己撤面板会造出"面板没了、服务端还在等"的错位——用户想点「允许」时按钮
+        已经不在，只能重连。
+        """
+        if not self._approval_items:
+            self._approval_timer.stop()
+            return
+        self._refresh_approval_title()
+        if self._approval_seconds_left() == 0:
+            self._approval_timer.stop()
 
     def _set_main_info_visible(self, visible: bool) -> None:
         """审批通知与地址栏/说明区互斥显示。
@@ -144,11 +244,25 @@ class Dashboard(QMainWindow):
         self.cf_info_label.setVisible(not is_lan)
 
     def _resolve_approval(self, approved: bool) -> None:
-        """用户点击允许/拒绝后调用回调并隐藏通知。"""
-        self.hide_approval_request()
-        cb = getattr(self, "_approval_callback", None)
+        """把用户对这一条（= 当前显示的队首）的决定交给后端。
+
+        面板的撤下**不在这里做**：服务端结算后会立刻推一份新的全量快照（通常换成
+        队列里下一条，或空快照收起），界面只是快照的函数。这样"谁被批准了"永远
+        由服务端说了算，界面不会出现「已经点了接受、面板没了、连接却没建立」的
+        无反馈状态。
+        """
+        items = self._approval_items
+        if not items:
+            return
+        cb = self._approval_callback
         if cb:
-            cb(approved)
+            cb(items[0].get("id"), approved)
+
+    def _resolve_approval_all(self) -> None:
+        """「全部拒绝」：id=None 表示作用于队列里所有待审批请求。"""
+        cb = self._approval_callback
+        if cb:
+            cb(None, False)
 
     def set_mouse_debug_window(self, win):
         """注入独立调试窗口（临时工具），由「程序」菜单打开。"""
@@ -241,6 +355,16 @@ class Dashboard(QMainWindow):
         self._approval_info.setStyleSheet("color: #33691e; font-size: 11px; border: none;")
         approval_layout.addWidget(self._approval_info)
 
+        # 风险提示：并发请求过多时出现（默认隐藏）。用红色小字而不是弹框——弹框
+        # 会打扰根本没在用程序的人，而这里的信息只对"正在看界面的人"有意义。
+        # 同样不换行，宽度契约由上一条测试一并守住。
+        self._approval_risk_label = QLabel()
+        self._approval_risk_label.setAlignment(Qt.AlignCenter)
+        self._approval_risk_label.setStyleSheet(
+            "color: #c62828; font-size: 10px; font-weight: bold; border: none;")
+        self._approval_risk_label.setVisible(False)
+        approval_layout.addWidget(self._approval_risk_label)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         self._approval_accept_btn = QPushButton()
@@ -258,9 +382,28 @@ class Dashboard(QMainWindow):
             "border-radius: 4px; font-size: 13px; }")
         self._approval_deny_btn.clicked.connect(lambda: self._resolve_approval(False))
         btn_row.addWidget(self._approval_deny_btn)
+
+        # 「全部拒绝」：只在并发过多时出现（见 APPROVAL_RISK_THRESHOLD）。
+        # 给按钮而不是自动清理——自动拒绝有安全风险（可能误伤用户自己的第二条
+        # 设备），让用户明确表达"这些我都不认"。
+        self._approval_deny_all_btn = QPushButton()
+        self._approval_deny_all_btn.setMinimumHeight(28)
+        self._approval_deny_all_btn.setStyleSheet(
+            "QPushButton { background: #b71c1c; color: white; border: none; "
+            "border-radius: 4px; font-size: 12px; }")
+        self._approval_deny_all_btn.setVisible(False)
+        self._approval_deny_all_btn.clicked.connect(self._resolve_approval_all)
+        btn_row.addWidget(self._approval_deny_all_btn)
         approval_layout.addLayout(btn_row)
 
         layout.addWidget(self._approval_frame)
+
+        # 倒计时表：每秒重画一次标题里的剩余秒数。**纯观感**——它归零时界面什么都
+        # 不做（不撤面板、不发结算），撤下只能由服务端推来的空快照决定。这是"界面
+        # 是快照的纯函数"这条原则的边界：时钟可以有，权力不能有。
+        self._approval_timer = QTimer(self)
+        self._approval_timer.setInterval(1000)
+        self._approval_timer.timeout.connect(self._tick_approval_countdown)
 
         # ----- Cloudflare 说明（仅 Cloudflare 模式可见）-----
         self.cf_info_label = QLabel(self.i18n.tr("dashboard.cf_info"))

@@ -178,10 +178,10 @@ class PhoneSimulator:
         ws.send(frame_encode(self.make_tofu_first_auth()))
         # 第 2 步先到：PC 密封下发的识别码（手机上显示、供用户核对）
         pin = self.read_sealed_pin(ws.recv(timeout=5))
-        msg_type, text = queue.get(timeout=5)
-        assert msg_type == "approval_request"
-        assert text["pin"] == pin, "PC 审批通知显示的必须是同一个识别码"
-        resolve_approval(True)
+        req = head_request(queue)
+        assert req["pin"] == pin, "PC 审批通知显示的必须是同一个识别码"
+        # 按 id 结算这一条：界面上的识别码与"被结算的请求"因此必然同源
+        resolve_approval(req["id"], True)
         ws.send(self.answer_tofu_challenge(ws.recv(timeout=5)))
         return pin
 
@@ -194,6 +194,46 @@ class PhoneSimulator:
     def decrypt(self, raw: bytes) -> dict:
         pt = self._provider.decrypt(raw)
         return frame_decode(pt)
+
+
+# ---------- 审批快照辅助 ----------
+#
+# 审批事件的载荷是**全量快照**（``phonemic/server/api.py::ApprovalRegistry``）：
+#   {"items": [{"id","pin","ip","remaining"}, ...], "pending": N}   新的在前，只显示队首
+# 界面按 id 结算，因此测试也必须从快照里取 id，不能凭"当前那条"去猜。
+# remaining 是剩余**秒数**（不是绝对时刻）——这份 bridge 就是跨进程的
+# （QueueEventBridge），给绝对时间戳会直接失效。
+
+
+def head_request(queue, timeout=5) -> dict:
+    """取出审批快照的队首请求（跳过 disconnect 之类的噪声事件）。"""
+    while True:
+        msg_type, text = queue.get(timeout=timeout)
+        if msg_type == "approval_snapshot" and text.get("items"):
+            return text["items"][0]
+
+
+def wait_snapshot(queue, predicate, timeout=5) -> dict:
+    """等到一份满足 predicate 的审批快照并返回它。"""
+    deadline = time.time() + timeout
+    while True:
+        msg_type, text = queue.get(timeout=max(0.1, deadline - time.time()))
+        if msg_type == "approval_snapshot" and predicate(text):
+            return text
+
+
+def next_event(queue, timeout=5) -> tuple:
+    """取下一个**业务**事件（跳过审批快照）。
+
+    审批快照是给界面的事件：每次登记、结算都推一份（结算后那份是空队列），
+    和"握手是否完成"无关。等 connect / preview 时必须跳过它们，否则会被
+    "面板该收起了"这种 UI 收尾事件绊住。
+    """
+    deadline = time.time() + timeout
+    while True:
+        msg_type, text = queue.get(timeout=max(0.1, deadline - time.time()))
+        if msg_type != "approval_snapshot":
+            return msg_type, text
 
 
 # ---------- Fixtures ----------
@@ -414,8 +454,7 @@ class TestTofuHandshake:
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             phone.tofu_handshake(ws, queue)
-            msg_type, text = queue.get(timeout=2)
-            assert msg_type == "connect"
+            assert next_event(queue)[0] == "connect"
 
     def test_tofu_first_sealed_pin_arrives_before_approval(self, tofu_server):
         """识别码先到、审批后到：用户开始核对之前，手机上必须已经有码了。"""
@@ -428,33 +467,58 @@ class TestTofuHandshake:
             pin = phone.read_sealed_pin(ws.recv(timeout=5))
             assert re.fullmatch(r"\d{4}", pin), f"识别码应为 4 位数字: {pin}"
 
-            msg_type, text = queue.get(timeout=5)
-            assert msg_type == "approval_request"
-            assert text["pin"] == pin
-            resolve_approval(True)
+            req = head_request(queue)
+            assert req["pin"] == pin
+            resolve_approval(req["id"], True)
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
-            msg_type, text = queue.get(timeout=2)
-            assert msg_type == "connect"
+            assert next_event(queue)[0] == "connect"
 
     def test_tofu_first_rejected_closes_with_4032(self, tofu_server):
-        """TOFU 审批被拒绝：close 4032。"""
+        """TOFU 审批被拒绝：close 4032，close reason 如实写着 rejected。
+
+        用户手动点拒绝曾经被记成 timeout（``reason = "timeout" if not approved``
+        恒取 timeout），对端与日志看到的原因都是错的——拒因是排查的唯一线索。
+        """
         host, port, queue, sc = tofu_server
         phone = PhoneSimulator()
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(frame_encode(phone.make_tofu_first_auth()))
             phone.read_sealed_pin(ws.recv(timeout=5))
-            msg_type, text = queue.get(timeout=5)
-            assert msg_type == "approval_request"
-            resolve_approval(False)
+            req = head_request(queue)
+            resolve_approval(req["id"], False)
 
             with pytest.raises(ConnectionClosed) as ei:
                 ws.recv(timeout=5)
             assert ei.value.rcvd is not None
             assert ei.value.rcvd.code == 4032
+            assert ei.value.rcvd.reason == "rejected"
 
+        # 拒绝后队列只剩审批快照（清空的收尾），不会再冒出 connect
+        assert wait_snapshot(queue, lambda s: s["items"] == [])["pending"] == 0
         with pytest.raises(Empty):
             queue.get(timeout=0.5)
+
+    def test_pending_request_disappears_when_phone_gives_up(self, tofu_server):
+        """审批还没点，手机先走了 ⇒ 队列立刻清空（空快照）。
+
+        旧实现要等满 30s 才超时：这期间界面上挂着一个已经没人在等的请求，用户
+        点「允许」落在空处。现在连接断开本身就是结算的第三种原因。
+        """
+        host, port, queue, sc = tofu_server
+        phone = PhoneSimulator()
+        ws = ws_connect(ws_url(host, port, sc))
+        try:
+            ws.send(frame_encode(phone.make_tofu_first_auth()))
+            phone.read_sealed_pin(ws.recv(timeout=5))
+            assert len(head_request(queue)["id"]) > 0      # 队列里已有它
+
+            ws.close()                                     # 用户没点任何按钮，手机走了
+
+            snap = wait_snapshot(queue, lambda s: s["items"] == [])
+            assert snap == {"items": [], "pending": 0}
+        finally:
+            ws.close()
 
     def test_tofu_first_then_encrypted_message(self, tofu_server):
         """TOFU 握手后可正常收发加密消息。"""
@@ -463,10 +527,10 @@ class TestTofuHandshake:
 
         with ws_connect(ws_url(host, port, sc)) as ws:
             phone.tofu_handshake(ws, queue)
-            queue.get(timeout=2)  # connect
+            assert next_event(queue)[0] == "connect"
 
             ws.send(phone.encrypt({"type": "preview", "text": "tofu hello"}))
-            msg_type, text = queue.get(timeout=2)
+            msg_type, text = next_event(queue)
             assert msg_type == "preview"
             assert text == "tofu hello"
 
@@ -497,15 +561,13 @@ class TestTofuHandshake:
         with ws_connect(ws_url(host, port, sc)) as ws:
             ws.send(frame_encode(phone.make_tofu_first_auth()))
             phone.read_sealed_pin(ws.recv(timeout=5))
-            msg_type, text = queue.get(timeout=5)
-            assert msg_type == "approval_request"
+            req = head_request(queue)
 
             time.sleep(1.5)          # 躺过原 deadline（1s）
-            resolve_approval(True)
+            resolve_approval(req["id"], True)
 
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
-            msg_type, text = queue.get(timeout=2)
-            assert msg_type == "connect"
+            assert next_event(queue)[0] == "connect"
 
 
 class TestTofuEavesdropper:
@@ -517,20 +579,20 @@ class TestTofuEavesdropper:
     """
 
     def _first_leg(self, host, port, queue, sc):
-        """跑一次「真机」连接，返回（真机模拟器，PC 指派的识别码）。"""
+        """跑一次「真机」连接，返回（真机模拟器，PC 指派的识别码）。
+
+        每次连接都从 127.0.0.1 来，所以第二条连接会按"同 IP 取代"规则顶掉第一条
+        的待审批请求——这里每条腿都在上一条关闭之后才开始，不受影响。
+        """
         phone = PhoneSimulator()
         ws = ws_connect(ws_url(host, port, sc))
         ws.send(frame_encode(phone.make_tofu_first_auth()))
         pin = phone.read_sealed_pin(ws.recv(timeout=5))
-        # 前一条连接断开留下的 "disconnect" 事件先出队，跳过等-event
-        while True:
-            msg_type, text = queue.get(timeout=5)
-            if msg_type == "approval_request":
-                break
-        assert text["pin"] == pin
-        resolve_approval(True)
+        req = head_request(queue)      # 跳过 disconnect 等噪声事件
+        assert req["pin"] == pin
+        resolve_approval(req["id"], True)
         ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
-        assert queue.get(timeout=2)[0] == "connect"
+        assert next_event(queue)[0] == "connect"
         ws.close()
         return phone, pin
 
@@ -564,9 +626,8 @@ class TestTofuEavesdropper:
             pin = phone.read_sealed_pin(ws.recv(timeout=5))
             assert pin != "0000", "识别码必须由 PC 指派，不能采信 auth 帧里的值"
 
-            msg_type, text = queue.get(timeout=5)
-            assert msg_type == "approval_request"
-            assert text["pin"] == pin
-            resolve_approval(True)
+            req = head_request(queue)
+            assert req["pin"] == pin
+            resolve_approval(req["id"], True)
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))
-            assert queue.get(timeout=2)[0] == "connect"
+            assert next_event(queue)[0] == "connect"

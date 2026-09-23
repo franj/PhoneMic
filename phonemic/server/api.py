@@ -7,12 +7,15 @@ PhoneMic 后端服务模块
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import secrets
 import threading
 import time
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
@@ -185,54 +188,311 @@ def set_secure_channel(sc: SecureChannel) -> None:
 
 
 # ---------- TOFU 审批机制 ----------
+#
+# 一条待审批连接 = 一个 ApprovalRequest 实例。实例自带 id、识别码、来源 IP、
+# deadline 与「握手协程正在等的那一个 future」，因此「界面上显示的那条」与
+# 「服务端正在等的那条」是同一个身份，不需要靠"当前全局变量"去猜。
+#
+# 旧做法是一个模块级 `_pending_approval` 加四个围着它转的自由函数，三条真实故障：
+#   · 两条连接并发时 A 的请求被 B 覆盖——点「允许」同时落在 B 的 future 和 A 的
+#     等待上，看着像"对上了"，实际是靠时序巧合；
+#   · A 先超时 → `cancel_pending_approval()` 打在"此刻的全局"（已经是 B）上 ⇒
+#     B 被误拒，而界面上还显示着 B 的识别码、用户一个按钮都没点；
+#   · 用户手动点「拒绝」被记成超时（`reason = "timeout" if not approved ...` 恒取
+#     timeout），日志与 close reason 都是错的。
+# 现在状态只有一份（注册表）、结算入口只有一个（幂等），界面只看快照。
 
-# 当前待审批的 Future（同一时间只允许一个待审批请求，新请求替换旧的）
-_pending_approval: Optional[asyncio.Future] = None
+
+@dataclass(frozen=True)
+class ApprovalDecision:
+    """一条审批请求的终局。``reason`` 同时用作 WS close reason，必须如实。"""
+    approved: bool
+    reason: str          # accepted / rejected / timeout / superseded / disconnected
 
 
-def resolve_approval(approved: bool) -> None:
-    """Dashboard（Qt 线程）调用：解决当前待审批的 TOFU 请求。
+@dataclass
+class ApprovalRequest:
+    """一条待审批连接。
 
-    通过 ``loop.call_soon_threadsafe`` 将结果投递到 asyncio 事件循环，
-    唤醒正在 ``_await_approval`` 中等待的 WebSocket handler。
+    ``id`` 是给界面用的身份：按钮回调带回来的就是它，而不是"当前那条"。
+    ``future`` 的结果是 ApprovalDecision，由结算方（用户点击 / 超时 / 对端断开）
+    写入；只有仍在注册表里的请求才允许写入，因此结算天然幂等。
     """
-    global _pending_approval
-    if _pending_approval is not None and not _pending_approval.done():
-        if _event_loop is not None:
-            _event_loop.call_soon_threadsafe(_set_approval_result, approved)
-    else:
-        logger.debug("resolve_approval called but no pending approval")
+
+    id: str
+    pin: str
+    ip: str
+    websocket: Any
+    created: float
+    deadline: float
+    future: asyncio.Future
+    state: str = "pending"
+
+    def snapshot(self) -> dict:
+        """给界面的不可变投影：界面不需要、也拿不到可变状态。
+
+        ``remaining`` 给的是**剩余秒数**而不是绝对时刻：界面可能不在同一个时钟域
+        里（bridge 换成跨进程实现后 monotonic 就不可比了），只有相对时长才成立。
+        它只服务于显示——超时的权威始终是本实例自己的 deadline（见
+        ``_await_approval``），界面拿它画倒计时，画到 0 也不代表已经超时。
+        """
+        return {
+            "id": self.id,
+            "pin": self.pin,
+            "ip": self.ip,
+            "remaining": max(0, round(self.deadline - time.monotonic())),
+        }
 
 
-def _set_approval_result(approved: bool) -> None:
-    """在事件循环线程中设置 Future 结果。"""
-    global _pending_approval
-    if _pending_approval is not None and not _pending_approval.done():
-        _pending_approval.set_result(approved)
+class ApprovalRegistry:
+    """待审批请求表——审批状态的唯一真源。
 
-
-async def _await_approval(pin: str, client_ip: str) -> bool:
-    """等待 dashboard 审批 TOFU 连接请求。
-
-    向 bridge 发射 ``approval_request`` 事件，dashboard 据此显示审批通知。
-    调用 ``resolve_approval()`` 设置结果。新请求替换旧的待审批 Future。
+    只被 asyncio 事件循环线程触碰；Qt 线程唯一的入口是 ``resolve_approval()``
+    的 ``call_soon_threadsafe``。每完成一次状态变更就推一份**全量快照**给界面，
+    界面因此可以完全无状态（漏事件、重绘都能靠下一次快照自愈）。
     """
-    global _pending_approval
-    loop = asyncio.get_running_loop()
-    _pending_approval = loop.create_future()
-    _manager.bridge.emit("approval_request", {"pin": pin, "ip": client_ip})
-    logger.info(f"TOFU approval requested: pin={pin}, ip={client_ip}")
-    return await _pending_approval
 
+    def __init__(self) -> None:
+        self._requests: Dict[str, ApprovalRequest] = {}
 
-def cancel_pending_approval() -> None:
-    """取消当前待审批请求（如客户端断开连接时）。"""
-    global _pending_approval
-    if _pending_approval is not None and not _pending_approval.done():
-        if _event_loop is not None:
-            _event_loop.call_soon_threadsafe(
-                lambda: _pending_approval.set_result(False) if not _pending_approval.done() else None
+    # ---- 查询 ----
+
+    def items(self) -> List[ApprovalRequest]:
+        """待审批请求，**新的在前**——界面只显示第一条（见 dashboard）。"""
+        return sorted(self._requests.values(), key=lambda r: r.created, reverse=True)
+
+    def pending_count(self) -> int:
+        return len(self._requests)
+
+    def head(self) -> Optional[ApprovalRequest]:
+        items = self.items()
+        return items[0] if items else None
+
+    # ---- 变更 ----
+
+    def request(self, pin: str, ip: str, websocket, timeout: float) -> ApprovalRequest:
+        """登记一条新请求，并让同 IP 的旧请求让位。
+
+        同 IP 取代：手机刷新页面 / 网络抖动重连时，旧那条已经没人在等（屏幕上
+        显示的是新页面），留着只会占着队列、把并发数抬过风险提示的阈值制造误报。
+        只让 **pending** 让位——已认证的连接不在这张表里，绝不能提前踢：新连接
+        还没认证，提前踢掉旧的就成了一段时间内谁都连不上（抢占由
+        ``ConnectionManager.connect()`` 在认证成功后完成）。
+        """
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        self._supersede(
+            lambda other: other.ip == ip and other.websocket is not websocket,
+            f"same-ip:{ip}",
+        )
+        req = ApprovalRequest(
+            id=secrets.token_hex(8),
+            pin=pin,
+            ip=ip,
+            websocket=websocket,
+            created=now,
+            deadline=now + timeout,
+            future=loop.create_future(),
+        )
+        # 每连接独立的 deadline：等待时长出自实例自己，而不是一个裸常量，
+        # 「超时」于是和「用户点了」「对端走了」一样，只是结算的一种。
+        self._requests[req.id] = req
+        logger.info(
+            "TOFU approval requested: id=%s pin=%s ip=%s (pending=%d)",
+            req.id, pin, ip, len(self._requests),
+        )
+        self._emit()
+        return req
+
+    def resolve(self, request_id: str, approved: bool) -> bool:
+        """用户对**这一条**（id 指定）的决定。返回是否真的结算了它。
+
+        批准时顺带清场：用户已经认定真机是哪一条，其余在等的都是来源不确定的
+        连接，立刻作废（各自的 handler 会以 4032/superseded 关掉自己的连接）。
+        """
+        req = self._requests.get(request_id)
+        if req is None:
+            logger.debug(
+                "Approval %s 已不在队列（已结算或被同 IP 的新连接取代），忽略本次点击",
+                request_id,
             )
+            return False
+        if approved:
+            self._supersede(lambda other: other.id != request_id, "approved-elsewhere")
+        self._settle(req, approved, "accepted" if approved else "rejected")
+        self._emit()
+        return True
+
+    def deny_all(self) -> int:
+        """「全部拒绝」：一次性拒掉队列里所有待审批请求，返回条数。"""
+        n = 0
+        for req in list(self._requests.values()):
+            if self._settle(req, False, "rejected"):
+                n += 1
+        if n:
+            logger.info("TOFU approval: 全部拒绝，共 %d 条", n)
+            self._emit()
+        return n
+
+    def expire(self, request_id: str, reason: str) -> bool:
+        """等待方发现超时 / 对端已走时注销自己那条。
+
+        reason 只能是 ``timeout`` 或 ``disconnected``——它会被写进 close reason，
+        是排查"为什么这条没连上"的唯一线索，不能和"用户拒绝了"混为一谈。
+        """
+        req = self._requests.get(request_id)
+        if req is None:
+            return False
+        self._settle(req, False, reason)
+        self._emit()
+        return True
+
+    def cancel_for(self, websocket) -> bool:
+        """连接断开：它那条请求不该再挂在界面上（否则点「允许」落在空处）。"""
+        req = next(
+            (r for r in self._requests.values() if r.websocket is websocket), None)
+        if req is None:
+            return False
+        self._settle(req, False, "disconnected")
+        self._emit()
+        return True
+
+    def reset(self) -> None:
+        """服务停止时清空（连接随事件循环一起消失，留着就是幽灵请求）。"""
+        if not self._requests:
+            return
+        logger.info("Clearing %d pending approval(s) on shutdown", len(self._requests))
+        self._requests.clear()
+        self._emit()
+
+    # ---- 内部 ----
+
+    def _settle(self, req: ApprovalRequest, approved: bool, reason: str) -> bool:
+        """摘掉一条请求并写入终局（幂等：先从表里 pop 成功的才算数）。"""
+        if self._requests.pop(req.id, None) is None:
+            return False
+        req.state = "approved" if approved else reason
+        if not req.future.done():
+            req.future.set_result(ApprovalDecision(approved, reason))
+        logger.info(
+            "TOFU approval settled: id=%s pin=%s ip=%s → %s",
+            req.id, req.pin, req.ip, reason,
+        )
+        return True
+
+    def _supersede(self, predicate, why: str) -> int:
+        """让所有命中 predicate 的待审批请求作废（不推快照，由调用方统一推）。"""
+        n = 0
+        for req in list(self._requests.values()):
+            if predicate(req) and self._settle(req, False, "superseded"):
+                logger.info(
+                    "TOFU approval superseded: id=%s pin=%s ip=%s (%s)",
+                    req.id, req.pin, req.ip, why,
+                )
+                n += 1
+        return n
+
+    def _emit(self) -> None:
+        """推全量快照。空队列也要推——「收起面板」由空快照表达，不另发隐藏事件。"""
+        if _manager is None:
+            return
+        items = [r.snapshot() for r in self.items()]
+        _manager.bridge.emit(
+            "approval_snapshot", {"items": items, "pending": len(items)})
+
+
+# 惰性单例（与 _transfer_queue 同规矩：不在模块级堆实例）
+_approval_registry: Optional[ApprovalRegistry] = None
+
+
+def _get_approval_registry() -> ApprovalRegistry:
+    """返回审批注册表单例（首次调用时实例化）。"""
+    global _approval_registry
+    if _approval_registry is None:
+        _approval_registry = ApprovalRegistry()
+    return _approval_registry
+
+
+def resolve_approval(request_id: Optional[str], approved: bool) -> None:
+    """Dashboard（Qt 线程）调用：结算待审批请求。
+
+    ``request_id`` 必须是界面当前显示那条请求的 id（队列第一条），服务端据此结算
+    **那一条**——于是「用户看到的识别码」与「被结算的请求」必然出自同一份快照。
+    传 ``None`` 且 ``approved=False`` 表示「全部拒绝」（界面仅在并发 ≥3 时给入口）。
+
+    通过 ``loop.call_soon_threadsafe`` 投递到 asyncio 事件循环：注册表只被事件
+    循环线程触碰，这是唯一允许的跨线程入口。
+    """
+    if request_id is None and approved:
+        logger.warning("resolve_approval: 不支持「全部允许」，已忽略")
+        return
+    if _event_loop is None:
+        logger.debug("resolve_approval: 事件循环未运行，忽略")
+        return
+    _event_loop.call_soon_threadsafe(_apply_approval_decision, request_id, approved)
+
+
+def _apply_approval_decision(request_id: Optional[str], approved: bool) -> None:
+    """在事件循环线程里执行结算（``resolve_approval`` 的唯一落点）。"""
+    registry = _get_approval_registry()
+    if request_id is None:
+        registry.deny_all()
+        return
+    registry.resolve(request_id, approved)
+
+
+async def _watch_peer_gone(websocket) -> None:
+    """审批等待期间的「对端还在吗」探测器：返回即代表对端已经走了。
+
+    审批等待期间协议规定手机不发任何帧（它只该显示识别码、然后等挑战），所以这里
+    读到什么都无关紧要，只关心 disconnect。它的价值在于让「手机掉线」立刻从队列里
+    消失，而不是让界面挂着一个已经没人在等的请求等满 30s。
+    """
+    while True:
+        try:
+            message = await websocket.receive()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return                      # 连接已经坏了，等价于对端已走
+        if message.get("type") == "websocket.disconnect":
+            return
+
+
+async def _await_approval(req: ApprovalRequest, websocket) -> ApprovalDecision:
+    """等这一条请求出结果：用户点了、超时了、还是对端已经走了。
+
+    三种结局都从这里汇进注册表（状态只有一份、快照自动同步），调用方只拿到一个
+    ApprovalDecision。刻意不用轮询：等的是「future 有结果」与「对端断开」两个
+    事件里的先到者；超时预算取自**这条请求自己的 deadline**。
+    """
+    loop = asyncio.get_running_loop()
+    watcher = loop.create_task(_watch_peer_gone(websocket))
+    try:
+        done, _ = await asyncio.wait(
+            {req.future, watcher},
+            timeout=max(0.0, req.deadline - loop.time()),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+
+    if req.future in done:
+        return req.future.result()
+    _get_approval_registry().expire(
+        req.id, "disconnected" if watcher in done else "timeout")
+    # expire 幂等地写入了结果；若它发现已被别人结算，future 也已经是 done
+    return await req.future
+
+
+async def _close_quietly(websocket, code: int, reason: str) -> None:
+    """尽力关闭连接：对端先走时 close 会抛（starlette 把断连转成 WebSocketDisconnect）。"""
+    try:
+        await websocket.close(code=code, reason=_close_reason(reason))
+    except Exception as e:
+        logger.debug(f"Failed to close connection ({code}/{reason}): {e}")
 
 
 
@@ -418,6 +678,11 @@ async def _handle_auth(websocket, session) -> bool:
     所有失败都发生在 `_manager.connect()` 之前（调用方在返回 False 时短路），
     这正是「重放 auth 帧顶掉真机连接」那条 DoS 被顺带消掉的原因。
 
+    审批阶段的每一次请求都是一个 ApprovalRequest 实例（见 ApprovalRegistry）：
+    并发连接各自排队、界面只显示队首、用户按 id 结算，因此不再存在"A 的超时把 B
+    拒掉"这类靠全局状态错位的故障。批准会顺带作废其余待审批请求，同 IP 的新连接
+    会取代该 IP 的旧请求。
+
     Returns:
         True 表示握手完成，可进入 S1
     """
@@ -458,19 +723,23 @@ async def _handle_auth(websocket, session) -> bool:
         if not await _try_send_bytes(websocket, session.make_sealed_pin(), "sealed pin"):
             logger.warning("Failed to send sealed pin, closing")
             return False
+
         client_ip = websocket.client.host if websocket.client else "unknown"
-        try:
-            approved = await asyncio.wait_for(
-                _await_approval(session.pin, client_ip),
-                timeout=APPROVAL_TIMEOUT
+        # 申请本身是一个实例：它带着自己的 id 进队列、出现在界面快照里，界面点
+        # 「允许」时按 id 指回来，于是"显示的那条"与"结算的那条"必然同源。
+        # APPROVAL_TIMEOUT 是这一条请求的自身的预算（同 IP 的旧请求此时已被取代）。
+        registry = _get_approval_registry()
+        req = registry.request(
+            session.pin, client_ip, websocket, timeout=APPROVAL_TIMEOUT)
+        decision = await _await_approval(req, websocket)
+        if not decision.approved:
+            # 拒因如实记录：用户拒绝 / 超时 / 被同 IP 的新连接取代 / 对端断开是
+            # 四种不同的故障，混成一个字符串就没法排查了。
+            logger.warning(
+                "TOFU approval %s: id=%s pin=%s ip=%s, closing 4032",
+                decision.reason, req.id, req.pin, client_ip,
             )
-        except asyncio.TimeoutError:
-            approved = False
-        if not approved:
-            cancel_pending_approval()
-            reason = "timeout" if not approved else "rejected"
-            logger.warning(f"TOFU approval {reason}, closing 4032")
-            await websocket.close(code=4032, reason=reason)
+            await _close_quietly(websocket, 4032, decision.reason)
             return False
         # 审批通过：现在才做 ECDH + 创建 Provider
         session.complete_tofu_auth(algo, phone_pk)
@@ -1101,6 +1370,8 @@ async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
         logger.exception(f"Unexpected error in receive_loop: {e}")
     finally:
         _manager.disconnect(websocket)
+        # 兜底：连接没能走到审批结算就结束了（异常/提前返回），队列里不该留幽灵
+        _get_approval_registry().cancel_for(websocket)
 
 
 async def websocket_catchall(websocket: WebSocket) -> None:
@@ -1241,6 +1512,9 @@ def stop_server() -> None:
         _server.should_exit = True
     if _transfer_queue is not None:
         _transfer_queue.close()          # 取消后台写盘消费者
+    # 连接随事件循环一起消失，队列里若还留着请求，界面就会挂着一个永远不会被
+    # 结算的识别码（点「允许」落在空处）。推一份空快照让面板收起。
+    _get_approval_registry().reset()
     if _server_thread is not None:
         _server_thread.join(timeout=5.0)
     _transfer_queue = None
