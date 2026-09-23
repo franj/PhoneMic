@@ -197,11 +197,13 @@ def test_pong_whitelisted_but_unknown_type_still_errors():
     assert frame_decode(ws.frames[0])["code"] == "malformed"
 
 
-def test_hello_whitelisted_and_echoes_token():
-    """hello 认下并原样回显探活号（协议 §9）；未知类型仍回 malformed。
+def test_hello_is_no_longer_whitelisted():
+    """`hello` 已随「取消的三级等待」一起退役（wire-protocol.md §9.11，09-23）。
 
-    手机端「取消」的回执超时后靠这帧探活兜底：回执回来了，才说明排在它
-    之前的 cancel 帧已被服务端读出。回显 t 让迟到的旧回执不会满足下一次等待。
+    它当初只有一个用途：取消回执超时后发一帧探活，用它的回显给「cancel 已被服务端
+    读出」作证。新设计里取消是**单向**的（发 `upload_cancel` 即本地 `xhr.abort()`，
+    不等回执、不探活）⇒ 三级等待整条链不存在 ⇒ 这帧再无调用方，服务端的白名单分支
+    也一并删掉了。这条用例是**退役守卫**：谁把它加回来，这里立刻红。
     """
 
     async def main():
@@ -211,9 +213,9 @@ def test_hello_whitelisted_and_echoes_token():
         return ws, ok
 
     ws, ok = _run(main())
-    assert ok is True
-    assert ws.types() == ["hello"], "hello 必须回一帧，且只有这一帧"
-    assert frame_decode(ws.frames[0])["t"] == 42, "探活号必须原样回显"
+    assert ok is True, "未知类型仍是「收下但不认」——继续读下一条，不关连接"
+    assert ws.types() == ["error"], "hello 现在该落到未知类型那支"
+    assert frame_decode(ws.frames[0])["code"] == "malformed"
 
 
 # ---------- 阈值约束（防回归） ----------

@@ -3,7 +3,7 @@
 新架构（与 docs/wire-protocol.md §4.1 一致）：
 - KeyExchange：算法无关的密钥交换（SealedBox 解封 -> 读 algo -> ECDH -> KDF）
 - CryptoProvider：纯对称 AEAD 封装，构造只收 session_key；
-  防重放 seq 在 Provider 内部承载（AAD 优先 / 8 字节前缀兜底），外部不可见
+  防重放 seq 在 Provider 内部承载（两种算法统一为「明文前 8 字节」），外部不可见
 """
 
 import base64
@@ -222,7 +222,7 @@ class TestProviderSeqInternalized:
         p = cls(random_bytes(32))
         c1 = p.encrypt(b"first")
         c2 = p.encrypt(b"second")
-        # 期望 seq=0 却收到 seq=1：AAD 路径 MAC 失败 / 前缀路径 ReplayError
+        # 期望 seq=0 却收到 seq=1：解密成功、前缀比对失败 ⇒ ReplayError
         with pytest.raises((DecryptError, ReplayError)):
             p.decrypt(c2)
         # 计数器未推进，第 1 帧仍可正常解密
@@ -241,7 +241,7 @@ class TestProviderSeqInternalized:
         p.encrypt(b"b")  # c2 丢失
         c3 = p.encrypt(b"c")
         assert p.decrypt(c1) == b"a"
-        # 收到 seq=2（期望 1）：AAD 路径 MAC 失败 / 前缀路径 ReplayError
+        # 收到 seq=2（期望 1）：解密成功、前缀比对失败 ⇒ ReplayError
         with pytest.raises((DecryptError, ReplayError)):
             p.decrypt(c3)
 
@@ -267,27 +267,23 @@ class TestProviderSeqInternalized:
         assert p._rx_seq == 0  # 未收过任何帧
 
 
-# ---------- 前缀路径专属（XSalsa20 能明确区分重放） ----------
+# ---------- 重放与「解不开」是两类异常（两种算法一致） ----------
 
-class TestPrefixPathReplayDistinct:
-    def test_xsalsa20_replay_raises_replay_error(self):
-        """xsalsa20 前缀路径：解密成功后可读 seq，能明确判定为重放。"""
-        p = NaClBoxProvider(random_bytes(32))
+@pytest.mark.parametrize("cls", PROVIDERS, ids=lambda c: c.algorithm_name())
+class TestReplayIsNotFoldedIntoDecryptError:
+    def test_replay_is_replay_error_not_decrypt_error(self, cls):
+        """seq 焊在明文前 8 字节 ⇒ 解密成功、比对才失败 ⇒ 报 ReplayError。
+
+        09-23 之前 XChaCha20 走 `aad`，重放表现为 MAC 失败因而被折叠进
+        DecryptError，所以这条断言必须按算法分开写。两算法统一走前缀后差异
+        消失，合成一条参数化用例 —— 顺带守住「别再把重放折回解密失败」。
+        """
+        p = cls(random_bytes(32))
         ct = p.encrypt(b"hello")
         p.decrypt(ct)
-        with pytest.raises(ReplayError):
+        with pytest.raises(ReplayError) as exc_info:
             p.decrypt(ct)
-
-
-class TestAadPathReplayFolded:
-    def test_xchacha20_replay_is_decrypt_error(self):
-        """xchacha20 AAD 路径：重放表现为 MAC 失败，折叠进 DecryptError。"""
-        p = XChaCha20Provider(random_bytes(32))
-        ct = p.encrypt(b"hello")
-        p.decrypt(ct)
-        with pytest.raises(DecryptError) as exc_info:
-            p.decrypt(ct)
-        assert not isinstance(exc_info.value, ReplayError)
+        assert not isinstance(exc_info.value, DecryptError)
 
 
 # ---------- create_provider ----------

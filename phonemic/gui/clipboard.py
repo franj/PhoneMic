@@ -1,4 +1,4 @@
-"""图片写入系统剪贴板（GUI 进程内调用，wire-protocol.md §9.1 photo 落地端）。
+"""图片写入系统剪贴板（GUI 进程内调用，wire-protocol.md §9.8 photo 落地端）。
 
 必须在 Qt 主线程调用（QApplication.clipboard() 需要 GUI 事件循环）。
 Qt 的 setImage 会同时注册 CF_DIB / CF_DIBV5 / PNG 多种格式，粘贴进

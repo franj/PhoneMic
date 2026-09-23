@@ -11,10 +11,13 @@
  * 接口约定（与 Python 端 phonemic/tunnel/crypto/ 一一对应）：
  * - encrypt(plaintextBytes) → nonce+ciphertext 拼接的 Uint8Array
  * - decrypt(ciphertextBytes) → plaintext Uint8Array
- * - 防重放 seq 由 Provider 内部承载（AAD 优先 / 8 字节前缀兜底），
+ * - 防重放 seq 由 Provider 内部承载（**两种算法统一为「明文前 8 字节」**），
  *   不进应用层报文，调用方不可见
  * - makeAuthData(pcPublicKey): 用 PC 公钥 SealedBox 密封 {"algo","pk"} JSON——
  *   algo 在密文内部，不再明文传输（URL fragment 认证 / TOFU 重连路径）
+ * - injectSessionKey(rawKey): 直接注入一把对称密钥，跳过内部 ECDH——
+ *   分片上传要用 k_body 建一个**独立于 WS 那条流的 Provider 实例**
+ *   （docs/http-upload-design.md §5.8），而上传密钥是服务端现生成、不是协商来的
  * - Provider 只操作原始字节；帧编解码与握手帧（auth_challenge / auth_proof）的
  *   组装、识别均由上层 SecureClient 处理，Provider 不参与握手
  *
@@ -42,6 +45,29 @@ function sameBytes(a, b) {
     let diff = 0;
     for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
     return diff === 0;
+}
+
+/**
+ * 分片上传的请求认证 MAC（keyed BLAKE2b，docs/http-upload-design.md §5.3）。
+ *
+ * 与 Python 端 phonemic/tunnel/crypto/mac.py 同构：
+ *     Python: hashlib.blake2b(msg, key=k, digest_size=32).digest()
+ *     JS:     sodium.crypto_generichash(32, msg, k)
+ *
+ * ⚠️ 不要用 `sodium.crypto_auth` —— PyNaCl 1.6 的 nacl.bindings 里没有它，
+ * 服务端一调用就 AttributeError。keyed BLAKE2b 才是两端都有的同一条构造。
+ *
+ * 被签内容固定为 `"PUT\n<sid>\n<offset>\n<len>"`：三项缺一不可——只签随机数的话，
+ * 一份合法签名可以配上改过的偏移，去覆盖文件的别的位置。
+ */
+function uploadMac(kMac, sid, offset, len) {
+    const msg = sodium.from_string('PUT\n' + sid + '\n' + offset + '\n' + len);
+    return sodium.crypto_generichash(32, msg, kMac);
+}
+
+/** MAC 的线上形态：URL-safe base64、无 padding（与 Python 端 encode_mac 一致）。 */
+function encodeMac(macBytes) {
+    return sodium.to_base64(macBytes, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
 }
 
 /**
@@ -147,6 +173,19 @@ class NaClBoxProvider {
         this._pcPublicKey = rawBytes;
         this._sharedKey = null;
     }
+    /**
+     * 直接注入一把对称密钥，跳过内部 ECDH。
+     *
+     * 用途：分片上传的 body 用 k_body 建一个**独立于 WS 那条流**的实例
+     * （docs/http-upload-design.md §5.8）——seq 是单个计数器，两条独立 TCP 的到达
+     * 顺序不由发送方决定，共用实例必然出现「必有一条解不开」的概率性失败。
+     *
+     * 上传密钥由服务端现生成、随 upload_ready 下发，不是 ECDH 协商来的，
+     * 所以不能走 _deriveSharedKey。
+     */
+    injectSessionKey(rawBytes) {
+        this._sharedKey = rawBytes;
+    }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
         return sealedAuthData('xsalsa20', this._phonePublicKey, this._pcPublicKey);
@@ -222,6 +261,15 @@ class XChaCha20Provider {
         this._pcPublicKey = rawBytes;
         this._sharedKey = null;
     }
+    /**
+     * 直接注入一把对称密钥，跳过内部 ECDH（理由见 NaClBoxProvider 同名方法）。
+     *
+     * ⚠️ 两种算法都**必须**有这个方法：协商优先级里 xchacha20 最高，上传实际几乎
+     * 总是走它；少一个，`upload_ready` 之后的加密就当场 TypeError。
+     */
+    injectSessionKey(rawBytes) {
+        this._sharedKey = rawBytes;
+    }
     makeAuthData() {
         if (!this._pcPublicKey) return null;
         return sealedAuthData('xchacha20', this._phonePublicKey, this._pcPublicKey);
@@ -236,9 +284,14 @@ class XChaCha20Provider {
     encrypt(plaintextBytes) {
         const key = this._deriveSharedKey();
         const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-        // AEAD 支持 aad：seq 作为关联数据，解密时整体校验、明文暴露前即拒绝重放
+        // seq 以 8 字节大端前缀焊入明文，与 NaClBoxProvider 完全同构
+        // （docs/http-upload-design.md §5.8：两算法统一成同一条实现路径）。
+        // 此前它走 AEAD 的 additional_data 槽位，两个算法因此分裂。
+        const body = new Uint8Array(8 + plaintextBytes.length);
+        body.set(seqToBytes(this._txSeq++), 0);
+        body.set(plaintextBytes, 8);
         const ct = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
-            plaintextBytes, seqToBytes(this._txSeq++), null, nonce, key);
+            body, null, null, nonce, key);
         const combined = new Uint8Array(nonce.length + ct.length);
         combined.set(nonce, 0);
         combined.set(ct, nonce.length);
@@ -249,17 +302,21 @@ class XChaCha20Provider {
         const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
         const nonce = ciphertextBytes.slice(0, nonceSize);
         const ct = ciphertextBytes.slice(nonceSize);
-        let pt;
+        let body;
         try {
             // 签名：decrypt(secret_nonce, ciphertext, additional_data, public_nonce, key)
-            pt = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-                null, ct, seqToBytes(this._rxSeq), nonce, key);
+            body = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+                null, ct, null, nonce, key);
         } catch (e) {
-            // seq 不递增与密文被篡改都表现为 MAC 失败，不做区分
-            throw new Error('[SEC] decrypt failed (MAC mismatch, possibly replay)');
+            throw new Error('[SEC] decrypt failed (MAC mismatch)');
+        }
+        // seq 在密文里（解密后才读得到）：与 XSalsa20 同一条判据
+        const seq = seqFromBytes(body.slice(0, 8));
+        if (seq !== this._rxSeq) {
+            throw new Error('[SEC] replay detected (seq ' + seq + ' != expected ' + this._rxSeq + ')');
         }
         this._rxSeq++;
-        return pt;
+        return body.slice(8);
     }
     reset() {
         this._txSeq = 0;

@@ -1,6 +1,6 @@
-# PhoneMic 文件上传设计（HTTP 分片上传 · 草案 v3）
+# PhoneMic 文件上传设计（HTTP 分片上传 · 已落地 v3）
 
-状态：**草案，未落地、未改代码**。目标是把 `file` / `photo` 的传输方式从「WebSocket 分块」改为「WS 协商一次 + HTTP 分片 PUT」，加密强度不降。
+状态：**已落地**（2026-09-23 实现完成，§10 的阶段 1–3 已并入代码，退役清单已执行）。目标是把 `file` / `photo` 的传输方式从「WebSocket 分块」改为「WS 协商一次 + HTTP 分片 PUT」，加密强度不降。
 
 **读法：每个标题后面带一个标记，按标记决定要不要精读。**
 
@@ -562,7 +562,7 @@ body = Provider.encrypt( 片序号(8B 大端) ‖ 明文片 )      ← 原始返
 
 **收尾（服务端自动）**：`received == size` 时：
 
-- `file`：`.part` 改名去掉后缀，落到 `~/Downloads/PhoneMic/`（规则沿用 `wire-protocol.md` §9.2：重名改号、改名前再查一次重名）；
+- `file`：`.part` 改名去掉后缀，落到 `~/Downloads/PhoneMic/`（规则沿用 `wire-protocol.md` §9.9：重名改号、改名前再查一次重名）；
 - `photo`：重组后的字节直接写系统剪贴板，**不落盘**；
 - 然后才发 200 + `{"done": true, "saved": "…"}`。
 
@@ -1059,7 +1059,7 @@ WS 恰好两条都满足（TCP 保证顺序，丢了就断连），所以它工�
 - **排空必须在「返回响应之前」完成**，不能写完响应再排 —— 原因就是上面那条机制：uvicorn 在 `keep_alive=False` 时是**写完响应立刻 `transport.close()`**，等不到我们后面再去读；
 - **排空上限按「片大小 + 余量」定，不能留一个小预算**。只读 64KB 然后关连接，剩下的十几 MB 仍然留在接收缓冲里 ⇒ 照样 RST。直觉上「读一点就关能省带宽」在这里是错的：**「关连接时接收缓冲还有未读数据」本身就是 RST 的充要条件**；
 - 排空带**单调时钟超时**（几秒）与**字节上限**，两条都触顶就放弃并关闭（此时已是异常客户端，丢一个错误码可以接受）；
-- ⚠️ **修正 v2 的一处乐观估计：客户端 `xhr.abort()` 时排空「并不」立刻退出。** 在 CF 下，**CF 会把它手里已收下的字节继续吐完**（它必须把 body 送达才敢收 origin 的响应），所以 origin 侧看到的是**一次正常的读到底**，而不是 `ClientDisconnect`（§5.6.1 主因 1）。⇒ 排空在 CF 下是有实际成本的：约十几 MB 的读取，按服务端实测读取速度 15.9MB/s 算约 1 秒。真正「零成本」只出现在**局域网**（TCP 直连时 abort 立刻表现为 `ClientDisconnect`）。另注：取消路径下「读完但不写盘」的形状见 §5.6.3 约束 4；
+- ⚠️ **修正 v2 的一处乐观估计：客户端 `xhr.abort()` 时排空「并不」立刻退出。** 在 CF 下，**CF 会把它手里已收下的字节继续吐完**（它必须把 body 送达才敢收 origin 的响应），所以 origin 侧看到的是**一次正常的读到底**，而不是 `ClientDisconnect`（§5.6.1 主因 1）。⚠️ 但这**不是保证**：CF 还没把 body 收完就被客户端 abort 掉时，它同样会关闭到 origin 的连接，origin 读到的就是 `ClientDisconnect`——2026-09-23 的真机日志（CF 隧道 + 微信内置浏览器）里两种情形都留下了痕迹，所以那一档必须有确定的行为（§6.7）。⇒ 排空在 CF 下是有实际成本的：约十几 MB 的读取，按服务端实测读取速度 15.9MB/s 算约 1 秒。真正「零成本」只出现在**局域网**（TCP 直连时 abort 立刻表现为 `ClientDisconnect`）。另注：取消路径下「读完但不写盘」的形状见 §5.6.3 约束 4；对端**真的**关机（LAN 下 abort）时怎么收尾见 §6.7；
 - 逐条补单测（401 / 409 / 413 各一条），与现有 `test_dispatcher.py::test_post_405_drains_body_before_reply` 同形；
 - 真机验证一次（§10 阶段 3）——这条坑单测不一定抓得住。
 
@@ -1122,6 +1122,18 @@ v1 建议**客户端串行**（同一时刻只传一个文件），服务端按 
 
 > 顺带说明：**不做片级并发**。按 §1.2 的算式，15MB 一片已经让 RTT 部分可以忽略，串行足以跑满手机上行；而片级并发会让片乱序到达，把 §5.5 的三行判定扩充成「乱序窗口 + 缺口补齐」，复杂度陡增而收益有限。将来真要提速，先看手机上行是不是已经跑满。
 
+### 6.7 对端半路断开（`ClientDisconnect`） 【规范】
+
+§6.1 最后一条的反面：局域网下客户端 `xhr.abort()`（或者页面被切走）会**立刻**表现为对端关机，`request.stream()` 抛 `starlette.requests.ClientDisconnect`。这一档**不属于**「要排空的那一类」——**没有字节可等了**，连接已经死掉，排空无从谈起。
+
+三条规则：
+
+1. **不许冒到 uvicorn。** 漏接的后果是 `Exception in ASGI application` 加一整屏栈，看起来像服务端崩了（与握手收尾那条同族，见 `api.py::_try_send_bytes`）。三条读 body 的路径各自接住（`_drain_request_body` / `_read_upload_body` / `_receive_client_log`），另在 `app` 上注册 `ClientDisconnect` 异常处理器**兜底**——将来新写的读 body 代码忘了接，也只回一个 4xx，不出栈。
+2. **绝不能把半截密文交出去。** 实收字节少于声明长度时若照常 `commit_chunk`，解密必然失败，日志上记成 `reason=decrypt:` ⇒ 把「客户端走了」伪装成「解密失败」，属于最容易带偏排查方向的一类假信号。⇒ `_read_upload_body` 用 `None` 表示「对端走了」，调用方**直接收工：不解密、不 commit**。
+3. **不作废会话。** 谁走的就让谁去清理：取消走 WS 的 `upload_cancel`、断连走 `abort_for_conn`、都没有就等 TTL。HTTP 层因为「对端走了」就 `abort_session`，等于凭空多出一条协议外的作废路径，而且它**区分不出「用户取消」与「网络抖了一下」**。会话也挂不久：客户端一旦中止就会跟一发 `upload_cancel`，不存在挂着等 TTL 的实际风险。
+
+> ⚠️ 这一档**可能读不到响应**：uvicorn 收到 EOF 后会自己关掉传输，响应写不出去。⇒ 用例别断言状态码（`tests/test_upload.py::_raw_truncated` 的 docstring 写了原因），要断言的是**会话状态没变**。
+
 ---
 
 ## 7. 改动落点 【规范】
@@ -1129,7 +1141,7 @@ v1 建议**客户端串行**（同一时刻只传一个文件），服务端按 
 | 文件 | 改动 |
 |---|---|
 | `phonemic/server/upload.py`（新） | 上传会话表 + 分片状态机 + 验签（对应现在的 `server/transfer.py`） |
-| `phonemic/server/api.py` | 新增 `PUT /api/upload/<sid>` 分支；catch-all 路由放行 `PUT`；`_normalize_path` **两条分支**都给 `/api/upload/` 开前缀放行（§6.2）；`upload_begin` / `upload_ready` / `upload_cancel` / **`upload_error`** 四个 WS 分支；`upload_begin` 时取上传钥匙 + **建上传专用 Provider 实例**（§5.9 / §5.8）；会话记录加 `abort_event` + `conn_id`；**WS 关闭 ⇒ 作废该连接名下所有会话**（§5.6.4）；HTTP 活跃刷新 WS 判活（§6.5）；会话 TTL 清理（§5.6） |
+| `phonemic/server/api.py` | 新增 `PUT /api/upload/<sid>` 分支；catch-all 路由放行 `PUT`；`_normalize_path` **两条分支**都给 `/api/upload/` 开前缀放行（§6.2）；`upload_begin` / `upload_ready` / `upload_cancel` / **`upload_error`** 四个 WS 分支；`upload_begin` 时取上传钥匙 + **建上传专用 Provider 实例**（§5.9 / §5.8）；会话记录加 `abort_event` + `conn_id`；**WS 关闭 ⇒ 作废该连接名下所有会话**（§5.6.4）；HTTP 活跃刷新 WS 判活（§6.5）；会话 TTL 清理（§5.6）；读 body 的三条路径各自接住 `ClientDisconnect` + 应用级异常处理器兜底（§6.7） |
 | `phonemic/tunnel/crypto/base.py` | **接口不改**（仍只有 `encrypt` / `decrypt`）。只在文档字符串里写清「同一实例不允许被两条流交叉使用」（§5.8 三条前提）；⚠️ 顺手删掉「AAD 优先 / 8 字节前缀兜底」这句注释（现已统一为前缀） |
 | `phonemic/tunnel/crypto/xchacha20.py` | **片序号从 `aad` 改成「明文前 8 字节」**，与 XSalsa20 统一（§5.8「两种算法现在还差在哪」）。`nacl_box.py` **不改**（本来就是前缀） |
 | `phonemic/tunnel/e2ee.py` | **方案二不用改**（与 `session_key` 无关）；只有 §5.9 方案一才需要 `SecureSession` 保存并暴露 `session_key` |
@@ -1155,7 +1167,11 @@ v1 建议**客户端串行**（同一时刻只传一个文件），服务端按 
 
 **保留**：落盘与剪贴板两个 sink、重名改号规则、`.part` 写法、`error` / `config` / `reconnect` / `ping` / `pong`。
 
+> **执行结果（2026-09-23）**：上表四条已全部执行 —— `mobile.html` 的 `pickChunkSize` / `CHUNK_*` / `LinkProfile.chunkAck|cancelAck|hello` / `_waitChunkAck` / `_awaitCancelAck` / `_waitEndAck` / `_waitDrain` / `MAX_INFLIGHT` 等已随 `FilePanel` 重写一并移除；服务端的 `TransferQueue` 与 `ack` 三级回帧随 `server/transfer.py` 删除（`tests/test_transfer.py` 同步删除）。`upload_cancel` 按预期**保留**（单向）。
+
 **`hello` 单独说**：它存在的唯一理由是给「取消」的**三级等待**补凭证（发 cancel 帧 → 等 ack → 超时后探活兜底）。新设计里取消**仍然是 WS 帧**（v3 修订），但**是单向的**：发出去就本地 `abort()`，不等回执、不做探活 ⇒ 三级等待整条链不存在，`hello` 依然用不到。这条**不是本次设计要处理的问题**——实现完如果确认没人调用，直接删；现在不预先定论。
+
+> **已定论（09-23）**：确认无调用方 ⇒ 已删除。服务端白名单分支移除（现在落到未知类型支回 `error(malformed)`）、`config` 帧不再下发 `max_frame_size`、`wire-protocol.md` §7 的 `hello` 小节整节删除。退役记录见 `wire-protocol.md` §9.11 / §12。
 
 ---
 
@@ -1179,6 +1195,8 @@ v1 建议**客户端串行**（同一时刻只传一个文件），服务端按 
 ---
 
 ## 10. 落地顺序（建议） 【规范】
+
+> **进度（2026-09-23）**：阶段 1–3 **已实现**并随本文件并入代码 —— `crypto/xchacha20.py` 改前缀（阶段 1）、`server/upload.py` + `PUT /api/upload/<sid>`（阶段 2）、`mobile.html` 的 `FilePanel` 发送侧重写（阶段 3）；旧 WS 分块路径、`server/transfer.py`、`tests/test_transfer.py` 已删除。阶段 4–5 的真机验证待用户手动跑。落地细节见同目录 `wire-protocol.md` §9 / §12。
 
 | 阶段 | 内容 | 验证方式 |
 |---|---|---|

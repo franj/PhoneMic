@@ -26,9 +26,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import uvicorn
 
 from phonemic.bridge_interface import EventBridge
-from phonemic.gui.file import FileReceiver
-from phonemic.gui.photo import PhotoReceiver
-from phonemic.server.transfer import TransferQueue
+from phonemic.server.upload import (
+    CHUNK_OVERHEAD,
+    PHOTO_MAX_SIZE,
+    UPLOAD_CHUNK_SIZE,
+    UploadManager,
+)
 from phonemic.tunnel.e2ee import AUTH_TIMEOUT, APPROVAL_TIMEOUT, SecureChannel
 from phonemic.tunnel.crypto.errors import CryptoError
 from phonemic.tunnel.frame import FrameError
@@ -100,15 +103,15 @@ class ConnectionManager:
 
         # 发送当前配置（加密传输）
         try:
+            # ⚠️ 不再下发 `max_frame_size`（09-23 退役）：它唯一的用途是让手机端收紧
+            # **文件分块**上限，而片大小现在由 `upload_ready` 的 `chunk` 字段下发
+            # （wire-protocol.md §9.1）、客户端不再自算 ⇒ 这个字段没有任何读取方。
+            # `ws_max_size` 本身仍然生效，但 WS 上只剩控制帧，撞不到它。
             await _send_frame(websocket, {
                 "type": "config",
                 "mobile_max_records": self.max_records,
-                "max_frame_size": WS_MAX_FRAME_SIZE,
             })
-            logger.debug(
-                f"Sent config to client: max_records={self.max_records}, "
-                f"max_frame_size={WS_MAX_FRAME_SIZE}"
-            )
+            logger.debug(f"Sent config to client: max_records={self.max_records}")
         except Exception as e:
             logger.warning(f"Failed to send initial config: {e}")
 
@@ -122,12 +125,14 @@ class ConnectionManager:
         """
         清理连接状态，并通知主进程断开事件。
         仅当断开的连接是当前活动连接时才发送事件，以防止重复。
+
+        ⚠️ 上传会话的作废**不在这里**：它是异步的，由 ``_websocket_endpoint``
+        的 finally 显式 await（见 ``UploadManager.abort_for_conn``）。这里只做
+        同步的连接状态清理。
         """
         if self.active_websocket is websocket:
             self.active_websocket = None
             self.active_session = None
-            # 断连时丢弃未完成的文件/图片接收会话（wire-protocol.md §9）
-            _get_transfer_queue().abort_all()
             self.bridge.emit("disconnect")
             logger.info("Active WebSocket disconnected, event sent.")
 
@@ -138,46 +143,72 @@ _manager: Optional[ConnectionManager] = None
 # 安全通道（所有模式共用，PC 密钥对在启动时生成一次）
 _secure_channel: Optional[SecureChannel] = None
 
-# 文件接收状态机（wire-protocol.md §9）。落盘回调走 bridge 发 file_saved 事件，
-# 主进程弹托盘通知；dest_dir 默认 ~/Downloads/PhoneMic（§9.2）。
-_file_receiver = FileReceiver()
 
-# 图片到剪贴板接收状态机（wire-protocol.md §9.1）：内存重组不落盘，
-# end 回调走 bridge 发 photo_received 事件，主进程写系统剪贴板 + 托盘通知。
-_photo_receiver = PhotoReceiver()
-
-
-# ---------- 分块传输：写盘队列（wire-protocol.md §9） ----------
-# 接收侧只入队，落盘与 ack 交给后台消费者串行执行，收帧循环立刻回去处理
-# mouse / key / preview（"传文件时鼠标卡"的根因）。
-# 队列按字节限流，满则入队方 await —— 天然背压，不丢帧不爆内存。
+# ---------- 分片上传：会话表（docs/http-upload-design.md） ----------
+# 一次上传 = 一条 UploadSession，数据全走 HTTP PUT /api/upload/<sid>，
+# WS 只在两头出现：协商（upload_begin / upload_ready）与取消（upload_cancel）。
+# 会话表本身（含分片状态机与验签）在 server/upload.py，这里只管接线与 HTTP 边界。
+#
 # WS_MAX_FRAME_SIZE 是 WebSocket 单帧上限，同时通过 config 帧下发给手机端。
 WS_MAX_FRAME_SIZE = 16 * 1024 * 1024
 
-# 惰性实例：首次用到才创建（生命周期跟随服务，换事件循环时内部自动重建 worker）
-_transfer_queue: Optional[TransferQueue] = None
+# 惰性实例：首次用到才创建（生命周期跟随服务，stop_server 里拆除）
+_upload_manager: Optional[UploadManager] = None
+
+# TTL 扫描周期（秒）。连接级作废是主力，这只是兜底，不必扫得太勤。
+_UPLOAD_SWEEP_INTERVAL = 30.0
 
 
-def _get_transfer_queue() -> TransferQueue:
-    """返回传输队列单例（首次调用时实例化）。"""
-    global _transfer_queue
-    if _transfer_queue is None:
-        _transfer_queue = TransferQueue(
-            _file_receiver, _photo_receiver, _send_frame)
-    return _transfer_queue
+def _on_file_saved(path: str, name: str, size: int) -> None:
+    """落盘完成 → 托盘通知（经事件桥交给主进程）。"""
+    if _manager is not None:
+        _manager.bridge.emit("file_saved", {"path": path, "name": name, "size": size})
+
+
+def _on_photo_received(data: bytes, name, size: int) -> None:
+    """图片收齐 → 主进程写系统剪贴板（Qt 必须在 GUI 线程执行）。"""
+    if _manager is not None:
+        _manager.bridge.emit("photo_received", {"data": data, "name": name, "size": size})
+
+
+def _get_upload_manager() -> UploadManager:
+    """返回上传会话表单例（首次调用时实例化）。"""
+    global _upload_manager
+    if _upload_manager is None:
+        _upload_manager = UploadManager(
+            on_file_done=_on_file_saved,
+            on_photo_done=_on_photo_received,
+        )
+    return _upload_manager
+
+
+async def _upload_sweeper() -> None:
+    """TTL 兜底扫描：周期性作废过期会话（删 .part、摘密钥）。
+
+    连接级作废（WS 关闭）才是主力，这里只兜两种边角：连接还活着但谁也不动了、
+    以及服务端自己重启。挂在**服务线程的事件循环**上——会话表是进程级的，每条
+    连接开一份纯属浪费。
+
+    单轮扫描出错只记日志、继续下一轮：TTL 是最后一道兜底，不该因为某一次
+    「磁盘忙 / 文件被占」就整体消失。取消（stop_server）时干净退出。
+    """
+    while True:
+        try:
+            await asyncio.sleep(_UPLOAD_SWEEP_INTERVAL)
+        except asyncio.CancelledError:
+            return
+        try:
+            await _get_upload_manager().sweep_expired()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("上传会话 TTL 扫描失败")
 
 
 def set_bridge(bridge: EventBridge) -> None:
     """设置进程通信队列（需在启动服务前调用）。"""
     global _manager
     _manager = ConnectionManager(bridge)
-    _file_receiver.on_done = lambda path, name, size: _manager.bridge.emit(
-        "file_saved", {"path": path, "name": name, "size": size}
-    )
-    # photo end 回调：把重组好的图片字节交给主进程（Qt 剪贴板写入必须在 GUI 线程）
-    _photo_receiver.on_done = lambda data, name, size: _manager.bridge.emit(
-        "photo_received", {"data": data, "name": name, "size": size}
-    )
     logger.info("Message bridge set for backend service")
 
 
@@ -774,13 +805,109 @@ async def _handle_auth(websocket, session) -> bool:
     return True
 
 
-async def _handle_client_message(websocket, session, raw: bytes) -> bool:
+# ---------- 分片上传：WS 协商与取消（docs/http-upload-design.md §5.1） ----------
+
+
+async def _upload_error(websocket, tid, code: str, msg: str) -> None:
+    """下行 ``upload_error``（① 阶段的拒绝）。
+
+    ``msg`` **只进日志**：界面文案由客户端按 ``code`` 走自己的语言包，否则文案语言
+    跟着电脑走、与手机界面不一致。单开一个 type 而不复用通用的 ``error``，是因为
+    ``error`` 是**连接级**通道、上传的失败面是**流程内**的（要跟 id 对号、要跟那条
+    进度气泡联动）。
+    """
+    logger.info("upload_begin 被拒: id=%r code=%s (%s)", tid, code, msg)
+    await _send_frame(websocket, {
+        "type": "upload_error",
+        "id": tid,
+        "code": code,
+        "msg": msg,
+    })
+
+
+async def _handle_upload_begin(websocket, session, inner: dict, liveness) -> None:
+    """① 阶段：校验 → 建会话（生成 sid 与两把一次性钥匙）→ 下发 ``upload_ready``。
+
+    这一步顺带把三件事一次做完，所以省不掉：**校验大小**（避免白传）、
+    **分配最终文件名**（重名编号只算一次）、**建立密钥绑定**（HTTP 请求才能验签与
+    解密）。代价在局域网是几毫秒，在 Cloudflare 上是几十到几百毫秒——相对传输本身
+    可忽略。
+    """
+    tid = inner.get("id")
+    ref = inner.get("ref")
+    name = inner.get("name")
+    size = inner.get("size")
+
+    err = UploadManager.validate_begin(ref, size, name)
+    if err is not None:
+        await _upload_error(websocket, tid, err,
+                            f"ref={ref!r} size={size!r} name={name!r}")
+        return
+
+    if ref == "photo" and size > PHOTO_MAX_SIZE:
+        # 全程在内存，必须防内存炸弹 ⇒ 在①阶段就拒，一个字节都还没传（§5.7）
+        await _upload_error(websocket, tid, "too_large",
+                            f"photo {size} > {PHOTO_MAX_SIZE}")
+        return
+
+    mgr = _get_upload_manager()
+    try:
+        upload = await mgr.begin(
+            kind=ref,
+            name=name,
+            size=size,
+            conn_id=id(websocket),
+            websocket=websocket,
+            algorithm=session.negotiated_algorithm,
+            liveness=liveness,
+        )
+    except ValueError as e:
+        await _upload_error(websocket, tid, "bad_args", str(e))
+        return
+
+    # k_mac / k_body 以明文放在帧里 —— 整帧已被 WS 会话密钥加密（session.wrap），
+    # 所以线上字节是密文。⚠️ 这里刻意不打印这一帧的**内容**
+    # （PHONEMIC_LOG=trace 下 uvicorn 也只能看到密文）。
+    await _send_frame(websocket, {
+        "type": "upload_ready",
+        "id": tid,
+        "sid": upload.sid,
+        "chunk": mgr.chunk_size,
+        "saved": upload.saved,
+        "expires": int(mgr.session_ttl),
+        "k_mac": upload.k_mac,
+        "k_body": upload.k_body,
+    })
+
+
+async def _handle_upload_cancel(inner: dict) -> None:
+    """上行 ``upload_cancel``：作废会话。**单向、幂等、无回帧。**
+
+    取消必须走 WS 而不是靠客户端 ``xhr.abort()``：实测 abort 停不下服务端
+    （CF 是缓冲代理，它手里已收下的字节仍会吐给 origin）。而剩下能通的两条路里
+    WS 帧每条维度都更优——它已经在跑、已经认证过、不用另开连接、不需要回执。
+
+    准入按连接做（一个连接只服务一台手机，连 ``sid`` 都不必校），但**状态按 sid 存**：
+    HTTP 请求与 WS 是两个独立 handler，它们之间唯一的共享物就是会话表。
+    """
+    sid = inner.get("sid")
+    if not isinstance(sid, str) or not sid:
+        logger.warning("upload_cancel 缺少 sid，忽略")
+        return
+    await _get_upload_manager().abort_session(sid, "client")
+
+
+async def _handle_client_message(websocket, session, raw: bytes, liveness=None) -> bool:
     """
     S1：处理认证后的单条 binary 消息。
 
     加密与否由会话状态机决定（session.unwrap 内部按 Provider 是否存在判断），
     不靠帧内容判别——因此加密帧没有外层信封，无法也不需要在解密前识别类型。
     解密后拒绝重复 auth，其余转发到事件桥。
+
+    ``liveness``：本连接的应用层判活状态。上传会话要拿它——HTTP 活动也必须刷新
+    心跳时间戳，否则一条健康的、跑在 CF 上的大文件上传会在 60 秒时因为「WS 判死 ⇒
+    会话作废」把自己杀掉（§6.5，必做）。
 
     Returns:
         True 表示继续接收下一条；False 表示需要关闭连接
@@ -813,22 +940,28 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         _manager.bridge.emit("mouse", inner)
         logger.debug(f"Received mouse: a={inner.get('a')}")
     elif msg_type in ("file", "photo"):
-        # 分块传输（wire-protocol.md §9 / §9.1）：只入队，落盘与 ack 都交给
-        # 后台任务串行执行——收帧循环立刻回去处理 mouse/key/preview，
-        # 不再被写盘堵住。队列满时这里 await，形成背压。
-        await _get_transfer_queue().enqueue(msg_type, inner, websocket)
+        # 老的 WS 分块传输已退役（docs/http-upload-design.md §8）：文件与图片改走
+        # HTTP 分片 PUT。这里回一帧明确的错误而不是静默丢弃——旧页面（未刷新的
+        # 缓存）打到这条路径时，至少能在手机上看到一句原因，而不是"卡住不动"。
+        logger.warning("收到已退役的 %s 帧（旧页面？），请刷新页面", msg_type)
+        await _send_frame(websocket, {
+            "type": "error",
+            "code": "malformed",
+            "msg": f"{msg_type} is retired, use upload_begin",
+        })
+    elif msg_type == "upload_begin":
+        await _handle_upload_begin(websocket, session, inner, liveness)
+    elif msg_type == "upload_cancel":
+        await _handle_upload_cancel(inner)
     elif msg_type == "pong":
         # 应用层心跳应答（wire-protocol.md §7）。存活时间戳已在 _serve_messages
         # 的收帧处统一刷新，这里只需认下类型，避免落到 else 回一帧 malformed。
         logger.debug("Received pong")
-    elif msg_type == "hello":
-        # 取消回执的兜底探活（wire-protocol.md §9）：原样回显探活号 t。
-        # 手机端据此认定「排在 hello 之前的 cancel 帧已被服务端读出」——同一
-        # 条可靠有序通道，本函数按收帧顺序执行，能读到 hello 就说明先读到了
-        # cancel（cancel 已入队，随后必被消费者处理）。
-        await _send_frame(websocket, {"type": "hello", "t": inner.get("t")})
-        logger.debug(f"Received hello (t={inner.get('t')})")
     else:
+        # ⚠️ `hello` 也落在这里（09-23 退役，见 wire-protocol.md §9.11）：它的唯一用途是
+        # 给「取消」的三级等待补凭证，而新设计里取消是**单向**的（发 `upload_cancel`
+        # 即本地 abort，不等回执、不做探活）⇒ 三级等待整条链不存在，这帧再无调用方。
+        # 落到这里正是期望行为：回一帧 `error(malformed)`，让旧页面立刻看见明确原因。
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {
             "type": "error",
@@ -1031,7 +1164,8 @@ _DRAIN_TIMEOUT = 2.0
 _last_client_ua: str = ""
 
 
-async def _drain_request_body(request: Request) -> None:
+async def _drain_request_body(request: Request, limit: Optional[int] = None,
+                              timeout: Optional[float] = None) -> None:
     """把请求体读掉并丢弃，保证响应写出后服务端能干净地关闭连接。
 
     只在「不消费 body 就返回响应」的分支里调用。已经读过 body 的路径
@@ -1039,9 +1173,12 @@ async def _drain_request_body(request: Request) -> None:
     RuntimeError("Stream consumed")。
     路由层直接给出的 405（非 GET/HEAD/POST 方法）不经过这里：那条路径只有扫描器
     会走，客户端读不读得到响应都无所谓。
+
+    上传端点要传 ``limit``／``timeout``：默认那 64KB 是给扫描器用的量级，
+    上传的 body 有 15MB，只读 64KB 再关连接照样 RST。
     """
-    remaining = _DRAIN_MAX_BODY
-    deadline = time.monotonic() + _DRAIN_TIMEOUT
+    remaining = _DRAIN_MAX_BODY if limit is None else int(limit)
+    deadline = time.monotonic() + (_DRAIN_TIMEOUT if timeout is None else float(timeout))
     stream = request.stream()
     while remaining > 0:
         budget = deadline - time.monotonic()
@@ -1054,7 +1191,7 @@ async def _drain_request_body(request: Request) -> None:
         except (asyncio.TimeoutError, ClientDisconnect):
             return  # 对端不发或已经走了：照样把响应发出去
         remaining -= len(chunk)
-    logger.debug(f"请求体超过 {_DRAIN_MAX_BODY} 字节，放弃继续排空")
+    logger.debug(f"请求体超过排空上限（{limit}），放弃继续排空")
 
 
 async def _receive_client_log(request: Request) -> Response:
@@ -1075,7 +1212,12 @@ async def _receive_client_log(request: Request) -> Response:
         await _drain_request_body(request)
         return Response(status_code=404)
 
-    raw = await request.body()
+    try:
+        raw = await request.body()
+    except ClientDisconnect:
+        # 同族口子：`body()` 内部也是 `stream()`，对端半路走了照样抛。日志回传本来就是
+        # 尽力而为，对端收不到响应也无所谓，别让它冒泡成 traceback。
+        return Response(status_code=400)
     if len(raw) > _CLIENT_LOG_MAX_BODY:
         return Response(status_code=413)
     try:
@@ -1214,12 +1356,160 @@ _PUBLIC_PATHS = {
 }
 
 
+# ---------- 分片上传：HTTP 端点（docs/http-upload-design.md §5.2） ----------
+#
+# 端点**不带页面前缀**（09-23 决定）：URL 固定是 /api/upload/<sid>，客户端写根绝对
+# 路径。理由是「页面前缀只在页面加载那一刻有意义」——上传 URL 会出现在**每一片**的
+# 请求行与访问日志里，带上它等于把入口前缀**持续**广播出去。`sid` 已是 24 字节真
+# 随机，做选择器足够。⇒ 代价是下面 _normalize_path 的**两条**分支都要给它放行。
+_UPLOAD_PATH_PREFIX = "/api/upload/"
+
+# 排空上限按「片大小 + 余量」定，不能留一个小预算：只读 64KB 然后关连接，
+# 剩下的十几 MB 仍然留在接收缓冲里 ⇒ 照样 RST。直觉上「读一点就关能省带宽」在
+# 这里是错的：「关连接时接收缓冲还有未读数据」本身就是 RST 的充要条件（§6.1）。
+# ⚠️ 这条排空**只花在「自己人但状态不对」的请求上**（验签已过、状态码要送达）；
+# 「拿不出凭证」的请求一个字节都不读、直接关（§5.10「09-20 决定」）。
+_UPLOAD_DRAIN_LIMIT = UPLOAD_CHUNK_SIZE + 64 * 1024
+_UPLOAD_DRAIN_TIMEOUT = 20.0
+
+
+def _parse_upload_headers(request: Request):
+    """解析 ``X-Pm-Offset`` / ``X-Pm-Len`` / ``X-Pm-Mac``。
+
+    任一缺失或格式不合法都返回 None ⇒ 调用方按「拿不出凭证」处理（401、
+    **不读 body**）。验签只需要头，所以这一支能在**零 body 字节**时判出来——
+    这正是「拒绝时按能不能拿出凭证分两类」这条规则可行的前提（§5.10）。
+    """
+    try:
+        offset = int(request.headers["X-Pm-Offset"])
+        length = int(request.headers["X-Pm-Len"])
+    except (KeyError, ValueError, TypeError):
+        return None
+    mac = request.headers.get("X-Pm-Mac")
+    if not mac:
+        return None
+    return offset, length, mac
+
+
+async def _read_upload_body(request: Request, session, expected: int) -> Optional[bytes]:
+    """把整片密文收进内存（供解密）；``None`` = 对端在收完之前把连接关掉了。
+
+    ⚠️ 必须流式读、**不能** ``await request.body()``（§6.3）：那会把 15MB 一次读进
+    内存且没有读超时，客户端只声明 Content-Length 却不发数据就能把 handler 吊住。
+
+    ⚠️ 会话被取消时**继续读、只是不再累积**——一跳出读循环就返回，会让 CF 正在吐的
+    十几 MB 留在接收缓冲里，照样触发 §6.1 的 RST（§5.6.3 约束 4）。多花约一秒换
+    连接干净收尾，这一秒里它已经不再产出任何文件了。
+
+    ⚠️ 但「对端走了」与「会话被取消」是两件不同的事，收尾也相反：取消时连接还在、
+    数据照样会来，所以能读完；对端一关连接，``request.stream()`` 立刻抛
+    ``ClientDisconnect``，**没有字节可等了**（``_drain_request_body`` 接住的也是
+    同一个异常，口径一致）。这一档返回 ``None``，而不是把半截密文交出去——那只会
+    在 ``commit_chunk`` 里变成一条 ``reason=decrypt:`` 的作废日志，把「客户端走了」
+    伪装成「解密失败」，是最容易带偏排查方向的一类假信号。谁走的就让谁去清理：
+    取消走 WS 的 ``upload_cancel``、断连走 ``abort_for_conn``、都没有就等 TTL；
+    HTTP 层只管别把异常漏给 uvicorn 打出一整屏栈。
+    """
+    buf = bytearray()
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            if session.abort_event.is_set():
+                continue                      # 已取消：读完丢弃
+            if len(buf) + len(chunk) > expected:
+                continue                      # 超出声明长度（防御，正常不会发生）
+            buf += chunk
+    except ClientDisconnect:
+        return None
+    return bytes(buf)
+
+
+def _upload_response(status: int, received: int) -> Response:
+    """按 §5.2 那张响应表构造响应体：200 / 409 带 ``received``，其余空体。"""
+    if status == 200:
+        return JSONResponse({"received": received})
+    if status == 409:
+        return JSONResponse({"received": received}, status_code=409)
+    return Response(status_code=status)
+
+
+async def _serve_upload(request: Request, sid: str) -> Response:
+    """``PUT /api/upload/<sid>``：收一片（§5.2 / §5.5 / §6.1）。
+
+    判定顺序固定为 **验签 → offset 判定 → 解密**，不能颠倒（§5.8 前提 1）：
+    只有 ``offset == received`` 的片才允许进解密，重复片与错位片在前两步就已处理掉
+    ⇒ provider 那句「seq 必须严格相等」在重复片上不会被触发。
+    """
+    mgr = _get_upload_manager()
+
+    parsed = _parse_upload_headers(request)
+    if parsed is None:
+        return Response(status_code=401)
+    offset, length, mac = parsed
+
+    session = mgr.get(sid)
+    if session is None or not mgr.verify(session, offset, length, mac):
+        # ⚠️ 401 绝不能顺手作废会话：LAN 下 sid 在 URL 里明文可见，一个只知道 sid 的
+        # 人随便发个签名错的 PUT，如果它就能把会话作废，那**一个未认证的包就能毁掉
+        # 别人正在传的文件**（纯 DoS）。作废只发生在验签通过之后的分支。
+        return Response(status_code=401)
+
+    # ---- 从这里起验签已过：每个拒绝分支都必须把 body 读完再回（§5.10 分类） ----
+
+    # 零成本一致性检查：Content-Length 恒等于 X-Pm-Len + 48（两算法开销一致，§5.4）
+    declared = request.headers.get("content-length")
+    try:
+        clen = int(declared) if declared is not None else -1
+    except (ValueError, TypeError):
+        clen = -1
+    if clen != length + CHUNK_OVERHEAD:
+        await _drain_request_body(request, limit=_UPLOAD_DRAIN_LIMIT,
+                                  timeout=_UPLOAD_DRAIN_TIMEOUT)
+        await mgr.abort_session(sid, "content-length mismatch")
+        return Response(status_code=400)
+
+    verdict = mgr.judge(session, offset, length)
+
+    if verdict.action == "write":
+        body = await _read_upload_body(request, session, length + CHUNK_OVERHEAD)
+        if body is None:
+            # 对端在半路关了连接：客户端取消（`_cancel` 里的 xhr.abort）与页面被切走
+            # 都会走到这里。不解密、不 commit、**也不作废会话**（理由见
+            # _read_upload_body 的第三段）。响应写出去没人收，只为让协议流程有个收尾。
+            logger.info("上传分片时客户端断开: sid=%s offset=%d", sid, offset)
+            return Response(status_code=400)
+        result = await mgr.commit_chunk(session, offset, length, body)
+    else:
+        # 重复片 / 错位 / 超限：都要先把 body 读完再回，否则客户端拿不到状态码
+        await _drain_request_body(request, limit=_UPLOAD_DRAIN_LIMIT,
+                                  timeout=_UPLOAD_DRAIN_TIMEOUT)
+        result = verdict
+
+    if result.abort:
+        # 先记下 received 再作废（作废之后会话就取不到了）；abort_session 幂等，
+        # 已被取消的会话再调一次是空操作。
+        received = result.received
+        await mgr.abort_session(sid, result.reason)
+        return _upload_response(result.status, received)
+
+    if result.done:
+        return JSONResponse({
+            "received": result.received, "done": True, "saved": result.saved,
+        })
+    return _upload_response(result.status, result.received)
+
+
 def _normalize_path(path: str) -> Optional[str]:
     """校验入口路径并归一化为内部路径，非法路径返回 None。
 
     加密模式：请求路径必须带 /{secret_path} 前缀（防扫描，根路由 404）；
-    明文模式：只放行白名单内的已知路径。
+    裸 URL（TOFU，secret_path 为空）：只放行白名单内的已知路径。
     secret 每次现读，算法切换时改值即时生效，无需重启服务器。
+
+    ⚠️ ``/api/upload/`` 在**两条分支里都要放行**（它按 §5.2 不带页面前缀），
+    只改一条会在另一种认证方式下静默 404。放行的含义只是「路径能到达 dispatcher」，
+    **不是「谁都能上传」**——门禁是 ``X-Pm-Mac``。
     """
     secret = _secure_channel.secret_path if _secure_channel else ""
 
@@ -1228,9 +1518,14 @@ def _normalize_path(path: str) -> Optional[str]:
             return "/"
         if path.startswith("/" + secret + "/"):
             return path[len(secret) + 1:]
+        if path.startswith(_UPLOAD_PATH_PREFIX):
+            return path
         return None
     else:
         if path in _PUBLIC_PATHS:
+            return path
+        # 精确集合里放不下带 <sid> 的路径 ⇒ 单独给一条前缀匹配
+        if path.startswith(_UPLOAD_PATH_PREFIX):
             return path
         if not is_frozen() and path == "/test":
             return path
@@ -1241,7 +1536,7 @@ async def _dispatch_http(request: Request, path: str) -> Response:
     """HTTP 统一入口：校验路径合法性后分发到具体资源。"""
     normalized = _normalize_path(path)
 
-    # 写方法只有手机端日志回传一个入口，其余 POST 一律 405。
+    # 写方法只有两个入口：手机端日志回传（POST）与上传分片（PUT），其余一律 405。
     # 判定必须放在路径校验之前：路径非法时也返回 405 而不是 404，否则
     # 「路径对不对」会从状态码差异里漏出去。这也与 POST 由路由层直接
     # 返回 405 时的既有行为保持一致（见 tests/test_dispatcher.py）。
@@ -1251,6 +1546,16 @@ async def _dispatch_http(request: Request, path: str) -> Response:
         # 405 是「不消费 body 就返回」的分支，必须先排空再返回，否则带 body 的 POST
         # 会以 RST 收场（原因见 _drain_request_body）。
         await _drain_request_body(request)
+        return Response(status_code=405)
+
+    if request.method == "PUT":
+        if normalized is not None and normalized.startswith(_UPLOAD_PATH_PREFIX):
+            # sid 只当字典键用、从不拼进文件路径（落盘名在 ① 阶段已由服务端分配），
+            # 所以带 `/` 或 `..` 的伪 sid 只会查不到会话 ⇒ 401。
+            return await _serve_upload(request, normalized[len(_UPLOAD_PATH_PREFIX):])
+        # 打错的上传 URL 也会落到这里，body 同样是片大小量级 ⇒ 用上传的排空预算
+        await _drain_request_body(request, limit=_UPLOAD_DRAIN_LIMIT,
+                                  timeout=_UPLOAD_DRAIN_TIMEOUT)
         return Response(status_code=405)
 
     if normalized is None:
@@ -1314,6 +1619,21 @@ app = Starlette()
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+async def _on_client_disconnect(request: Request, exc: ClientDisconnect) -> Response:
+    """``ClientDisconnect`` 的兜底出口：留一行日志，不冒泡成整屏 traceback。
+
+    每条读 body 的路径都该自己接住它（``_drain_request_body`` / ``_read_upload_body``
+    / ``_receive_client_log`` 都接了），但这是一张网：将来漏掉一处只会让日志难看，
+    不该让 uvicorn 打出一整屏栈——那看起来像服务端崩了（跟握手收尾同一条理由，
+    见 ``_try_send_bytes``）。异常语义单一，不存在掩盖真实缺陷的风险。
+    """
+    logger.debug("客户端在响应前断开: %s", request.url.path)
+    return Response(status_code=400)
+
+
+app.add_exception_handler(ClientDisconnect, _on_client_disconnect)
+
+
 async def root(request: Request) -> Response:
     """根路径入口。"""
     return await _dispatch_http(request, "/")
@@ -1326,9 +1646,13 @@ async def http_catchall(request: Request) -> Response:
 
 
 # 允许 POST：手机端日志回传走同一套路由（加密模式下路径带 secret 前缀，
-# 无法单独注册一条固定路径，只能在分发处按方法分流）
-app.add_route("/", root, methods=["GET", "HEAD", "POST"])
-app.add_route("/{full_path:path}", http_catchall, methods=["GET", "HEAD", "POST"])
+# 无法单独注册一条固定路径，只能在分发处按方法分流）。
+# 允许 PUT：上传分片 PUT /api/upload/<sid>（不带页面前缀，§5.2/§6.2）。⚠️ 不放行
+# 的话请求会落在**路由层**直接 405、根本走不到 _dispatch_http，而且 PUT 是带 body
+# 的 405 ⇒ 又回到 §6.1 那个 RST 坑。
+# 不必放行 DELETE：取消已改走 WS 帧 upload_cancel（§5.6.1）。
+app.add_route("/", root, methods=["GET", "HEAD", "POST", "PUT"])
+app.add_route("/{full_path:path}", http_catchall, methods=["GET", "HEAD", "POST", "PUT"])
 
 
 async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
@@ -1372,6 +1696,16 @@ async def _websocket_endpoint(websocket: WebSocket, path: str) -> None:
         _manager.disconnect(websocket)
         # 兜底：连接没能走到审批结算就结束了（异常/提前返回），队列里不该留幽灵
         _get_approval_registry().cancel_for(websocket)
+        # WS 一断，该连接名下的上传会话**全部立即作废**（§5.6.4）。必须在这里
+        # await 而不是塞进 ConnectionManager.disconnect：作废要删 .part、关句柄，
+        # 是异步的，而那个方法在若干同步路径上被调用。
+        # ⚠️ 按**连接**作废而不是按 sid —— 一个连接只服务一台手机，
+        # 别误伤别的连接名下正在跑的传输。
+        if _upload_manager is not None:
+            try:
+                await _upload_manager.abort_for_conn(id(websocket), "ws_closed")
+            except Exception:
+                logger.exception("清理连接名下的上传会话失败")
 
 
 async def websocket_catchall(websocket: WebSocket) -> None:
@@ -1492,9 +1826,19 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
             ws="websockets-sansio",
         )
         _server = uvicorn.Server(config)
+        sweeper = None
         try:
+            # TTL 扫描挂在服务线程自己的循环上（每条连接都开一份是浪费，
+            # 而会话表是进程级的）
+            sweeper = loop.create_task(_upload_sweeper())
             loop.run_until_complete(_server.serve())
         finally:
+            if sweeper is not None:
+                sweeper.cancel()
+                try:
+                    loop.run_until_complete(asyncio.gather(sweeper, return_exceptions=True))
+                except Exception:
+                    pass
             try:
                 loop.close()
             except Exception:
@@ -1507,17 +1851,19 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
 
 def stop_server() -> None:
     """停止后台服务。"""
-    global _event_loop, _server, _server_thread, _transfer_queue
+    global _event_loop, _server, _server_thread, _upload_manager
     if _server is not None:
         _server.should_exit = True
-    if _transfer_queue is not None:
-        _transfer_queue.close()          # 取消后台写盘消费者
+    if _upload_manager is not None:
+        # 调度一次全量作废（删 .part、摘密钥），并立刻把密钥从会话记录里摘掉；
+        # 下面的 join 给它时间跑完。见 UploadManager.close。
+        _upload_manager.close()
     # 连接随事件循环一起消失，队列里若还留着请求，界面就会挂着一个永远不会被
     # 结算的识别码（点「允许」落在空处）。推一份空快照让面板收起。
     _get_approval_registry().reset()
     if _server_thread is not None:
         _server_thread.join(timeout=5.0)
-    _transfer_queue = None
+    _upload_manager = None
     _event_loop = None
     _server = None
     _server_thread = None

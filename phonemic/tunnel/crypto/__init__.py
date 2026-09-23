@@ -11,6 +11,13 @@ from nacl.public import PrivateKey
 
 from phonemic.tunnel.crypto.base import CryptoProvider
 from phonemic.tunnel.crypto.key_exchange import KeyExchange
+from phonemic.tunnel.crypto.mac import (
+    MAC_SIZE,
+    decode_mac,
+    encode_mac,
+    keyed_blake2b,
+    upload_mac,
+)
 from phonemic.tunnel.crypto.nacl_box import NaClBoxProvider
 from phonemic.tunnel.crypto.xchacha20 import XChaCha20Provider
 
@@ -53,9 +60,14 @@ def get_available_algorithms() -> list:
 __all__ = [
     "CryptoProvider",
     "KeyExchange",
+    "MAC_SIZE",
     "NaClBoxProvider",
     "XChaCha20Provider",
     "create_provider",
+    "decode_mac",
+    "encode_mac",
     "get_available_algorithms",
+    "keyed_blake2b",
+    "upload_mac",
     "OFFERED_ALGORITHMS",
 ]

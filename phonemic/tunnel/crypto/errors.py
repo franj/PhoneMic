@@ -10,17 +10,18 @@ class CryptoError(Exception):
 
 
 class DecryptError(CryptoError):
-    """MAC 校验失败：密钥错误、密文被篡改，或（AAD 路径）seq 不递增。
+    """MAC 校验失败：密钥错误、密文（或 nonce）被篡改。
 
-    AAD 路径（XChaCha20 / AES-GCM）下 seq 作为 aad 传入，seq 不对时
-    AEAD 整体校验失败，表现与"密文被篡改"相同，一律归此类。
+    两种算法的密文布局统一为 ``nonce(24) ‖ AEAD(seq(8) ‖ 明文) ‖ tag(16)``。
+    tag 覆盖的是「nonce ‖ 密文」而非明文，所以**解密成功并不代表 seq 正确** ——
+    seq 要解密后才读得到，比对失败归 `ReplayError`（见下），不归此类。
     """
 
 
 class ReplayError(CryptoError):
-    """seq 不递增（仅前缀路径 XSalsa20 能明确区分）。
+    """seq 不等于期望值（重放 / 乱序 / 跳号）。
 
-    前缀路径把 seq(8B) 前置到明文后加密，解密成功即可读 seq，
-    此时能明确判断是"重放/乱序"而非"篡改"。外部仍按统一策略
-    （"重放当解密失败处理"）与 DecryptError 同等对待。
+    seq 被焊成明文前 8 字节，解密成功即可读出并比对，因此「序号不对」能明确
+    区分于「篡改」；XSalsa20 与 XChaCha20 走的是同一条判定。
+    外部仍按统一策略（"重放当解密失败处理"）与 DecryptError 同等对待。
     """

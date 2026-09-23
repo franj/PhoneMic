@@ -1,60 +1,56 @@
 """
-tests/test_file.py — phonemic/gui/file.py 单元测试
+tests/test_file.py — phonemic/gui/file.py 单元测试（FileSink）
 
-覆盖 wire-protocol.md §9 / §9.2 的接收端约定：
-validate 校验、状态机（start/data/end/cancel）、重名改号、
-.tmp 清理、断连 abort_all、文件名路径剥离。
-纯单测不碰网络，dest_dir 注入 tmp_path。
+覆盖 docs/http-upload-design.md §7 / wire-protocol.md §9.9 的**落盘**约定：
+
+- ``sanitize_name`` 剥离路径分隔符（防目录穿越）
+- ``_allocate_path`` 重名改号，且 ``.part`` 也算占用
+- ``FileSink``：构造即建 ``.part`` → ``write*`` → ``finish`` 改名 / ``abort`` 清理
+
+⚠️ 旧版这里是「分块喂字节的状态机」（``FileReceiver`` / ``validate_file_action``），
+那些职责已搬到 ``server/upload.py`` 的会话状态机（见 ``test_upload.py``）；
+本文件现在只管**磁盘**那一半，且所有方法都是同步的（调用方负责 to_thread）。
 """
+from pathlib import Path
+
 import pytest
 
 from phonemic.gui.file import (
-    FileReceiver,
-    validate_file_action,
+    DEFAULT_DEST_DIR,
+    FileSink,
     _allocate_path,
+    sanitize_name,
 )
 
 
-# ---------- validate_file_action ----------
+# ---------- sanitize_name ----------
 
-class TestValidate:
-    def test_valid_frames(self):
-        assert validate_file_action({"a": "start", "id": 1, "name": "a.pdf", "size": 10, "chunks": 1})[0]
-        assert validate_file_action({"a": "data", "id": 1, "n": 0, "chunk": b"xx"})[0]
-        assert validate_file_action({"a": "end", "id": 1})[0]
-        assert validate_file_action({"a": "cancel", "id": 1})[0]
+class TestSanitizeName:
+    def test_plain_name_untouched(self):
+        assert sanitize_name("a.pdf") == "a.pdf"
 
-    def test_not_a_dict(self):
-        assert not validate_file_action("file")[0]
-        assert not validate_file_action(None)[0]
+    def test_strips_directory_components(self):
+        assert sanitize_name("/tmp/x/a.pdf") == "a.pdf"
+        assert sanitize_name("..\\..\\evil.txt") == "evil.txt"
+        assert sanitize_name("dir/sub/a.pdf") == "a.pdf"
 
-    def test_unknown_action(self):
-        assert not validate_file_action({"a": "open", "id": 1})[0]
+    def test_strips_surrounding_whitespace(self):
+        assert sanitize_name("  a.pdf  ") == "a.pdf"
 
-    def test_missing_fields(self):
-        assert not validate_file_action({"a": "start", "id": 1, "name": "a.pdf"})[0]
-        assert not validate_file_action({"a": "data", "id": 1})[0]
+    @pytest.mark.parametrize("bad", ["", "   ", ".", "..", "./", "../"])
+    def test_rejects_empty_and_dots(self, bad):
+        with pytest.raises(ValueError):
+            sanitize_name(bad)
 
-    def test_negative_or_bool_int(self):
-        # bool 是 int 子类，显式拒绝；负数同样拒绝
-        assert not validate_file_action({"a": "start", "id": True, "name": "a", "size": 1, "chunks": 1})[0]
-        assert not validate_file_action({"a": "data", "id": 1, "n": -1, "chunk": b""})[0]
-        assert not validate_file_action({"a": "start", "id": 1, "name": "a", "size": -5, "chunks": 1})[0]
-
-    def test_chunk_must_be_binary(self):
-        assert not validate_file_action({"a": "data", "id": 1, "n": 0, "chunk": "text"})[0]
-
-    def test_name_must_be_nonempty_string(self):
-        assert not validate_file_action({"a": "start", "id": 1, "name": "", "size": 1, "chunks": 1})[0]
-        assert not validate_file_action({"a": "start", "id": 1, "name": 123, "size": 1, "chunks": 1})[0]
+    def test_non_string_is_coerced(self):
+        assert sanitize_name(123) == "123"
 
 
 # ---------- _allocate_path 重名改号 ----------
 
 class TestAllocatePath:
     def test_no_conflict(self, tmp_path):
-        p = _allocate_path(tmp_path, "a.pdf")
-        assert p == tmp_path / "a.pdf"
+        assert _allocate_path(tmp_path, "a.pdf") == tmp_path / "a.pdf"
 
     def test_simple_conflict(self, tmp_path):
         (tmp_path / "a.pdf").write_bytes(b"x")
@@ -78,127 +74,118 @@ class TestAllocatePath:
         (tmp_path / "a.tar.gz").write_bytes(b"x")
         assert _allocate_path(tmp_path, "a.tar.gz") == tmp_path / "a.tar(1).gz"
 
+    def test_inflight_part_file_counts_as_taken(self, tmp_path):
+        """⚠️ 在途的 ``.part`` 也是占用：否则同名两条会话会选到同一个最终名，
+        然后一起写同一个 ``.part``（后开的那个 open('wb') 直接截断前一个）。"""
+        (tmp_path / "a.pdf.part").touch()
+        assert _allocate_path(tmp_path, "a.pdf") == tmp_path / "a(1).pdf"
 
-# ---------- FileReceiver 状态机 ----------
-
-def _start(fid=7, name="a.pdf", size=None, chunks=None):
-    frame = {"a": "start", "id": fid, "name": name,
-             "size": size if size is not None else 6, "chunks": chunks or 1}
-    return frame
+    def test_seq_step_skips_part_taken_number(self, tmp_path):
+        (tmp_path / "a.pdf").write_bytes(b"x")
+        (tmp_path / "a(1).pdf.part").touch()
+        assert _allocate_path(tmp_path, "a.pdf") == tmp_path / "a(2).pdf"
 
 
-class TestReceiverFlow:
-    def test_full_transfer(self, tmp_path):
+# ---------- FileSink ----------
+
+class TestFileSink:
+    def test_default_dest_dir_is_downloads_phonemic(self):
+        # 常量在 import 期就算好了，改 Path.home 也改不动它 ⇒ 只钉形状
+        assert DEFAULT_DEST_DIR.name == "PhoneMic"
+        assert DEFAULT_DEST_DIR.parent.name == "Downloads"
+
+    def test_writes_into_part_then_renames_on_finish(self, tmp_path):
         done = []
-        rx = FileReceiver(dest_dir=tmp_path, on_done=lambda p, n, s: done.append((p, n, s)))
+        sink = FileSink("a.pdf", dest_dir=tmp_path,
+                        on_done=lambda p, n, s: done.append((p, n, s)))
+        assert (tmp_path / "a.pdf.part").exists(), "构造即建 .part"
+        assert not (tmp_path / "a.pdf").exists()
+        assert sink.saved == "a.pdf"
 
-        ack, err = rx.handle(_start(size=11))
-        assert ack is None and err is None
+        sink.write(b"hello ")
+        sink.write(b"world")
+        assert sink.written == 11
+        # ⚠️ 这里**不能**读 .part 的内容：write() 走的是 Python 的文件缓冲，
+        # 只有 finish() 才 flush。中途读盘会看到空文件，那是缓冲、不是丢数据。
+        assert not (tmp_path / "a.pdf").exists(), "收尾前不占最终名"
 
-        # data 块逐块回 ack（协议 §9）：语义是「这一块已写入 .part」，
-        # received 是累计值——手机端据此把进度条从「本地估算」升级为「PC 已收到」
-        ack, err = rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "})
-        assert err is None
-        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "data",
-                       "n": 0, "received": 6}
-        ack, err = rx.handle({"a": "data", "id": 7, "n": 1, "chunk": b"world"})
-        assert err is None
-        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "data",
-                       "n": 1, "received": 11}
-
-        ack, err = rx.handle({"a": "end", "id": 7})
-        assert err is None
-        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "end", "received": 11}
-
+        final = sink.finish()
+        assert Path(final) == tmp_path / "a.pdf"
         assert (tmp_path / "a.pdf").read_bytes() == b"hello world"
         assert not (tmp_path / "a.pdf.part").exists()
         assert done == [(str(tmp_path / "a.pdf"), "a.pdf", 11)]
 
-    def test_end_rejects_incomplete(self, tmp_path):
-        """收不齐就 end → 判失败且不落盘，避免产生截断文件。"""
-        done = []
-        rx = FileReceiver(dest_dir=tmp_path, on_done=lambda p, n, s: done.append(p))
-        rx.handle(_start(size=11))
-        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"hello "})
-        ack, err = rx.handle({"a": "end", "id": 7})
-        assert ack is None and err is not None and "不完整" in err
-        assert not (tmp_path / "a.pdf").exists()
-        assert not (tmp_path / "a.pdf.part").exists()
-        assert done == []
-
     def test_duplicate_rename(self, tmp_path):
         (tmp_path / "a.pdf").write_bytes(b"old")
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start(size=3))
-        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"new"})
-        rx.handle({"a": "end", "id": 7})
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        assert sink.saved == "a(1).pdf"
+        sink.write(b"new")
+        sink.finish()
         assert (tmp_path / "a(1).pdf").read_bytes() == b"new"
         assert (tmp_path / "a.pdf").read_bytes() == b"old"
 
-    def test_rename_recheck_after_start(self, tmp_path):
-        # start 之后、end 之前目标名被占用 → end 时再查重名
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start(size=3))
+    def test_rename_recheck_at_finish(self, tmp_path):
+        """分配号码之后、落盘之前目标名被占用 ⇒ finish 时再查一次。"""
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
         (tmp_path / "a.pdf").write_bytes(b"stolen")
-        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"new"})
-        rx.handle({"a": "end", "id": 7})
+        sink.write(b"new")
+        sink.finish()
         assert (tmp_path / "a(1).pdf").read_bytes() == b"new"
+        assert sink.saved == "a(1).pdf", "saved 要跟着改（它会回给客户端）"
 
-    def test_cancel_discards_part_file(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start())
-        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"half"})
+    def test_empty_file_finishes(self, tmp_path):
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        sink.finish()
+        assert (tmp_path / "a.pdf").read_bytes() == b""
+
+    def test_dest_dir_created_if_missing(self, tmp_path):
+        target = tmp_path / "deep" / "nested"
+        FileSink("a.pdf", dest_dir=target).abort()
+        assert target.is_dir()
+
+    def test_callback_exception_is_swallowed(self, tmp_path):
+        def boom(p, n, s):
+            raise RuntimeError("tray failed")
+        sink = FileSink("a.pdf", dest_dir=tmp_path, on_done=boom)
+        sink.write(b"x")
+        assert Path(sink.finish()).exists(), "回调炸了不能影响落盘"
+
+    # ---- 失败路径 ----
+
+    def test_abort_removes_part_and_is_idempotent(self, tmp_path):
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        sink.write(b"half")
         assert (tmp_path / "a.pdf.part").exists()
-
-        ack, err = rx.handle({"a": "cancel", "id": 7})
-        # 取消也有回执（协议 §9）：手机端拿到它才解锁界面
-        assert err is None
-        assert ack == {"type": "ack", "ref": "file", "id": 7, "a": "cancel"}
+        sink.abort()
         assert not (tmp_path / "a.pdf.part").exists()
         assert not (tmp_path / "a.pdf").exists()
+        sink.abort()          # 幂等：取消与异常清理会重复调用
+        assert not (tmp_path / "a.pdf.part").exists()
 
-    def test_cancel_idempotent(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start())
-        first, _ = rx.handle({"a": "cancel", "id": 7})
-        # 再 cancel 已无会话：幂等成功，**仍然回执**——回执语义是「取消已生效」，
-        # 不是「这个 id 我认得」，否则手机端在重复取消时会白等到超时。
-        second, err = rx.handle({"a": "cancel", "id": 7})
-        assert first == second == {"type": "ack", "ref": "file", "id": 7, "a": "cancel"}
-        assert err is None
-        _, err = rx.handle({"a": "end", "id": 7})
-        assert err is not None   # end 无会话算协议错误
+    def test_write_after_finish_raises(self, tmp_path):
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        sink.finish()
+        with pytest.raises(RuntimeError):
+            sink.write(b"late")
 
-    def test_data_without_start(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        _, err = rx.handle({"a": "data", "id": 9, "n": 0, "chunk": b"x"})
-        assert err is not None
+    def test_finish_after_abort_raises(self, tmp_path):
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        sink.abort()
+        with pytest.raises(RuntimeError):
+            sink.finish()
 
-    def test_second_start_rejected(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start(fid=1))
-        _, err = rx.handle(_start(fid=2))
-        assert err is not None
-        _, err = rx.handle(_start(fid=1))  # 同 id 重复 start 同样拒绝
-        assert err is not None
+    def test_abort_after_finish_keeps_the_file(self, tmp_path):
+        """收尾后再 abort（作废一条已完成的会话）不能把落好的文件删掉。"""
+        sink = FileSink("a.pdf", dest_dir=tmp_path)
+        sink.write(b"x")
+        sink.finish()
+        sink.abort()
+        assert (tmp_path / "a.pdf").read_bytes() == b"x"
 
-    def test_invalid_frame_rejected(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        _, err = rx.handle({"a": "start", "id": 1})   # 缺字段
-        assert err is not None
-        assert list(rx._sessions) == []               # 不产生半初始化会话
-
-    def test_name_strips_path_separators(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start(name="..\\..\\evil.txt", size=0))
-        rx.handle({"a": "end", "id": 7})
+    def test_path_separator_in_name_is_stripped(self, tmp_path):
+        sink = FileSink("..\\..\\evil.txt", dest_dir=tmp_path)
+        assert sink.saved == "evil.txt"
+        sink.write(b"x")
+        sink.finish()
         assert (tmp_path / "evil.txt").exists()
         assert not (tmp_path.parent / "evil.txt").exists()
-
-    def test_abort_all_on_disconnect(self, tmp_path):
-        rx = FileReceiver(dest_dir=tmp_path)
-        rx.handle(_start())
-        rx.handle({"a": "data", "id": 7, "n": 0, "chunk": b"partial"})
-        rx.abort_all()
-        assert not (tmp_path / "a.pdf.part").exists()
-        assert list(rx._sessions) == []

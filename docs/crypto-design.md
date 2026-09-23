@@ -44,7 +44,7 @@ class CryptoProvider(ABC):
 - 防重放 `seq` **完全内化**（见 §5）：不出现在签名里，调用方不传、不收、不验。
 - 失败抛两类异常（基类 `CryptoError`，定义于 `crypto/errors.py`）：
   - `DecryptError` —— MAC 校验失败（密钥错 / 篡改）；
-  - `ReplayError` —— seq 不递增（重放 / 乱序），仅前缀路径能明确给出（见 §5.1）。
+  - `ReplayError` —— seq 不递增（重放 / 乱序），两种算法都能明确给出（见 §5.1）。
 
 ### 1.2 内容无关承诺
 
@@ -227,35 +227,17 @@ receive_auth(明文) → 只解析字段，指派识别码 + 生成挑战 nonce�
 ### 4.1 两个算法（+ 一个预留）
 
 ```python
-# XChaCha20：nacl.secret.Aead，支持 aad → seq 进 aad（§5.1 AAD 路径）
+# XChaCha20：nacl.secret.Aead。有 aad 槽位但**不用**（§5.1）
 class XChaCha20Provider(CryptoProvider):
     def __init__(self, session_key: bytes):
         self._aead = Aead(session_key)
         self._tx_seq = self._rx_seq = 0
     def encrypt(self, plaintext):
-        out = self._aead.encrypt(plaintext, aad=self._tx_seq.to_bytes(8, "big"))
+        out = self._aead.encrypt(self._tx_seq.to_bytes(8, "big") + plaintext)
         self._tx_seq += 1
         return out
     def decrypt(self, ciphertext):
-        plain = self._aead.decrypt(ciphertext, aad=self._rx_seq.to_bytes(8, "big"))
-        self._rx_seq += 1                    # aad 不符 → DecryptError（明文暴露前即拒绝）
-        return plain
-    def reset(self):
-        self._tx_seq = self._rx_seq = 0
-
-# XSalsa20：nacl.secret.SecretBox，无 aad → seq 前置 8 字节到明文（§5.1 前缀路径）
-# 注：PyNaCl 无 Box.from_shared_key；SecretBox 即 crypto_secretbox ≡ crypto_box_afternm，
-# 派生密钥直接使用。JS 端对应 crypto_box_easy_afternm（密钥用 scalarmult + generichash 派生）。
-class XSalsa20Provider(CryptoProvider):
-    def __init__(self, session_key: bytes):
-        self._box = SecretBox(session_key)
-        self._tx_seq = self._rx_seq = 0
-    def encrypt(self, plaintext):
-        out = self._box.encrypt(self._tx_seq.to_bytes(8, "big") + plaintext)
-        self._tx_seq += 1
-        return out
-    def decrypt(self, ciphertext):
-        plain = self._box.decrypt(ciphertext)
+        plain = self._aead.decrypt(ciphertext)
         seq = int.from_bytes(plain[:8], "big")
         if seq != self._rx_seq:
             raise ReplayError(f"seq {seq} != expected {self._rx_seq}")
@@ -264,14 +246,21 @@ class XSalsa20Provider(CryptoProvider):
     def reset(self):
         self._tx_seq = self._rx_seq = 0
 
-# AES-GCM：预留。支持 aad，走 AAD 路径，实现骨架同 XChaCha20（cryptography 库 AESGCM）
+# XSalsa20：nacl.secret.SecretBox，无 aad 槽位 → 同一套前缀写法（§5.1）
+# 注：PyNaCl 无 Box.from_shared_key；SecretBox 即 crypto_secretbox ≡ crypto_box_afternm，
+# 派生密钥直接使用。JS 端对应 crypto_box_easy_afternm（密钥用 scalarmult + generichash 派生）。
+class XSalsa20Provider(CryptoProvider):
+    # encrypt / decrypt / reset 与 XChaCha20Provider 逐行同构，只是底层原语换成 SecretBox
+    ...
+
+# AES-GCM：预留。实现骨架同上（cryptography 库 AESGCM），同样把 seq 前置 8 字节
 class AESGCMProvider(CryptoProvider):
     ...
 ```
 
 ### 4.2 新增算法流程
 
-写一个 `CryptoProvider` 子类（决定走 AAD 路径还是前缀路径）→ 在 `create_provider(algo, session_key)` 注册 → 二维码 `a=` 列表加上算法名。`KeyExchange`、编码层、type 表零改动。
+写一个 `CryptoProvider` 子类（按 §5.1 把 `seq` 焊成明文前 8 字节）→ 在 `create_provider(algo, session_key)` 注册 → 二维码 `a=` 列表加上算法名。`KeyExchange`、编码层、type 表零改动。
 
 ---
 
@@ -282,14 +271,15 @@ class AESGCMProvider(CryptoProvider):
 - 它是防重放 / 防重排的机密性设施，与应用层字段无关；放进上层编码等于把"线格式"和"加密防护"耦合，将来换编码（→ CBOR 等）还得跟着改 `seq` 的承载。
 - 把防重放做成加密层的内建属性，与 §4"Provider 只管对称 AEAD"定位一致。
 
-### 5.1 承载方式：AAD 优先，前缀兜底
+### 5.1 承载方式：统一为「明文前 8 字节」
 
-`seq` 为每方向单调计数器（首帧 = 0，之后严格 +1），由 Provider 内部维护 `_tx_seq` / `_rx_seq`，不出现在 `encrypt` / `decrypt` 签名里：
+`seq` 为每方向单调计数器（首帧 = 0，之后严格 +1），由 Provider 内部维护 `_tx_seq` / `_rx_seq`，不出现在 `encrypt` / `decrypt` 签名里。
 
-- **AAD 优先**（XChaCha20 / AES-GCM 这类支持 `aad` 的 AEAD）：`seq` 作为关联数据传入。解密时 AEAD 先整体校验 aad，seq 不对则**在明文暴露前就拒绝**——既防篡改又防重放。
-- **前缀兜底**（XSalsa20 的 SecretBox 无 aad 参数）：加密前把 `seq` 编码成 **8 字节大端**前置到明文（`seq(8B) || 上层编码字节`）再整体加密；解密后先读前 8 字节校验、剥掉，再把纯上层编码字节交回调用方。同样在解析上层编码前完成 seq 校验。
+**承载方式只有一种**：加密前把 `seq` 编码成 **8 字节大端**前置到明文（`seq(8B) || 上层编码字节`）再整体加密；解密后先读前 8 字节校验、剥掉，再把纯上层编码字节交回调用方，整个过程在解析上层编码之前完成。`XSalsa20`（`SecretBox` 没有 aad 槽位）与 `XChaCha20`（有 aad 槽位但**同样不用**）走的是同一条路径、同一段代码形状，两个 Provider 的区别只剩底层原语。
 
-两条路径对外接口完全一致，上层无感；区别只在 Provider 内部怎么把 `seq` 焊进密文。无论哪种路径，`seq` 都在 AEAD/Box 的 MAC 认证范围内，攻击者无法篡改 seq 而不被察觉。
+> **为什么放弃 AAD（09-23 定，完整论证见 `http-upload-design.md` §5.8）**：曾经的设计是 XChaCha20 走 `aad`、XSalsa20 走前缀，于是分裂成两条实现路径，还要给 Provider 加能传上下文的接口（`encrypt_with` / `decrypt_with`）、JS 侧再镜像一遍。而 **AAD 与前缀的认证强度完全一样**（两者都在 tag 覆盖范围内），唯一差别是「接收方什么时候读得到」——AAD 解密前可读、前缀要解密后。真正需要 AAD 的场景是「想把元数据焊进认证范围」，但上传侧那三样元数据（`sid` / `offset` / `len`）本来就在 **HTTP 头**里、根本不进密文，且各由别的机制在扛。取消它换来的是：`crypto/` 接口一个字不改、调用方零感知、两条路径合并成一条。
+
+无论哪种算法，`seq` 都在 AEAD/Box 的 MAC 认证范围内，攻击者无法篡改 seq 而不被察觉。
 
 ### 5.2 校验与状态
 
@@ -306,10 +296,9 @@ class AESGCMProvider(CryptoProvider):
 
 加密模式下，**WS binary 帧 = `provider.encrypt(上层编码字节)` 的原始输出**，帧内布局由算法实现决定，上层协议不需要知道：
 
-| 路径                       | 线上帧布局                                       | `decrypt` 返回给上层 |
-| ------------------------ | ------------------------------------------- | --------------- |
-| AAD（XChaCha20 / AES-GCM） | `nonce(24B) ‖ AEAD(上层编码字节)`，aad = `seq(8B)` | 上层编码字节          |
-| 前缀（XSalsa20）             | `nonce(24B) ‖ AEAD(seq(8B) ‖ 上层编码字节)`       | （内部剥 seq）上层编码字节 |
+| 算法                        | 线上帧布局                                               | `decrypt` 返回给上层 |
+| ------------------------- | --------------------------------------------------- | --------------- |
+| XSalsa20 / XChaCha20（统一） | `nonce(24B) ‖ AEAD(seq(8B) ‖ 上层编码字节) ‖ tag(16B)`  | （内部剥 seq）上层编码字节 |
 
 - PyNaCl 的 `Aead` / `SecretBox` `.encrypt()` 自带随机 nonce 前缀，无需手动拼帧。
 - 两种路径线上字节不同，但**上层编码的 map 内容完全一致**；换算法（或 Provider 优化布局）都不影响编码层与 type 表。
@@ -355,12 +344,13 @@ class AESGCMProvider(CryptoProvider):
 | `phonemic/tunnel/crypto/key_exchange.py` | `KeyExchange`：算法无关密钥交换（§3；含 TOFU 首次的 `handle_tofu_auth` / `public_key_bytes`） |
 | `phonemic/tunnel/crypto/errors.py`       | `CryptoError` / `DecryptError` / `ReplayError`       |
 | `phonemic/tunnel/crypto/base.py`         | `CryptoProvider` ABC（§1.1 / §4）                      |
-| `phonemic/tunnel/crypto/xchacha20.py`    | `XChaCha20Provider`（AAD 路径）                          |
-| `phonemic/tunnel/crypto/nacl_box.py`     | `XSalsa20Provider`（前缀路径）                             |
+| `phonemic/tunnel/crypto/xchacha20.py`    | `XChaCha20Provider`（seq 前置 8 字节，与 XSalsa20 同构）        |
+| `phonemic/tunnel/crypto/nacl_box.py`     | `XSalsa20Provider`（seq 前置 8 字节）                      |
+| `phonemic/tunnel/crypto/mac.py`          | keyed BLAKE2b 请求 MAC（HTTP 上传片的 `X-Pm-Mac`，见 `http-upload-design.md` §5.3） |
 | `phonemic/tunnel/e2ee.py`                | `SecureChannel` / `SecureSession`：装配、握手分叉、TOFU 审批后建密钥（§3.5）、`needs_auth` / `is_encrypted` 恒真 |
 | `phonemic/resources/crypto_providers.js` | JS 端同构实现（密封 auth、明文 auth、seq 内化、TOFU 挑战解封）             |
 | `phonemic/resources/mobile.html`         | `SecureClient`：JS 调用侧（三种认证模式分叉、识别码、localStorage）      |
 
 `phonemic/tunnel/crypto/plain.py`（`PlainProvider`）已删除——加密永远开启，不再有明文 Provider，`PROVIDER_CLASSES` 中也没有 `"none"` 条目。
 
-依赖：Python `pynacl`（已有）；JS `sodium.js`（已 vendor）。新增算法时：AAD 路径优先选支持 aad 的库（`cryptography` 的 AESGCM）；无 aad 的库走前缀路径。
+依赖：Python `pynacl`（已有）；JS `sodium.js`（已 vendor）。新增算法时：**任何 AEAD 原语都能接**，只需按 §5.1 把 `seq` 焊成明文前 8 字节——不要求库支持 `aad`。

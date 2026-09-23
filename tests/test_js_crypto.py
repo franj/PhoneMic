@@ -27,6 +27,7 @@ from nacl.secret import Aead, SecretBox
 from nacl.bindings import crypto_scalarmult
 from nacl.utils import random as random_bytes
 
+from phonemic.tunnel.crypto import create_provider, encode_mac, upload_mac
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 
@@ -403,17 +404,61 @@ class TestXChaCha20Provider:
                 const pt = sodium.from_string('{"type":"send","text":"xchacha-rt"}');
                 const encrypted = phone.encrypt(pt);
 
-                // PC 端：ECDH + BLAKE2b KDF + XChaCha20 解密（aad = seq(8B)，首帧 seq=0）
+                // PC 端：ECDH + BLAKE2b KDF + XChaCha20 解密。
+                // 与 XSalsa20 完全同构：seq 是**明文前 8 字节**（不是 aad），
+                // 解密后再剥（http-upload-design.md §5.8 统一了两条实现路径）。
                 const shared = sodium.crypto_scalarmult(pcKp.privateKey, phone._phonePublicKey);
                 const key = sodium.crypto_generichash(32, shared);
                 const nonceSize = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
                 const nonce = encrypted.slice(0, nonceSize);
                 const ct = encrypted.slice(nonceSize);
-                const decrypted = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ct, new Uint8Array(8), nonce, key);
-                return sodium.to_string(decrypted);
+                const body = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+                    null, ct, null, nonce, key);
+                return sodium.to_string(body.slice(8));
             }
         """)
         assert json.loads(result)["text"] == "xchacha-rt"
+
+    def test_ciphertext_overhead_is_48_for_both_algorithms(self, crypto_page):
+        """两算法的密文长度都是 **明文 + 48**（nonce 24 + seq 前缀 8 + tag 16）。
+
+        这是服务端 ``CHUNK_OVERHEAD`` 与 `Content-Length = X-Pm-Len + 48` 这条
+        预计算规则的 JS 侧依据；两算法不一致就会有一半的片被 400 挡掉。
+        """
+        result = crypto_page.evaluate("""
+            () => {
+                const out = {};
+                for (const [name, Cls] of Object.entries(
+                        {xsalsa20: NaClBoxProvider, xchacha20: XChaCha20Provider})) {
+                    const p = new Cls();
+                    p.initKeypair();
+                    p.setPcPublicKey(sodium.crypto_box_keypair().publicKey);
+                    const empty = p.encrypt(new Uint8Array(0));
+                    const full = p.encrypt(new Uint8Array(7));
+                    out[name] = [empty.length, full.length - 7];
+                }
+                return out;
+            }
+        """)
+        assert result["xsalsa20"] == [48, 48]
+        assert result["xchacha20"] == [48, 48]
+
+    def test_decrypt_rejects_replayed_seq(self, crypto_page):
+        """前缀路径下「重放」的判据不变：解密成功、seq 不递增即拒。"""
+        result = crypto_page.evaluate("""
+            () => {
+                const phone = new XChaCha20Provider();
+                phone.initKeypair();
+                phone.setPcPublicKey(sodium.crypto_box_keypair().publicKey);
+                const ct = phone.encrypt(sodium.from_string('once'));
+                const first = sodium.to_string(phone.decrypt(ct));
+                let replayThrew = false;
+                try { phone.decrypt(ct); } catch (e) { replayThrew = true; }
+                return { first: first, replayThrew: replayThrew };
+            }
+        """)
+        assert result["first"] == "once"
+        assert result["replayThrew"] is True
 
     def test_set_pc_public_key_invalidates_cached_session_key(self, crypto_page):
         """换掉 PC 公钥（服务重启后重配对）必须让缓存的会话密钥作废。
@@ -442,11 +487,11 @@ class TestXChaCha20Provider:
                 let textB = null, threwWithA = false;
                 try {
                     textB = sodium.to_string(sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-                        null, body, seqToBytes(1), nonce, keyFor(pcB.privateKey)));
+                        null, body, null, nonce, keyFor(pcB.privateKey)).slice(8));
                 } catch (e) { textB = 'FAILED: ' + e.message; }
                 try {
                     sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-                        null, body, seqToBytes(1), nonce, keyFor(pcA.privateKey));
+                        null, body, null, nonce, keyFor(pcA.privateKey));
                 } catch (e) { threwWithA = true; }
                 return { textB: textB, threwWithA: threwWithA };
             }
@@ -476,9 +521,10 @@ class TestXChaCha20Provider:
         phone_pub = PublicKey(_from_b64(js_result["phonePubB64"]))
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
         aead = Aead(blake2b(shared, digest_size=32).digest())
-        # JS 端加密 aad = seq(8B)，首帧 seq=0
-        plaintext = aead.decrypt(_from_b64(js_result["encryptedB64"]), aad=(0).to_bytes(8, "big"))
-        assert json.loads(plaintext)["text"] == "xchacha-js2py"
+        # JS 端与 XSalsa20 同构：seq 是明文前 8 字节（首帧 seq=0），解密后剥掉
+        plaintext = aead.decrypt(_from_b64(js_result["encryptedB64"]))
+        assert int.from_bytes(plaintext[:8], "big") == 0
+        assert json.loads(plaintext[8:])["text"] == "xchacha-js2py"
 
     def test_cross_platform_py_encrypt_js_decrypt(self, crypto_page):
         """跨平台：Python XChaCha20 加密 → JS 解密。"""
@@ -496,13 +542,12 @@ class TestXChaCha20Provider:
             }
         """, pc_pub_b64)
 
-        # Step 2: Python ECDH + BLAKE2b KDF + XChaCha20 加密
+        # Step 2: Python ECDH + BLAKE2b KDF + XChaCha20 加密（seq 打进明文前缀）
         phone_pub = PublicKey(_from_b64(js_setup))
         shared = crypto_scalarmult(bytes(pc_priv), bytes(phone_pub))
         aead = Aead(blake2b(shared, digest_size=32).digest())
-        plaintext = b'{"type":"preview","text":"xchacha-py2js"}'
-        # JS 端解密 aad = seq(8B)，首帧 seq=0
-        encrypted = bytes(aead.encrypt(plaintext, aad=(0).to_bytes(8, "big")))
+        plaintext = (0).to_bytes(8, "big") + b'{"type":"preview","text":"xchacha-py2js"}'
+        encrypted = bytes(aead.encrypt(plaintext))
         encrypted_b64 = _to_b64(encrypted)
 
         # Step 3: JS 解密
@@ -541,3 +586,138 @@ class TestCrossAlgorithm:
             }
         """)
         assert result["threw"] is True
+
+
+# ---------- 分片上传：MAC 原语与独立 Provider 实例 ----------
+
+class TestUploadMacAndSessionKey:
+    """docs/http-upload-design.md §5.3 / §5.8 / §5.9。
+
+    这一层是**两端必须逐字节一致**的部分：MAC 算法、被签内容、以及「上传用独立
+    provider 实例」这条约束。任一处两端不一致，都只在真机上传时才暴露（而且表现
+    为"这一片服务端说签名错/解不开"），只跑 Python 侧的测试抓不到。
+    """
+
+    def test_upload_mac_matches_python(self, crypto_page):
+        """JS uploadMac ≡ Python upload_mac（keyed BLAKE2b，msg = PUT\\nsid\\noffset\\nlen）。"""
+        k_mac = bytes(range(32))
+        sid = "AbC-123_xyz"
+        result = crypto_page.evaluate("""
+            ({ kMacB64, sid, offset, len }) => {
+                const kMac = sodium.from_base64(kMacB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const mac = uploadMac(kMac, sid, offset, len);
+                return { macB64: encodeMac(mac), rawLen: mac.length };
+            }
+        """, {"kMacB64": _to_b64(k_mac), "sid": sid, "offset": 15, "len": 1024})
+
+        assert result["rawLen"] == 32
+        expected = upload_mac(k_mac, sid, 15, 1024)
+        assert result["macB64"] == encode_mac(expected)
+        assert _from_b64(result["macB64"]) == expected
+
+    def test_upload_mac_is_bound_to_all_three_fields(self, crypto_page):
+        """sid / offset / len 三项缺一不可——只签 len 的话，一份合法签名可以配上
+        改过的偏移，去覆盖文件的别的位置（§5.3）。"""
+        k_mac = bytes(range(32))
+        result = crypto_page.evaluate("""
+            ({ kMacB64, sid }) => {
+                const kMac = sodium.from_base64(kMacB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                return {
+                    base: encodeMac(uploadMac(kMac, sid, 0, 100)),
+                    otherOffset: encodeMac(uploadMac(kMac, sid, 1, 100)),
+                    otherLen: encodeMac(uploadMac(kMac, sid, 0, 101)),
+                    otherSid: encodeMac(uploadMac(kMac, 'other', 0, 100)),
+                };
+            }
+        """, {"kMacB64": _to_b64(k_mac), "sid": "s1"})
+        assert len({result["base"], result["otherOffset"],
+                    result["otherLen"], result["otherSid"]}) == 4
+
+    @pytest.mark.parametrize("algo", ["xchacha20", "xsalsa20"])
+    def test_injected_session_key_interops_with_python(self, crypto_page, algo):
+        """injectSessionKey 建的实例与 Python ``create_provider(algo, k_body)`` 互通。
+
+        上传的 k_body 是服务端现生成、随 ``upload_ready`` 下发的随机对称密钥，
+        **不是** ECDH 协商来的 ⇒ JS 侧必须能跳过密钥交换直接注入（§5.9）。
+
+        ⚠️ 两种算法都要测：xchacha20 是协商优先级最高的那个、上传几乎总走它，
+        曾经就是它漏了 injectSessionKey（只有 xsalsa20 有）⇒ 真机上
+        ``upload_ready`` 之后的第一次加密直接 TypeError。
+        """
+        k_body = bytes(range(32))
+        result = crypto_page.evaluate("""
+            ({ kBodyB64, algo }) => {
+                const Cls = algo === 'xchacha20' ? XChaCha20Provider : NaClBoxProvider;
+                const p = new Cls();
+                p.injectSessionKey(sodium.from_base64(kBodyB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING));
+                const ct = p.encrypt(sodium.from_string('chunk-payload'));
+                return { b64: sodium.to_base64(ct, sodium.base64_VARIANT_URLSAFE_NO_PADDING),
+                         keyLen: p._sharedKey.length };
+            }
+        """, {"kBodyB64": _to_b64(k_body), "algo": algo})
+
+        assert result["keyLen"] == 32
+        provider = create_provider(algo, k_body)
+        assert provider.decrypt(_from_b64(result["b64"])) == b"chunk-payload"
+
+    def test_both_providers_expose_the_full_interface(self, crypto_page):
+        """两个 Provider 的对外接口必须**逐项对齐**（含上传要用的那几个）。
+
+        少一个方法不会在加载时报错，只在那条路第一次被走到时 TypeError ——
+        所以这里把接口面钉下来。
+        """
+        result = crypto_page.evaluate("""
+            () => {
+                const need = ['initKeypair', 'setPcPublicKey', 'injectSessionKey',
+                              'makeAuthData', 'encrypt', 'decrypt', 'reset'];
+                const out = {};
+                for (const [name, Cls] of Object.entries(
+                        {xsalsa20: NaClBoxProvider, xchacha20: XChaCha20Provider})) {
+                    const p = new Cls();
+                    out[name] = need.filter(m => typeof p[m] !== 'function');
+                }
+                return out;
+            }
+        """)
+        assert result["xsalsa20"] == []
+        assert result["xchacha20"] == []
+
+    def test_injected_key_skips_ecdh_entirely(self, crypto_page):
+        """注入之后**不再**走 ECDH：没调用过 setPcPublicKey 也能加密。
+
+        （上传那条路从没有人调用 setPcPublicKey —— 手机侧根本没有 PC 私钥可用。）
+        """
+        result = crypto_page.evaluate("""
+            ({ kBodyB64 }) => {
+                const p = new XChaCha20Provider();
+                p.injectSessionKey(sodium.from_base64(kBodyB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING));
+                return { len: p.encrypt(sodium.from_string('no-ecdh-needed')).length,
+                         hasPcKey: p._pcPublicKey !== null };
+            }
+        """, {"kBodyB64": _to_b64(bytes(range(32)))})
+        assert result["len"] == len("no-ecdh-needed") + 48
+        assert result["hasPcKey"] is False
+
+    def test_upload_provider_instance_is_independent(self, crypto_page):
+        """⚠️ 上传必须用**另一个实例**：同一实例的 seq 是单个计数器，两条独立 TCP
+        （WS + HTTP）的到达顺序不由发送方决定，共用必然出现「必有一条解不开」（§5.8）。
+
+        这里把这条约束变成可执行断言：两个实例各自从 seq=0 开始、互不干扰。
+        """
+        k_body = bytes(range(32))
+        result = crypto_page.evaluate("""
+            ({ kBodyB64 }) => {
+                const raw = sodium.from_base64(kBodyB64, sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+                const wsSide = new XChaCha20Provider();
+                wsSide.injectSessionKey(raw);
+                const upSide = new XChaCha20Provider();
+                upSide.injectSessionKey(raw);
+                wsSide.encrypt(sodium.from_string('ws-frame-1'));
+                wsSide.encrypt(sodium.from_string('ws-frame-2'));
+                // 上传侧的第 1 片仍是 seq=0，没被 WS 侧推着走
+                return sodium.to_base64(upSide.encrypt(sodium.from_string('upload-chunk-1')),
+                                        sodium.base64_VARIANT_URLSAFE_NO_PADDING);
+            }
+        """, {"kBodyB64": _to_b64(k_body)})
+        # Python 侧同一把密钥、也从 0 开始 ⇒ 解得开就证明上传侧确实是 seq=0
+        assert create_provider("xchacha20", k_body).decrypt(_from_b64(result)) == b"upload-chunk-1"
