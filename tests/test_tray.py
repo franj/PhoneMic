@@ -1,15 +1,15 @@
 """
 SystemTray 托盘菜单单元测试。
 
-托盘图标在无头 / offscreen 环境下不可用（QSystemTrayIcon.isSystemTrayAvailable()
-返回 False），此时 _create_tray 会提前返回、不构建菜单。因此这里直接调用
-_create_tray_menu() 构建菜单，验证菜单结构与「上屏方式」勾选逻辑。
+托盘图标视为不可用（fixture 把 QSystemTrayIcon.isSystemTrayAvailable() 打桩成
+False），_create_tray 会提前返回、不建真图标。因此这里直接调用 _create_tray_menu()
+构建菜单，验证菜单结构与「上屏方式」勾选逻辑。
 """
 
 from unittest.mock import patch
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSystemTrayIcon, QWidget
 
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.gui.dashboard import Dashboard
@@ -24,6 +24,13 @@ def tray(qtbot, tmp_path, monkeypatch):
     # 隔离配置：指向临时目录并重置单例，避免读写真实用户配置
     import phonemic.utils.settings_manager as sm_mod
     monkeypatch.setattr(sm_mod, "get_config_dir", lambda: tmp_path)
+    # 本模块只验证菜单结构，不需要真托盘图标。但真机上 isSystemTrayAvailable() 返回
+    # True 时 _create_tray() 会真的建出 QSystemTrayIcon 并 show()，它活到解释器收尾
+    # 阶段才被销毁，进程会以 0xC0000005（访问违规）退出——15 条用例全过却拿不到
+    # 绿灯退出码。强制走「托盘不可用」分支，退出码随之恢复 0。
+    monkeypatch.setattr(
+        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
+    )
     SettingsManager._instance = None
     try:
         with patch("phonemic.gui.dashboard.get_mode", return_value=TunnelMode.LAN):
