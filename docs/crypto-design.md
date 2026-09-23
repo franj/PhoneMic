@@ -354,3 +354,5 @@ class AESGCMProvider(CryptoProvider):
 `phonemic/tunnel/crypto/plain.py`（`PlainProvider`）已删除——加密永远开启，不再有明文 Provider，`PROVIDER_CLASSES` 中也没有 `"none"` 条目。
 
 依赖：Python `pynacl`（已有）；JS `sodium.js`（已 vendor）。新增算法时：**任何 AEAD 原语都能接**，只需按 §5.1 把 `seq` 焊成明文前 8 字节——不要求库支持 `aad`。
+
+⚠️ JS 侧换库（`sodium.js` → noble 系列）的耦合面与收口方案见 `js-crypto-lib-coupling.md`。要点：加密层本身**不认库**，但测试与 `mobile.html` 目前直接依赖全局 `sodium` 对象，换库前需先抽出一层「原语 shim」。
