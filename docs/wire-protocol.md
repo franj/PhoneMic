@@ -249,12 +249,13 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 | `error` | 错误通知（**连接级**：解密／重放／畸形帧） | `code`、`msg` | 新增 |
 | `upload_ready` | 上传①阶段通过：下发会话号、片大小与两把一次性钥匙 | `id`、`sid`、`chunk`、`saved`、`expires`、`k_mac`、`k_body` | 新增 |
 | `upload_error` | 上传①阶段被拒（**流程内**，要跟 `id` 对号） | `id`、`code`、`msg` | 新增 |
+| `upload_progress` | 上传②阶段的接收进度（**流程内**，跟 `sid` 对号；周期性、尽力而为） | `sid`、`received` | 新增 |
 | `status` | 状态同步 | `muted`、`mode` | 新增 |
 | `ping` | 应用层心跳探测（促对端回 `pong`） | — | 新增 |
 
 心跳走**应用层 `ping` / `pong`**（见 §7），原生 WebSocket ping/pong **已关闭**（`uvicorn` 的 `ws_ping_interval=None`）。原方案（原生心跳）在慢链路的大文件传输中会把一条健康的连接判死，机理见 §7。
 
-上传的四条控制帧是**流程内**的：它们要跟 `id`（传输号）或 `sid`（会话号）对号，因此与连接级的 `error` / `status` 分开取值空间——完整定义见 §9。文件与图片的**数据面不在 WS 上**（HTTP 分片 `PUT`），所以这张表里只有控制帧、没有数据帧。
+上传的五条控制帧是**流程内**的：它们要跟 `id`（传输号）或 `sid`（会话号）对号，因此与连接级的 `error` / `status` 分开取值空间——完整定义见 §9。其中 `upload_progress` 是唯一**周期性**的一条（其余四条都是一次性的），也是**唯一允许丢**的一条：它只喂进度条，不参与任何状态判定。文件与图片的**数据面不在 WS 上**（HTTP 分片 `PUT`），所以这张表里只有控制帧、没有数据帧。
 
 > 断线重连策略：**不做地址重定向**。连接断开后手机端重新扫码连接即可，因此 type 表里不需要 `redirect` 这一项。
 
@@ -471,7 +472,9 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 
 片大小、为什么不能继续用 WS 传、CF 上的两重瓶颈，见 `http-upload-design.md` §1–§3；本节只定**线上的样子**与会踩的坑。
 
-### 9.1 四条控制帧
+三段之外还有一条**周期性的下行帧** `upload_progress`（§9.1）：它不参与上面三段的状态机，只把「PC 收到了多少字节」回报给手机。之所以必须由 PC 给、手机自己算不出来，是因为 ② 阶段的客户端侧估算在 CF 上结构性失真（§9.1 规则 1）。
+
+### 9.1 五条控制帧
 
 四个 type 都**平铺在帧顶层**（不加 `payload`，见 §3「帧信封」），且整帧加密（加密永远开启）。
 
@@ -497,6 +500,8 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
  "saved":"a.pdf", "expires":300, "k_mac":<bin 32>, "k_body":<bin 32>}
 
 {"type":"upload_error", "id":7, "code":"too_large", "msg":"..."}
+
+{"type":"upload_progress", "sid":"<sid>", "received":4194304}
 ```
 
 | 字段 | 含义 |
@@ -508,6 +513,7 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 | `expires` | 会话 TTL（秒）。信息性字段，客户端不据此设定时器 |
 | `k_mac` | 请求认证密钥，32 字节二进制 |
 | `k_body` | 片体加密密钥，32 字节二进制 |
+| `received` | 服务端**已收下的明文字节数**（含正在收的那一片中已经到达的部分）。只在 `upload_progress` 里出现 |
 
 `upload_error.code`：
 
@@ -521,6 +527,14 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 - **为什么单开 `upload_error` 而不复用 `error`**：`error` 是**连接级**通道（`code` 取 `decrypt`／`replay`／`malformed` 那一类），而上传的失败面是**流程内**的 —— 要跟 `id` 对号、要跟那条进度气泡联动。这也解释了为什么**没有** `error(code:"upload")` 这个写法。
 - **`upload_error` 只在 ① 阶段出现**：②阶段的失败一律走 HTTP 状态码（§9.3），不占 WS 的帧空间。
 
+**`upload_progress` 的三条规则**
+
+1. **为什么由 PC 给**：CF 是**先收后转**的代理 —— 请求体它先整个缓冲下来（15MB 以内很快），再按它自己的节奏回源。所以客户端侧的一切估算（`xhr.upload.onprogress`、已交给内核的字节数）都只说明「字节交到 CF 手上了」，而真瓶颈在 CF → origin 那一段。客户端视角因此是一个「几秒冲到 100%、然后横住两三分钟」的假进度。只有 origin 自己数的字节是真的 ⇒ **进度必须由 PC 推**。
+2. **尽力而为，不进状态机**：这条帧**允许丢、允许晚到**（节流器在发送失败时会自行停发）。因此**没有任何状态判定可以依赖它** —— 尤其「传完了没有」只能由 ② 阶段的 HTTP 响应回答（§9.10 第 4 条）。
+3. **单调**：`received` 只增不减。客户端渲染时取 `max(已显示值, 本次值)`，因为进度帧与 HTTP 响应走在两条独立通道上，会出现「响应先到、进度帧后到且值更小」的瞬间。
+
+节流规则（多久推一次、多少字节推一次）属实现层，见 `http-upload-design.md` §5.13。
+
 ### 9.2 时序
 
 正常：
@@ -531,12 +545,14 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
  │                                       建会话：sid + 两把钥匙 + 分配落盘名 + 建 .part
  │ ◀─────────────────────── upload_ready
  │ PUT /api/upload/<sid>  (offset 0) ───▶  验签 → offset 判定 → 解密 → 写 .part
+ │ ◀── upload_progress{sid,received} ×N     本片正在收（尽力而为，可丢）
  │ ◀─────────────────────── {"received":N}
  │            … 逐片重复（**串行**：上一片响应回来才发下一片）…
  │ PUT /api/upload/<sid>  (最后一片) ───▶  收齐 → sink.finish() 改名落盘
  │ ◀──────────── {"received":size,"done":true,"saved":"a.pdf"}
 ```
 
+- **进度帧不改变任何判定**：②阶段的成败只由 HTTP 响应回答；`upload_progress` 只是把同一件事**提前**告诉客户端，让进度条在「CF 回源」那几分钟里不是死的（§9.1 规则 2）。
 - **②阶段的失败不需要协商**：非 200 就是终止信号，客户端停下并落一条气泡（§9.6）。
 - **①阶段失败**（`upload_error`）时**一片都不会发**，服务端连会话都没建（`too_large`/`bad_ref`/`bad_args` 都在建会话之前判）。
 - **取消**（③）：手机端发一帧 `upload_cancel{sid}` + 本地 `xhr.abort()`，**界面立刻解锁**。取消是**单向**的：不等回帧、不做探活兜底，失败也不致命（TTL 兜底，§9.5）。
@@ -663,8 +679,8 @@ offset + len <= received           → 200，忽略（重复片）
 
 1. **必须用 XHR，不能用 `fetch`**：`fetch` 要拿上传进度得靠 `duplex:"half"` + `ReadableStream`，Safari / iOS / 微信内置浏览器都不支持，而手机正是主平台。
 2. **串行逐片，不并发**：片级并发会让片乱序到达，也意味着内存峰值 × N。15MB 一片已让 RTT 部分可以忽略。
-3. **进度 = 服务端确认的 `received` + 在飞那一片已发出的字节**：`received` 是「已落盘」的下界，在飞片的字节是唯一能观测到的、确定会落盘的量 —— 再往后（CF 回源、PC 内核、写盘）全是盲区。只允许领先**一片**，且**单调不减**。
-4. **⚠️ 进度不要用 `event.total` 当分母**：iOS 18 WebKit bug #277286 在上传完成前会给出 2⁶⁴ 量级的值。分母用自己算的 `len`。
+3. **进度一律取服务端推来的 `upload_progress.received`**，客户端**不再做任何本地估算** —— 不看 `xhr.upload.onprogress`，也不按「在飞一片」外推：CF 先收后转，客户端侧的一切估计都只反映「字节交到 CF 手上了」（§9.1 规则 1）。渲染取 `max(已显示值, 本次值)`，保证单调不减。
+4. **⚠️ `upload_progress` 不是权威**：它可能丢、可能晚到，**结束判定只看 HTTP 响应** —— 第 5 条那个 `done: true` 才算成功，中途满格不算。⚠️ 历史坑：进度条曾用 `event.total` 当分母，iOS 18 WebKit bug #277286 在上传完成前会给出 2⁶⁴ 量级的值；改由服务端给进度后这个坑整条消失，**但别再把本地估算加回来**。
 5. **100% 只由响应里的 `done: true` 解锁**：数据「已发出」≠「PC 已落盘」，提前满格正是「手机说成功、PC 还在写」那个观感的来源。
 6. **全部片发完却没等到 `done` ⇒ 报「未确认」**：既不猜成功也不猜失败，并顺手作废那个不会再有进展的会话。等 `upload_ready` 也有一个保险超时（LAN 10s / CF 30s），超时同样报「未确认」。
 7. **两条时限按链路取**（`FilePanel.LINK_LAN` / `LINK_CF`）：等 `ready` 局域网 10s / CF 30s；单片 PUT 兜底局域网 2min / CF 10min。它们兜的是「链路彻底卡死」，不是速度承诺 —— CF 上 15MB 一片实测约 2 分钟（上行整形 ≈120KB/s）。
@@ -725,10 +741,10 @@ offset + len <= received           → 200，忽略（重复片）
 | 4 | 迁移 `preview` / `send` | 真机 |
 | 5 | 新增 `key` / `mouse` / `status` | 真机（`key` / `mouse` 已落地，`status` 未做） |
 | 6 | 面板 UI（按钮集内置） | 真机 |
-| 7 | `file` / `photo` 分块 —— **已改为 HTTP 分片上传**（设计见 `http-upload-design.md`）：WS 只留四条控制帧（§9.1），数据走 `PUT /api/upload/<sid>`；旧的 WS 分块、`ack` 三级回帧、取消的三级等待、`hello` 探活与 `max_frame_size` 全部退役（§9.11） | 真机 + `tests/test_upload.py`（服务端）+ `tests/test_mobile.py`（客户端）+ `tests/test_file.py`（落盘） |
+| 7 | `file` / `photo` 分块 —— **已改为 HTTP 分片上传**（设计见 `http-upload-design.md`）：WS 只留五条控制帧（§9.1；含 PC 主动回报的 `upload_progress`），数据走 `PUT /api/upload/<sid>`；旧的 WS 分块、`ack` 三级回帧、取消的三级等待、`hello` 探活与 `max_frame_size` 全部退役（§9.11） | 真机 + `tests/test_upload.py`（服务端）+ `tests/test_mobile.py`（客户端）+ `tests/test_file.py`（落盘） |
 | 8 | 加密与认证解耦（设计见 `e2ee-always-on-design.md`）：移除 `none` / `PlainProvider` / token 路径，`auth_method` 取代 `e2ee_algorithm`，新增 TOFU 首次握手（明文 auth → PC 指派并密封下发识别码 → 审批 → SealedBox 挑战）与 `close 4032` | `test_e2ee.py`（三种握手路径＋窃听者一组）＋ `test_e2ee_server.py::TestTofuHandshake`（下发顺序 / 审批 / 拒绝 / 重连 / 审批慢于 AUTH_TIMEOUT）＋ `test_e2ee_server.py::TestTofuEavesdropper` ＋ 配置迁移测试 |
 
-> **进度（2026-09-23）**：阶段 1–3、7、8 已落地（编解码封装、加密层重构、三步握手、加密与认证解耦、HTTP 分片上传），阶段 4–6 见各行内备注。
+> **进度（2026-09-23）**：阶段 1–3、7、8 已落地（编解码封装、加密层重构、三步握手、加密与认证解耦、HTTP 分片上传 + `upload_progress` 进度回报），阶段 4–6 见各行内备注。
 
 **第 1 阶段单独做**：编解码是纯函数，能完整进 pytest，正好补上"mobile.html 没有测试覆盖"这个洞；且后续接网络出问题时可确定不是编解码的锅。
 

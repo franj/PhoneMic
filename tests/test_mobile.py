@@ -132,6 +132,12 @@ window.__mockWS = {
             k_mac: q.wireMac(), k_body: q.wireBody() });
     },
 
+    /** 推一帧 `upload_progress`：②阶段片内进度的**唯一来源**（§5.13） */
+    pushProgress: function(received, sid) {
+        this.triggerMessage({
+            type: 'upload_progress', sid: sid || this.readySid, received: received });
+    },
+
     /**
      * 应答一次 `upload_begin`：先告诉 HTTP 替身「这次传多大、会话号是什么」，再按
      * readyMode 回控制帧。两把钥匙在这里现发（**每次上传一把新的**，与 WS 上那套
@@ -268,7 +274,9 @@ window.__mockXHR = {
     failFrom: null,      // 第 N 片起改回 'status' + failStatus（1 起数）
     failStatus: 409,
     doneFlag: true,      // false = 永不带 done（测「未确认」）
-    emitProgress: true,  // false = 完全不报 upload 进度
+    emitProgress: true,  // 替身照真 XHR 的规矩报 upload.onprogress；本设计**不消费**它
+                         // （§5.13 进度改由服务端推）。留着是当**回归守卫**：用它造出
+                         // 假的本地进度，验证进度条不受影响。false = 完全不报。
     lieProgress: false,  // true = 报 2^53 的 loaded / total（复刻 iOS 18 WebKit bug #277286）
     aborted: 0,          // 被 abort() 的次数
     last: null,          // 最近一个替身 XHR 实例
@@ -756,6 +764,20 @@ def _fill_width(page):
     return page.evaluate("() => document.querySelector('.fp-fill').style.width")
 
 
+def _rate_text(page):
+    """进度条下方那行速率文案（§5.13：最近 10 秒平均）。"""
+    return page.evaluate("() => document.querySelector('.fp-rate').textContent")
+
+
+# 完成气泡里拼的「· 全程平均速率」：值随时间变，只能验形状不能验定值
+_RATE_SUFFIX = re.compile(r" · [0-9.]+ (?:B|KB|MB)/s$")
+
+
+def _strip_rate(text):
+    """剥掉完成气泡上附加的速率后缀，好让文案断言仍可比常量。"""
+    return _RATE_SUFFIX.sub("", text)
+
+
 class _Upload:
     """一次上传的公共动作：造文件、发起、配置替身、等收尾。"""
 
@@ -792,6 +814,12 @@ class _Upload:
             "() => { window.__sendP = window._filePanel._start("
             f"{self.fake(size, name or self.NAME)}, '{kind}'); }}"
         )
+
+    def push_progress(self, received, sid=None):
+        """从 PC 侧推一帧 ``upload_progress``（§5.13 片内进度的唯一来源）。"""
+        self.page.evaluate(
+            "([r, s]) => window.__mockWS.pushProgress(r, s)",
+            [received, sid or self.SID])
 
     def wait_begin(self):
         self.page.wait_for_function(
@@ -978,36 +1006,119 @@ class TestChunkShape:
 
 
 class TestUploadProgress:
-    """进度 = 服务端确认的 ``received`` + 在飞那一片已发出的字节；100% 只由 done 解锁。"""
+    """进度只认服务端推来的 ``upload_progress`` 帧；100% 只由 done 解锁（§5.13）。
 
-    def test_progress_follows_confirmed_bytes(self, up):
-        """挂住第 2 片且完全不报 upload 进度 ⇒ 只剩「已确认的 128/384」= 33%。"""
-        up.setup(xhr={"chunk": 128, "hangFrom": 1, "emitProgress": False})
+    ⚠️ 这一组里最该守住的是**「进度帧没有权力」**：它只喂进度条，绝不能碰状态机
+    （帧会丢、会晚到），100% 与收尾永远归最后一片的 HTTP 响应。
+    """
+
+    def test_progress_comes_from_server_frames(self, up):
+        """服务端推来 192/384 ⇒ 50%，填充宽度同步（片内进度不再靠本地估算）。"""
+        up.setup(xhr={"chunk": 128, "hangFrom": 1})
         up.start(384)
-        up.page.wait_for_function("() => window.__mockXHR.puts.length === 2")
+        up.page.wait_for_function("() => window._filePanel._received === 128")
+        up.push_progress(192)
+        up.page.wait_for_function("() => window._filePanel._received === 192")
+        assert _pct(up.page) == 50
+        assert _fill_width(up.page) == "50%"
+
+    def test_progress_ignores_other_session(self, up):
+        """帧里的 ``sid`` 跟当前会话对不上 ⇒ 整帧丢掉（防上一次上传留下的迟到帧）。"""
+        up.setup(xhr={"chunk": 128, "hangFrom": 1})
+        up.start(384)
+        up.page.wait_for_function("() => window._filePanel._received === 128")
+        up.push_progress(192, sid="sid-other")
+        up.page.wait_for_timeout(80)
+        assert _pct(up.page) == 33          # 33 只来自第 1 片的 HTTP 响应
+
+    def test_progress_is_monotonic(self, up):
+        """进度帧与 HTTP 响应走两条独立通道：值更小的迟到帧不能让进度回退。"""
+        up.setup(xhr={"chunk": 128, "hangFrom": 1})
+        up.start(384)
+        up.page.wait_for_function("() => window._filePanel._received === 128")
+        up.push_progress(192)
+        up.page.wait_for_function("() => window._filePanel._received === 192")
+        up.push_progress(64)
+        up.page.wait_for_timeout(80)
+        assert _pct(up.page) == 50
+
+    def test_progress_frame_cannot_unlock_hundred_percent(self, up):
+        """红线：进度帧**没有权力** —— 把整份都推过来也到不了 100%（还没 done）。"""
+        up.setup(xhr={"chunk": 128, "hangFrom": 1, "doneFlag": False})
+        up.start(384)
+        up.page.wait_for_function("() => !!window._filePanel._sid")
+        up.push_progress(384)
+        up.page.wait_for_function("() => window._filePanel._received === 384")
+        assert _pct(up.page) == 99
+        assert up.busy() is True
+
+    def test_lying_onprogress_cannot_move_the_bar(self, up):
+        """回归守卫：谁把本地估算加回来，这条立刻挂（§5.13）。
+
+        替身复刻 iOS 18 WebKit bug #277286 的 2^53 量级 ``loaded``/``total``；进度条
+        只该反映 HTTP 响应带来的 33%，本地那一路一个字都不许影响。
+        """
+        up.setup(xhr={"chunk": 128, "hangFrom": 1, "lieProgress": True})
+        up.start(384)
         up.page.wait_for_function("() => window._filePanel._received === 128")
         assert _pct(up.page) == 33
         assert _fill_width(up.page) == "33%"
 
-    def test_inflight_chunk_may_lead_by_one(self, up):
-        """在飞那片的已发字节要计入（只领先一片）：否则 15MB 一片时进度条会长时间不动。"""
+    def test_rate_is_the_average_over_the_last_ten_seconds(self, up):
+        """速率 = 最近 10 秒的平均：直接喂两个样本，值按窗口算（不依赖真实耗时）。"""
         up.setup(xhr={"chunk": 128, "hangFrom": 1})
         up.start(384)
-        up.page.wait_for_function("() => window.__mockXHR.puts.length === 2")
-        up.page.wait_for_function("() => window._filePanel._inflight === 128")
-        assert _pct(up.page) == 67          # (128 + 128) / 384
+        up.page.wait_for_function("() => !!window._filePanel._sid")
+        up.page.evaluate(
+            "() => { const p = window._filePanel, n = performance.now();"
+            "  p._rateSamples = [{t: n - 10000, r: 0}, {t: n, r: 1024 * 1024}];"
+            "  p._renderProgress(); }"
+        )
+        assert _rate_text(up.page) == "102 KB/s"      # 1MB/10s ≈ 104.9 KB/s
 
-    def test_lying_event_total_cannot_jump_the_bar(self, up):
-        """iOS 18 WebKit bug #277286：``event.total`` 在上传完成前是 2^64 量级的值。
-
-        分母只能用自己算的 ``len``。若哪天改成 ``ev.loaded / ev.total``，这一片立刻
-        报 100%（再被 done 守卫压成 99%），于是这里期望的 67% 会变成 99%。
-        """
-        up.setup(xhr={"chunk": 128, "hangFrom": 1, "lieProgress": True})
+    def test_rate_switches_to_megabytes(self, up):
+        """≥1MB/s 改用 MB/s（两位小数）：跨数量级都要能一眼读出来。"""
+        up.setup(xhr={"chunk": 128, "hangFrom": 1})
         up.start(384)
-        up.page.wait_for_function("() => window.__mockXHR.puts.length === 2")
-        up.page.wait_for_function("() => window._filePanel._inflight === 128")
-        assert _pct(up.page) == 67
+        up.page.wait_for_function("() => !!window._filePanel._sid")
+        up.page.evaluate(
+            "() => { const p = window._filePanel, n = performance.now();"
+            "  p._rateSamples = [{t: n - 10000, r: 0}, {t: n, r: 20 * 1024 * 1024}];"
+            "  p._renderProgress(); }"
+        )
+        assert _rate_text(up.page) == "2.00 MB/s"
+
+    def test_rate_decays_to_zero_when_stalled(self, up):
+        """卡住时窗口按真实时间往前滑 ⇒ 速率归零，而不是冻在旧值上。
+
+        样本停在 5 秒前、且值不再变：窗口内两个样本等值 ⇒ 0 B/s。
+        """
+        up.setup(xhr={"chunk": 128, "hangFrom": 1})
+        up.start(384)
+        up.page.wait_for_function("() => !!window._filePanel._sid")
+        up.page.evaluate(
+            "() => { const p = window._filePanel, n = performance.now();"
+            "  p._rateSamples = [{t: n - 10000, r: 4096}, {t: n - 5000, r: 4096}];"
+            "  p._renderProgress(); }"
+        )
+        assert _rate_text(up.page) == "0 B/s"
+
+    def test_rate_timer_is_stopped_on_finish(self, up):
+        """补采样计时器必须随收尾停下：留着就是每传一次漏一个 interval。"""
+        up.setup(xhr={"chunk": 128})
+        up.start(384)
+        up.settled()
+        assert up.page.evaluate("() => window._filePanel._rateTimer") is None
+
+    def test_done_bubble_carries_the_overall_average_rate(self, up):
+        """完成气泡带这次传送的**全程平均**（值随时间变 ⇒ 只验形状）。"""
+        up.setup(xhr={"chunk": 128})
+        up.start(384)
+        up.settled()
+        text = _bubble_texts(up.page)[0]
+        assert _strip_rate(text) == MOBILE_I18N["bubble_file_done"].replace(
+            "{name}", _Upload.NAME)
+        assert _RATE_SUFFIX.search(text), text
 
     def test_progress_caps_at_99_without_done(self, up):
         """全片发完但服务端始终没回 done：进度封在 99%，气泡报「未确认」。"""
@@ -1104,8 +1215,9 @@ class TestUploadFailure:
         up.settled()
         b = _upload_bubbles(up.page)
         assert len(b) == 1
-        assert b[0]["text"] == MOBILE_I18N["bubble_file_done"].replace(
+        assert _strip_rate(b[0]["text"]) == MOBILE_I18N["bubble_file_done"].replace(
             "{name}", "report.pdf")
+        assert _RATE_SUFFIX.search(b[0]["text"]), "完成气泡要带全程平均速率"
         assert b[0]["done"] is True
         assert b[0]["retry"] is False, "完成态不挂重发入口"
 
@@ -1115,8 +1227,9 @@ class TestUploadFailure:
         up.start(384, kind="photo", name="shot.png")
         up.settled()
         b = _upload_bubbles(up.page)
-        assert b[0]["text"] == MOBILE_I18N["bubble_photo_done"].replace(
+        assert _strip_rate(b[0]["text"]) == MOBILE_I18N["bubble_photo_done"].replace(
             "{name}", "shot.png")
+        assert _RATE_SUFFIX.search(b[0]["text"]), "photo 的气泡同样带速率"
         assert b[0]["retry"] is False
 
     def test_lock_is_released_and_keys_are_dropped_on_failure(self, up):
@@ -1617,7 +1730,7 @@ class TestUploadWiring:
         up.start(128)
         up.settled(timeout=2000)
         assert len(_puts(up.page)) == 1
-        assert _bubble_texts(up.page) == [
+        assert [_strip_rate(x) for x in _bubble_texts(up.page)] == [
             MOBILE_I18N["bubble_file_done"].replace("{name}", _Upload.NAME)]
 
     def test_wait_subscriptions_are_released_after_settle(self, up):

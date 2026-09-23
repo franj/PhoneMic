@@ -79,6 +79,14 @@ CHUNK_OVERHEAD = NONCE_SIZE + SEQ_PREFIX_SIZE + TAG_SIZE
 _KEY_MATERIAL_SIZE = 64
 _KEY_SIZE = 32
 
+# 片内进度帧的节流参数（§5.13）：**只按恒定 tick**，不再叠「变化量阈值」。
+#
+# 09-23 起进度条旁边要显示 10 秒平均速率，采样必须**规律**：叠了阈值的话，慢链路上
+# 「推进不足一个千分位」就不发帧，速率会**冻在旧值**上（看着像还在传，其实早卡住了）。
+# 帧本身约 60 字节，10 帧/秒 ≈ 600B/s，走的是 PC → 手机方向（被 CF 整形的是手机上
+# 行）⇒ 开销可忽略。
+PROGRESS_TICK = 0.1
+
 VALID_REFS = ("file", "photo")
 
 
@@ -107,6 +115,59 @@ class ChunkVerdict:
     done: bool = False
     saved: str = ""
     reason: str = ""
+
+
+# ---------- 进度（片内） ----------
+
+
+class ChunkProgressThrottle:
+    """按**恒定 tick** 节流片内进度帧（§5.13）。
+
+    一次上传一个实例，活在 ``_read_upload_body`` 的读循环里 —— 进度点必须在**读循环**
+    中产生，不能挂在 ``commit_chunk`` 上：后者是「整片收完、一次性 ``received += 15MB``」
+    的阶梯，拿它当进度就只在整片落地时跳一格，而 CF 上一片要两三分钟（§5.13 那张表）。
+
+    ⚠️ **不叠「变化量阈值」**（09-23）：进度条旁边要显示 10 秒平均速率，采样必须规律
+    —— 有阈值时慢链路上「推进不足一个千分位」就不发帧，速率会**冻在旧值**上。
+
+    发送走注入的 ``send``（``async (sid, received)``），本类不 import ``api.py`` ——
+    那边反过来要 import 本模块，直接引用会成环。
+
+    ⚠️ **尽力而为**：``send`` 抛异常（连接已关是常态）就地停发、绝不冒泡。它是从
+    HTTP handler 里调的，异常冒出去就是一屏 ASGI 栈（§6.7 第 1 条同族）。
+    """
+
+    def __init__(
+        self,
+        sid: str,
+        send: Callable[[str, int], Any],
+        tick: float = PROGRESS_TICK,
+    ) -> None:
+        self._sid = sid
+        self._send = send
+        self._tick = tick
+        self._last_ts: Optional[float] = None   # None ⇒ 首帧不设时间门槛
+        self.enabled = True
+
+    async def note(self, received: int) -> bool:
+        """报告「已收到 ``received`` 字节」；真发出去了一帧则返回 True。
+
+        ``received`` 是**会话累计**（已落盘的 + 当前片缓冲区里已到的），不是本片长度。
+        """
+        if not self.enabled:
+            return False
+        now = time.monotonic()
+        if self._last_ts is not None and now - self._last_ts < self._tick:
+            return False
+        self._last_ts = now
+        try:
+            await self._send(self._sid, received)
+        except Exception as e:
+            # 对端已关 / 连接不可用：停发即可，绝不冒泡（§6.7 第 1 条同族）
+            self.enabled = False
+            logger.debug("进度帧发送失败，停止推送: sid=%s - %s", self._sid, e)
+            return False
+        return True
 
 
 # ---------- 会话 ----------

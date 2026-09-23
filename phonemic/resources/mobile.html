@@ -4186,14 +4186,17 @@
      *
      * **数据面走 HTTP，不再走 WS**（09-23 起）。Cloudflare 免费隧道下 WS 上传不是
      * 「慢」而是「不可用」——它限上行字节速率，且 256KiB 以上的帧会被**截断**。
-     * HTTP 请求体既不受这两条限制，又天然带浏览器的流控。WS 只剩三件事：
+     * HTTP 请求体既不受这两条限制，又天然带浏览器的流控。WS 只剩控制帧：
      *
      *     upload_begin  ──▶  upload_ready（sid + 两把一次性钥匙 + 片大小 + 落盘名）
      *                   └─▶  upload_error（参数不合法 / 大小超限，此时一个字节都还没传）
+     *                   └─▶  upload_progress（②阶段的接收进度，周期性、尽力而为）
      *     upload_cancel ◀──  单向、幂等、**无回帧**（服务端删 .part，TTL 兜底）
      *
-     * 于是「传了多少」不再有 ack 可数：进度由每片 PUT 响应里的 `received`（服务端已
-     * 确认落盘的字节数）驱动，本地只允许再加上「本片已发出的字节」这一片的量。
+     * 于是「传了多少」不再有 ack 可数：进度由**服务端主动推的 `upload_progress` 帧**
+     * 驱动（§5.13）。⚠️ 不能拿 `xhr.upload.onprogress` 当进度 —— CF 是**先收后转**的
+     * 代理，它量到的是「字节交到 CF 手上了」：15MB 几秒冲满、然后 CF 回源两三分钟，
+     * 那条曲线会「几秒满格再横住」，比一动不动更误导。
      *
      * 四条不能写反的：
      *   1. **任何失败即放弃**，不重传、不续传（§5.6.4）——放弃时补发一帧 `upload_cancel`；
@@ -4238,6 +4241,8 @@
         static get PUT_TIMEOUT() { return FilePanel.LINK.put; }
         static get RECONNECT_WAIT() { return 6000; }        // 未连接时先等重连的时间（ms），1s 退避足够重试数轮
         static get PICKER_CANCEL_GRACE() { return 250; }    // 判「取消」的宽限（ms）：留给 change 追上来的余量
+        static get RATE_WINDOW_MS() { return 10000; }       // 速率窗口：最近 10 秒（用户口径的「10 秒内平均」）
+        static get RATE_SAMPLE_MS() { return 1000; }        // 补采样节拍：1s（服务端读不到字节时不发帧，靠它补）
 
         /**
          * HTTP 状态码 → 气泡原因（§5.2 那张响应表）。
@@ -4358,6 +4363,11 @@
             font-size: 12px;
             color: #6b7280;
         }
+        .file-panel .fp-rate {
+            font-size: 12px;
+            color: #9ca3af;
+            min-height: 15px;
+        }
         .file-panel .fp-cancel {
             min-width: 120px;
             height: 44px;
@@ -4406,9 +4416,12 @@
             this._provider = null;     // 上传专用 Provider 实例（注入 k_body）
             this._kMac = null;         // X-Pm-Mac 的密钥（32 字节）
             this._chunkSize = 0;       // 服务端下发的片大小（明文字节）
-            this._received = 0;        // 服务端确认落盘的字节数：**进度的唯一基准**
-            this._inflight = 0;        // 本片已发出字节：进度只允许领先至多一片
+            this._received = 0;        // 服务端**已收下**的字节数：进度的唯一基准
             this._shownPct = 0;        // 已显示过的百分比（单调不减）
+            this._rateSamples = [];    // [{t, r}]：速率窗口的样本（t = performance.now()）
+            this._rateTimer = null;    // 补采样计时器（**只重画**，不做任何判定）
+            this._startedAt = 0;       // 本次传输起点（performance.now()）：算全程平均用
+            this._progressOff = null;  // 本次上传的进度帧退订函数（收尾时调用）
             this._completed = false;   // 是否已收到 done：100% 的唯一解锁条件
             this._cancelRequested = false;
             this._xhr = null;          // 在飞的那片 PUT（取消 / 断连时 abort）
@@ -4456,6 +4469,7 @@
                         <div class="fp-name"></div>
                         <div class="fp-bar"><div class="fp-fill"></div></div>
                         <div class="fp-pct">0%</div>
+                        <div class="fp-rate"></div>
                         <button type="button" class="fp-cancel" data-i18n="panel_file_cancel"></button>
                     </div>
                     <div class="pv-hint" data-i18n="panel_hint_file"></div>
@@ -4470,6 +4484,7 @@
             this.nameEl = this.root.querySelector('.fp-name');
             this.fillEl = this.root.querySelector('.fp-fill');
             this.pctEl = this.root.querySelector('.fp-pct');
+            this.rateEl = this.root.querySelector('.fp-rate');
             this.cancelBtn = this.root.querySelector('.fp-cancel');
         }
 
@@ -4557,7 +4572,6 @@
             this._cancelRequested = false;
             this._completed = false;
             this._received = 0;
-            this._inflight = 0;
             this._shownPct = 0;
             this._sid = null;
             this._provider = null;
@@ -4573,7 +4587,19 @@
             this.pickRow.style.display = 'none';
             this.progressBox.hidden = false;
             this.nameEl.textContent = file.name;
+            this._startedAt = performance.now();
+            this._rateSamples = [{ t: this._startedAt, r: 0 }];
+            this._startRateTimer();
             this._renderProgress();
+
+            // 进度帧的订阅覆盖**整次上传**（不像 `_awaitBegin` 那样 ready 一到就退订）：
+            // 进度只从 ② 阶段才有，必须活到收尾。对号用 `sid` 而不是 `id`（§5.13）。
+            const progressAc = new AbortController();
+            this._progressOff = () => progressAc.abort();
+            this.transport.on('upload_progress', (f) => {
+                if (!this._sid || f.sid !== this._sid) return;
+                this._applyProgress(f.received);
+            }, { signal: progressAc.signal });
 
             // ⚠️ 订阅必须**先于**发帧挂上：局域网一个来回只要几毫秒，先发后订会漏掉
             // upload_ready（`_awaitBegin` 的 executor 是同步跑的，所以下面这两行顺序就够）。
@@ -4681,12 +4707,9 @@
                     return;
                 }
 
-                // 进度只认服务端确认值：`received` 是「已落盘」的下界，本片的前瞻量
-                // 到此清零（下一片从 0 重新累积）
-                this._inflight = 0;
-                const recv = Number(resp.body.received);
-                if (Number.isFinite(recv)) this._received = Math.max(this._received, recv);
-                this._renderProgress();
+                // 进度只认服务端确认值：响应里的 `received` 是权威（片内那部分已由
+                // `upload_progress` 帧先到，这里取 max 收敛，§5.13）
+                this._applyProgress(resp.body.received);
 
                 if (resp.body.done) {
                     // 唯一能报成功的依据：服务端已改名落盘（或已写进剪贴板）
@@ -4707,14 +4730,17 @@
         /**
          * 一片：`PUT /api/upload/<sid>`。
          *
-         * **必须用 XHR，不能用 fetch**（§6.4）：fetch 要拿上传进度得靠 `duplex:"half"` +
-         * ReadableStream，而 Safari / iOS / 微信内置浏览器都不支持它，手机正是主平台。
+         * **必须用 XHR，不能用 fetch**（§6.4）：理由是兼容性与取消语义 —— Safari / iOS /
+         * 微信内置浏览器不支持 `duplex:"half"`，而手机正是主平台；`abort()` 也比
+         * `AbortController` 更直接。（进度已经不吃这里的 `onprogress` 了，见下。）
          *
          * ⚠️ URL 写**根绝对路径**（`/api/upload/<sid>`），不写相对路径：相对路径在
          * `/{secret}/` 页面下会变成 `/{secret}/api/upload/<sid>`，落进另一条分支。
          *
-         * ⚠️ 进度**不要用 `event.total` 当分母**：iOS 18 WebKit bug #277286 在上传完成前
-         * 会给出 2⁶⁴ 量级的值。分母用自己算的 `len`。
+         * ⚠️ **不订阅 `xhr.upload.onprogress`**（§5.13）：CF 下它量的是「字节交给 CF 了」
+         * —— 15MB 几秒内冲到 100%，而 CF 还要两三分钟回源。进度改由服务端的
+         * `upload_progress` 帧驱动。（旧版为绕开 iOS 18 WebKit bug #277286 的错误
+         * `event.total` 才自己算分母，那条约束随本改动一并消失。）
          *
          * @returns {Promise<{status:number, body:object, reason:string}>} 只有「拿到了响应」
          *          才 resolve；网络错 / 超时 / 被 abort 一律 reject。
@@ -4723,7 +4749,6 @@
             return new Promise((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
                 this._xhr = xhr;
-                this._inflight = 0;
                 xhr.open('PUT', '/api/upload/' + this._sid, true);
                 xhr.responseType = 'text';
                 xhr.timeout = FilePanel.PUT_TIMEOUT;
@@ -4733,11 +4758,8 @@
                 // 签名覆盖 "PUT\n<sid>\n<offset>\n<len>"，三项缺一不可（§5.3）
                 xhr.setRequestHeader('X-Pm-Mac',
                     encodeMac(uploadMac(this._kMac, this._sid, offset, len)));
-                // Content-Length 由浏览器按 cipher 长度自动填，恰等于 len + 48
-                xhr.upload.onprogress = (ev) => {
-                    this._inflight = Math.max(0, Math.min(ev.loaded || 0, len));
-                    this._renderProgress();
-                };
+                // Content-Length 由浏览器按 cipher 长度自动填，恰等于 len + 48。
+                // 不订阅 `xhr.upload.onprogress`：CF 下它只反映「CF 收下了」（§5.13）
                 const settle = (fn) => () => {
                     if (this._xhr === xhr) this._xhr = null;
                     fn();
@@ -4880,15 +4902,21 @@
             this._provider = null;
             this._kMac = null;
             this._xhr = null;
-            this._inflight = 0;
+            this._stopRateTimer();
+            if (this._progressOff) { this._progressOff(); this._progressOff = null; }
             this._resetUI();
             this._state = 'idle';
             this._setLock(false);
 
             if (reason === 'done') {
-                // file 与 photo 都用完成态；靠文案里的图标（📄/🖼️）区分
+                // file 与 photo 都用完成态；靠文案里的图标（📄/🖼️）区分。
+                // 顺带把这次传送的**全程平均速率**拼上去：值随时间变，所以不走语言包
+                // （单位与分隔符本身无需翻译）。
+                const avg = this._avgRate(file.size);
+                const base = t(this._bubbleKey('done'), { name: file.name });
                 this.chat.addFileMessage(
-                    t(this._bubbleKey('done'), { name: file.name }), 'done', null, kind);
+                    avg > 0 ? base + ' · ' + this._fmtRate(avg) : base,
+                    'done', null, kind);
                 return;
             }
             // 除了「传完」，其余任何收尾都让服务端别再留着那个会话（尽力而为，幂等）
@@ -4904,6 +4932,7 @@
         _resetUI() {
             this.progressBox.hidden = true;
             this.pickRow.style.display = '';
+            if (this.rateEl) this.rateEl.textContent = '';
         }
 
         /**
@@ -4918,14 +4947,29 @@
         }
 
         /**
-         * 进度 = 服务端确认的 `received` + 本片已发出的字节。
+         * 收一个服务端的进度值：更新 `_received` 并重画。
          *
-         * 只允许领先**一片**的量：`received` 是「已落盘」的下界，而在飞那一片的字节
-         * 是唯一能观测到的、确定会落盘的量 —— 再往前（CF 回源、PC 内核、写盘）全是盲区。
-         * 串行上传保证了这个前瞻量永远不超过一片，所以它既不说谎、又不会让进度条在
-         * 「一片 15MB、CF 上要 2 分钟」时长时间一动不动。
+         * ⚠️ **只接受更大的值**（单调）：进度帧与 HTTP 响应走两条独立通道，会出现
+         * 「响应先到、进度帧后到且值更小」的瞬间。
+         * ⚠️ 它**不驱动任何状态**：帧丢了、晚到，都不影响成败判定 —— `done` 才是权威（§5.13）。
+         */
+        _applyProgress(recv) {
+            const v = Number(recv);
+            if (!Number.isFinite(v)) return;
+            this._received = Math.max(this._received, v);
+            this._sampleRate();
+            this._renderProgress();
+        }
+
+        /**
+         * 进度 = 服务端推来的 `upload_progress.received`（§5.13），**不做任何本地估算**。
          *
-         * 100% 只由 `done` 解锁：数据「已发出」不等于「PC 已落盘」，提前满格正是
+         * 为什么不能像旧版那样「服务端 `received` + 本片已发出的字节」：CF 是**先收后转**
+         * 的代理，`xhr.upload.onprogress` 量到的是「字节交到 CF 手上了」—— 15MB 几秒内
+         * 就冲到 100%，然后 CF 用两三分钟回源。拿它当前瞻，进度条会几秒满格再横住，
+         * 比一动不动更误导。
+         *
+         * 100% 只由 `done` 解锁：数据「已到 PC」也不等于「PC 已落盘」，提前满格正是
          * 「手机说成功、PC 还在写」那个观感的来源。
          */
         _renderProgress() {
@@ -4933,13 +4977,82 @@
             if (!file) return;
             let pct = 0;
             if (file.size > 0) {
-                const seen = Math.min(this._received + this._inflight, file.size);
+                const seen = Math.min(this._received, file.size);
                 pct = Math.round((Math.max(0, seen) / file.size) * 100);
                 if (pct >= 100 && !this._completed) pct = 99;
             }
             this._shownPct = Math.max(this._shownPct, pct);   // 单调不减
             this.fillEl.style.width = this._shownPct + '%';
             this.pctEl.textContent = this._shownPct + '%';
+            this._renderRate();
+        }
+
+        /**
+         * 速率：最近 10 秒的平均（字节/秒）。
+         *
+         * ⚠️ 窗口按**真实时间**剪（不是按「最后一个样本的时间」）—— 卡住时窗口自己
+         * 往前滑，速率才会归零，而不是冻在旧值上。样本有两个来源：进度帧到达时，以及
+         * 1s 的补采样计时器（服务端读不到字节时不会发帧，全靠它）。
+         *
+         * 返回 -1 = 「还测不出来」（不足两个样本），此时界面留空不显示。
+         */
+        _rate() {
+            const s = this._rateSamples;
+            if (!s || s.length < 2) return -1;
+            const first = s[0];
+            const last = s[s.length - 1];
+            const dt = (last.t - first.t) / 1000;
+            if (!(dt > 0)) return -1;
+            return Math.max(0, (last.r - first.r) / dt);
+        }
+
+        /** 补一个样本，并丢掉窗口外的旧样本（留一个锚点，否则 dt 会算成 0）。 */
+        _sampleRate() {
+            const now = performance.now();
+            this._rateSamples.push({ t: now, r: this._received });
+            const cut = now - FilePanel.RATE_WINDOW_MS;
+            while (this._rateSamples.length > 2 && this._rateSamples[1].t < cut) {
+                this._rateSamples.shift();
+            }
+        }
+
+        /** 全程平均（字节/秒）：总字节 ÷ 从开始到现在的秒数。测不出返回 -1。 */
+        _avgRate(size) {
+            const dt = (performance.now() - this._startedAt) / 1000;
+            if (!(dt > 0) || !(size > 0)) return -1;
+            return size / dt;
+        }
+
+        /** KB/s 与 MB/s 灵活切换：≥1MB/s 用 MB（两位小数），≥1KB/s 用 KB，再小用 B/s。 */
+        _fmtRate(bps) {
+            if (!(bps >= 0)) return '';
+            if (bps >= 1024 * 1024) return (bps / 1048576).toFixed(2) + ' MB/s';
+            if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
+            return Math.round(bps) + ' B/s';
+        }
+
+        _renderRate() {
+            if (!this.rateEl) return;
+            const bps = this._rate();
+            this.rateEl.textContent = bps < 0 ? '' : this._fmtRate(bps);
+        }
+
+        /**
+         * ⚠️ 这个计时器**只重画**：不判定成败、不解锁 100%（「界面可以有定时器，不能
+         * 有权力」）。它唯一的职责是补采样 —— 服务端读不到字节时不会发进度帧，没有它
+         * 速率就冻在旧值上。收尾必停（_finish / _resetUI 各自都调得到）。
+         */
+        _startRateTimer() {
+            this._stopRateTimer();
+            this._rateTimer = setInterval(() => {
+                if (this._state !== 'busy') { this._stopRateTimer(); return; }
+                this._sampleRate();
+                this._renderRate();
+            }, FilePanel.RATE_SAMPLE_MS);
+        }
+
+        _stopRateTimer() {
+            if (this._rateTimer) { clearInterval(this._rateTimer); this._rateTimer = null; }
         }
     }
 

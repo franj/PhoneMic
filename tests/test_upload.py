@@ -50,7 +50,9 @@ from phonemic.server.api import (
 from phonemic.server.upload import (
     CHUNK_OVERHEAD,
     PHOTO_MAX_SIZE,
+    PROGRESS_TICK,
     UPLOAD_CHUNK_SIZE,
+    ChunkProgressThrottle,
     UploadManager,
 )
 from phonemic.tunnel.crypto import (
@@ -675,6 +677,21 @@ class _UploadHarness:
         return _raw(self.host, self.port, "PUT", self.path,
                     _upload_headers(offset, length, mac_text), body)
 
+    def drain_frames(self, timeout=0.4):
+        """把 WS 上**已经到达**的下行帧全读出来（读空即返回）。
+
+        进度帧是服务端在读 body 的过程中推的，与 PUT 的响应不同步 ⇒ 不能只 ``recv``
+        一次就断言。读空表现为 ``recv`` 超时；解帧失败则原样抛出去（那是真问题，
+        别被这个 helper 吞掉）。
+        """
+        out = []
+        while True:
+            try:
+                raw = self.ws.recv(timeout=timeout)
+            except Exception:
+                return out
+            out.append(self.sim.decrypt(raw))
+
     def saved_path(self):
         return self.dest_dir / self.ready["saved"]
 
@@ -985,3 +1002,95 @@ class TestWsCloseAbortsUpload:
                          upload_server.path, _upload_headers(0, 0, "AAAA"))
         assert status == 401, "WS 一断，该连接名下的会话必须立即作废"
         assert not list(upload_server.dest_dir.glob("*.part")), "作废要删掉半成品"
+
+
+class TestProgressThrottle:
+    """片内进度节流器（§5.13）：只按恒定 tick 封帧率、发失败即停发。
+
+    纯逻辑、不碰网络，所以这一层能覆盖集成测试观测不到的时间边界（tick 用的是
+    ``time.monotonic``，靠真跑一遍是测不稳的）。
+    """
+
+    @staticmethod
+    def _mk(*, tick=PROGRESS_TICK, boom=False):
+        sent = []
+
+        async def _send(sid, received):
+            if boom:
+                raise ConnectionResetError("peer is gone")
+            sent.append((sid, received))
+
+        th = ChunkProgressThrottle("sid-1", _send, tick=tick)
+        return th, sent
+
+    def test_first_frame_has_no_time_gate(self):
+        """首帧不设时间门槛，否则一片的开头要白等一整个 tick 才有动静。"""
+        th, sent = self._mk()
+        assert _run(th.note(10)) is True
+        assert sent == [("sid-1", 10)]
+
+    def test_tick_caps_the_frame_rate(self):
+        """同一 tick 内只允许一帧 —— LAN 上一片 15MB 会瞬间扫过所有台阶。"""
+        th, sent = self._mk(tick=60.0)
+        assert _run(th.note(100)) is True
+        assert _run(th.note(500)) is False
+        assert len(sent) == 1
+
+    def test_tick_alone_decides_no_size_threshold(self):
+        """不叠「变化量阈值」：值没变、时间到了**照样发**（§5.13）。
+
+        阈值会把「没进展」这件事一起滤掉 —— 而这正是 10 秒平均速率要的样本：
+        有阈值时卡住了就不发帧，速率冻在旧值上，看着像还在传。
+        """
+        th, sent = self._mk(tick=0.0)
+        assert _run(th.note(100)) is True
+        assert _run(th.note(100)) is True       # 同一个值也发
+        assert _run(th.note(100)) is True
+        assert [r for _, r in sent] == [100, 100, 100]
+
+    def test_send_failure_stops_pushing_without_raising(self):
+        """发失败（连接已关）就地停发、**绝不冒泡** —— 它是从 HTTP handler 里调的。"""
+        th, sent = self._mk(tick=0.0, boom=True)
+        assert _run(th.note(100)) is False      # 不抛异常
+        assert th.enabled is False
+        assert _run(th.note(900)) is False      # 此后不再尝试
+        assert sent == []
+
+
+class TestProgressFrames:
+    """②阶段的服务端进度帧（§5.13）：真值、单调，且**不掺和判定**。"""
+
+    def test_put_pushes_progress_frames(self, upload_server):
+        """一次 PUT 至少推一帧，值是**明文字节数**（不是密文长度 52）。"""
+        h = upload_server
+        status, _ = h.put(0, b"0123")
+        assert status == 200
+        prog = [f for f in h.drain_frames() if f.get("type") == "upload_progress"]
+        assert prog, "PUT 之后没收到任何进度帧"
+        assert all(f["sid"] == h.sid for f in prog)
+        assert [f["received"] for f in prog] == sorted(
+            f["received"] for f in prog), "received 必须单调不减"
+        assert prog[-1]["received"] == 4, "必须是明文字节数（密文那片是 4 + 48）"
+
+    def test_rejected_chunk_pushes_no_progress(self, upload_server):
+        """跳片（409）走排空分支、不进读循环 ⇒ 一个进度帧都不该有。
+
+        给被拒的请求推进度，会让界面显示「收到了 4 字节」而其实一个字节都没落盘。
+        """
+        h = upload_server
+        status, _ = h.put(4, b"4567")          # offset 4 ≠ received 0 ⇒ 跳片
+        assert status == 409
+        assert not [f for f in h.drain_frames()
+                    if f.get("type") == "upload_progress"]
+
+    def test_progress_is_not_the_authority(self, upload_server):
+        """完成信号**只在 HTTP 响应里**（`done` 字段）：WS 上不许出现 done 帧。
+
+        满格由最后一片的响应解锁，绝不由进度帧 —— 这是「进度条满了、服务端还在等」
+        那道观感的最后防线（§5.13 红线 1）。
+        """
+        h = upload_server
+        h.put(0, b"0123")                      # size=10，远没传完
+        types = {f.get("type") for f in h.drain_frames()}
+        assert "done" not in types
+        assert types <= {"upload_progress"}

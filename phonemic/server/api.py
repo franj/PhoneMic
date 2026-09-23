@@ -30,6 +30,7 @@ from phonemic.server.upload import (
     CHUNK_OVERHEAD,
     PHOTO_MAX_SIZE,
     UPLOAD_CHUNK_SIZE,
+    ChunkProgressThrottle,
     UploadManager,
 )
 from phonemic.tunnel.e2ee import AUTH_TIMEOUT, APPROVAL_TIMEOUT, SecureChannel
@@ -59,6 +60,18 @@ class ConnectionManager:
         self.active_websocket = None
         self.active_session = None
         self.bridge = bridge
+
+        # 发送串行化（docs/http-upload-design.md §5.13）：`_send_frame` 靠它把
+        # 「取 seq + 编码 + send」包成原子段。
+        # ⚠️ 引入第二个发送方（HTTP handler 推 `upload_progress`）之后，这把锁
+        # **不是可选优化**：`wrap()` 是同步的、不会拿到重复 seq，但 `await
+        # send_bytes` 是个让出点 ⇒ 两个任务的帧可能以**相反顺序**落到线上，
+        # 接收端看到的就是重放／解密失败。
+        # 每连接一把即可（本管理器是单活动连接模型）；生命周期随管理器。
+        # ⚠️ 因此**别让 `_manager` 跨事件循环复用**：asyncio.Lock 在首次 await 时绑定
+        # loop，之后换 loop 会抛 RuntimeError。生产只有一个 loop，且 `set_bridge()`
+        # 每次都重建管理器（测试里各 fixture 都靠这条），这条约束自然成立。
+        self.send_lock = asyncio.Lock()
 
         # 配置热重载支持
         self.sm = SettingsManager.instance()
@@ -539,16 +552,25 @@ def get_secret_path() -> str:
 async def _send_frame(websocket, message: dict) -> None:
     """发送一帧消息，按该连接自身的会话状态决定是否加密。
 
-    线上字节一律由 session.wrap() 产出：加密模式整帧加密，明文模式 msgpack
-    编码，没有外层信封。加解密上下文取自连接自己的 SecureSession，而非共享
-    对象，因此处于握手中的新连接不会改变活动连接的加密状态。
+    线上字节一律由 session.wrap() 产出：整帧加密，没有外层信封。加解密上下文取自
+    连接自己的 SecureSession，而非共享对象，因此处于握手中的新连接不会改变活动
+    连接的加密状态。未进入活动状态的连接（握手早期）没有 session，那一档走
+    frame_encode 发明文帧——`auth_challenge` / `sealed` 正是这种情况（它们本身就
+    是「明文帧装着密文」）。
+
+    ⚠️ ``wrap()`` **必须留在锁内**：它内部会给 provider 的 ``_tx_seq`` 加一，而
+    紧随其后的 ``send_bytes`` 是一个让出点。若在锁外取号，两个任务就可能出现
+    「A 取到 5、B 取到 6，但 B 先发出去」⇒ 线上顺序颠倒、接收端判重放（§5.13）。
+    第二个发送方是 HTTP handler 里的进度帧推送（`_read_upload_body`）。
     """
-    session = _manager.session_for(websocket) if _manager else None
-    if session is not None:
-        payload = session.wrap(message)
-    else:
-        payload = frame_encode(message)
-    await websocket.send_bytes(payload)
+    manager = _manager
+    if manager is None:
+        await websocket.send_bytes(frame_encode(message))
+        return
+    async with manager.send_lock:
+        session = manager.session_for(websocket)
+        payload = session.wrap(message) if session is not None else frame_encode(message)
+        await websocket.send_bytes(payload)
 
 
 # ---------- 公共 API：向手机端推送消息 ----------
@@ -1391,6 +1413,20 @@ def _parse_upload_headers(request: Request):
     return offset, length, mac
 
 
+def _make_progress_sender(session):
+    """把「往这条连接的 WS 推一帧 `upload_progress`」包成 ``(sid, received)`` 回调。
+
+    节流器在 ``server/upload.py``，它不 import 本模块（会成环）⇒ 发送动作由这里注入。
+    """
+    async def _send(sid: str, received: int) -> None:
+        await _send_frame(session.websocket, {
+            "type": "upload_progress",
+            "sid": sid,
+            "received": received,
+        })
+    return _send
+
+
 async def _read_upload_body(request: Request, session, expected: int) -> Optional[bytes]:
     """把整片密文收进内存（供解密）；``None`` = 对端在收完之前把连接关掉了。
 
@@ -1409,7 +1445,16 @@ async def _read_upload_body(request: Request, session, expected: int) -> Optiona
     伪装成「解密失败」，是最容易带偏排查方向的一类假信号。谁走的就让谁去清理：
     取消走 WS 的 ``upload_cancel``、断连走 ``abort_for_conn``、都没有就等 TTL；
     HTTP 层只管别把异常漏给 uvicorn 打出一整屏栈。
+
+    ⚠️ **片内进度也在这里推**（§5.13）：必须在读循环里推，不能等 ``commit_chunk``
+    —— 那是「整片收完、一次性 ``received += 15MB``」的阶梯，拿它当进度就只在整片
+    落地时跳一格，而 CF 上一片要两三分钟。节流器**每片新建**：跨片会重复发一帧
+    （值等于上一片响应里的 ``received``，客户端取 max 后无变化），代价一帧，换来
+    它不必挂在会话上、生命周期与本次 PUT 严格一致。
     """
+    throttle = ChunkProgressThrottle(
+        session.sid, _make_progress_sender(session),
+    )
     buf = bytearray()
     try:
         async for chunk in request.stream():
@@ -1420,6 +1465,12 @@ async def _read_upload_body(request: Request, session, expected: int) -> Optiona
             if len(buf) + len(chunk) > expected:
                 continue                      # 超出声明长度（防御，正常不会发生）
             buf += chunk
+            # ⚠️ 单位要换算：`len(buf)` 是**密文**字节数，而 `received` 的语义是**明文**
+            # 字节数（HTTP 响应里那个值、会话累计、文件大小，三者同单位）。密文 =
+            # nonce(24) ‖ AEAD(seq(8) ‖ 明文) ‖ tag(16)，所以这里减掉整份固定开销是
+            # **保守**估计（尾部 tag 那 16 字节本来就不对应明文），误差 ≤ 48 字节 ——
+            # 对 15MB 的片、乃至对百分比都无意义，但方向必须是「不超报」。
+            await throttle.note(session.received + max(0, len(buf) - CHUNK_OVERHEAD))
     except ClientDisconnect:
         return None
     return bytes(buf)
