@@ -4227,7 +4227,9 @@
         static get FRAME_RESERVE() { return 64 * 1024; }       // 安全边距：msgpack 头 + nonce + MAC + seq
         static get HIGH_WATER() { return 4 * 1024 * 1024; }    // 发送缓冲高水位：超过则暂停等排空
         static get LOW_WATER() { return 1 * 1024 * 1024; }     // 降到低水位再继续发
-        static get MAX_INFLIGHT() { return 1; }                // 在途未确认块数上限：1 = 停等 ← 调吞吐改这一行
+        // 在途未确认块数上限（滑动窗口）：1 = 严格停等（收到上一块 ack 才发下一帧）；
+        // >1 = 允许 N 块同时在途（收到 ack(n) 即可发 (n+1)…(n+N)）。调吞吐改这一行。
+        static get MAX_INFLIGHT() { return 2; }
         // 三个超时（CHUNK_ACK / CANCEL_ACK / HELLO）随链路取，见上面的 LINK_LAN / LINK_CF
         static get END_ACK_TIMEOUT() { return 180000; }        // end 确认的保险超时（ms），见 _waitEndAck
         static get RECONNECT_WAIT() { return 6000; }           // 未连接时先等重连的时间（ms），1s 退避足够重试数轮
@@ -4361,6 +4363,10 @@
             font-size: 12px;
             color: #6b7280;
         }
+        .file-panel .fp-speed {
+            font-size: 12px;
+            color: #6b7280;
+        }
         .file-panel .fp-cancel {
             min-width: 120px;
             height: 44px;
@@ -4436,6 +4442,7 @@
                 // 停等闸门的放行依据是**块序号**：尾块不满，received 推不出块号
                 if (typeof f.n === 'number') {
                     this._ackedChunkN = Math.max(this._ackedChunkN, f.n);
+                    this._recordAck(f.n, this._ackedBytes);   // 记每块 ack 时刻，推算端到端速率
                 }
                 this._progressTick();
             });
@@ -4474,6 +4481,7 @@
                         <div class="fp-name"></div>
                         <div class="fp-bar"><div class="fp-fill"></div></div>
                         <div class="fp-pct">0%</div>
+                        <div class="fp-speed"></div>
                         <button type="button" class="fp-cancel" data-i18n="panel_file_cancel"></button>
                     </div>
                     <div class="pv-hint" data-i18n="panel_hint_file"></div>
@@ -4488,6 +4496,7 @@
             this.nameEl = this.root.querySelector('.fp-name');
             this.fillEl = this.root.querySelector('.fp-fill');
             this.pctEl = this.root.querySelector('.fp-pct');
+            this.speedEl = this.root.querySelector('.fp-speed');
             this.cancelBtn = this.root.querySelector('.fp-cancel');
         }
 
@@ -4577,6 +4586,8 @@
             this._ackedBytes = 0;
             this._ackedChunkN = -1;      // -1 = 一块都没被 ack（停等闸门基线，见 _waitChunkAck）
             this._gateGaveUp = false;    // ack 通道失灵后退回流水线，见 _waitChunkAck
+            this._ackLog = new Map();    // 每块 data ack 的 {received, t}，用于推算端到端速率
+            this._speed = 0;             // 当前端到端速率（字节/秒），见 _recordAck / _renderSpeed
             this._shownPct = 0;
             this._endConfirmed = false;
             this._awaitingAck = false;
@@ -4584,6 +4595,7 @@
             // 取消与收尾各 abort 一次，谁先到都行 —— 等待的结算本身是幂等的。
             this._tx = new AbortController();
             this._state = 'sending';
+            this._startT = performance.now();   // 全程平均速率基线：从真正开始发送那一刻计时
             this._setLock(true);          // 传输期间锁死面板切换与其它操作
 
             // 发送期间需要看到进度与取消：若附件面板收起/在别的 tab，先切回本面板
@@ -4614,7 +4626,7 @@
             for (let n = 0; n < total; n++) {
                 if (this._cancelRequested) return;   // 用户已取消，_cancel 负责收尾
                 if (!this.transport.getConnected()) { this._finish(false); return; }
-                // 停等闸门：在途未确认块数不得超过 MAX_INFLIGHT（=1 即「收到上一块 ack 才发下一帧」）
+                // 滑动窗口闸门：在途未确认块数不得超过 MAX_INFLIGHT（=1 即「收到上一块 ack 才发下一帧」，>1 即允许 N 块同时在途）
                 if (!(await this._waitChunkAck(n - FilePanel.MAX_INFLIGHT))) {
                     if (this._cancelRequested) return;             // 用户已取消：_cancel 负责收尾
                     if (this._state === 'sending') this._finish(false);   // 断连：ACK 不会再来
@@ -4649,7 +4661,7 @@
         }
 
         /**
-         * 进度 = PC 已确认字节 + 至多 1 块的「乐观量」，见协议 §9。
+         * 进度 = PC 已确认字节 + 至多 MAX_INFLIGHT 块的「乐观量」，见协议 §9。
          *
          * 真实交付量被有序信道夹在两个可观测边界之间：
          *   下界 ackedBytes           —— PC 已落盘，板上钉钉
@@ -4893,6 +4905,7 @@
             this.cancelBtn.disabled = true;
             this.fillEl.style.width = this._shownPct + '%';
             this.pctEl.textContent = this._shownPct + '% · ' + t('panel_file_canceling');
+            if (this.speedEl) this.speedEl.textContent = '';
         }
 
         /**
@@ -4914,7 +4927,13 @@
             this._setLock(false);
             if (result === true) {
                 // 完成：file 深绿、photo 也用深绿，靠文案/图标（📄/🖼️）区分
-                this.chat.addFileMessage(t(this._bubbleKey('done'), { name: file.name }), 'done', null, kind);
+                // 全程平均速率 = 总字节 ÷ 总耗时（从开始发送到落盘确认），KB/s ↔ MB/s 自动切换
+                const elapsed = (performance.now() - this._startT) / 1000;   // 秒
+                const avgBps = elapsed > 0 ? file.size / elapsed : 0;
+                const speedText = avgBps > 0 ? FilePanel._formatSpeed(avgBps) : '';
+                this.chat.addFileMessage(
+                    t(this._bubbleKey('done'), { name: file.name, speed: speedText }),
+                    'done', null, kind);
                 return;
             }
             // 失败与「未确认」共用灰色气泡样式；file 可点重发（核对后没到就重发），photo 纯结果展示
@@ -4929,6 +4948,7 @@
             this.cancelBtn.disabled = false;   // 取消在飞时会置灰，收尾必须复原
             this._file = null;
             this._awaitingAck = false;
+            if (this.speedEl) this.speedEl.textContent = '';
         }
 
         /** 只重绘进度（百分比取自 _shownPct），文案随「是否在等 end ack」切换 */
@@ -4948,6 +4968,51 @@
             if (pct >= 100 && !this._endConfirmed) pct = 99;
             this._shownPct = Math.max(this._shownPct, pct);   // 单调不减：背压会让本地估算回落
             this._renderPct();
+        }
+
+        /**
+         * 记录每块 data ack 的累计字节与时间，据此推算**端到端**速率。
+         *
+         * 速率 = (ack(n).received − ack(n−MAX_INFLIGHT).received) ÷ (两次 ack 的真实时间差)。
+         * 分子正好是「在途窗口」那 MAX_INFLIGHT 块被 PC 端确认所收到的字节，分母是这段
+         * 时间——它量的是「PC 真正收完一个窗口」的吞吐，不受本地 bufferedAmount 盲区影响
+         * （bufferedAmount 只覆盖浏览器→网络栈，再往后全是盲区）。`performance.now()` 单调，
+         * 比 `Date.now()` 不受系统时间回拨干扰。
+         *
+         * 前 MAX_INFLIGHT 块尚无「窗口起点」可对照，此时算不出速率（显示留空）；之后每块
+         * 刷新一次。低水位条目及时删除，避免随块数无限增长。
+         */
+        _recordAck(n, received) {
+            const now = performance.now();
+            const log = this._ackLog;
+            log.set(n, { received, t: now });
+            const old = log.get(n - FilePanel.MAX_INFLIGHT);
+            if (old) {
+                const dt = (now - old.t) / 1000;     // 秒
+                const db = received - old.received;   // 字节
+                if (dt > 0 && db > 0) {
+                    this._speed = db / dt;           // 字节/秒
+                    this._renderSpeed();
+                }
+            }
+            // 只保留窗口所需的旧条目（n − MAX_INFLIGHT 这一档），更早的已无用
+            for (const k of log.keys()) {
+                if (k < n - FilePanel.MAX_INFLIGHT) log.delete(k);
+            }
+        }
+
+        /** 把当前速率刷到进度区（KB/s ↔ MB/s 自动切换）。无速率时留空。 */
+        _renderSpeed() {
+            if (this.speedEl) {
+                this.speedEl.textContent = this._speed > 0
+                    ? FilePanel._formatSpeed(this._speed) : '';
+            }
+        }
+
+        /** 速率格式化：≥ 1 MB/s 显示 MB/s，否则显示 KB/s（1024 进制），保留 1 位小数。 */
+        static _formatSpeed(bps) {
+            if (bps >= 1024 * 1024) return (bps / (1024 * 1024)).toFixed(1) + ' MB/s';
+            return (bps / 1024).toFixed(1) + ' KB/s';
         }
     }
 
