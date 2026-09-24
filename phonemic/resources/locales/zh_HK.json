@@ -22,7 +22,7 @@
     "input_direct": "模擬鍵盤（即時）",
     "algo_xsalsa20": "XSalsa20",
     "algo_xchacha20": "XChaCha20",
-    "auth_tofu": "手動審批",
+    "auth_tofu": "人工認證",
     "auth_url_fragment": "掃碼認證",
     "approval_title": "認證請求",
     "approval_detail": "來自 {ip} · 識別碼一致再點「允許」",

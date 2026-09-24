@@ -22,7 +22,7 @@
     "input_direct": "模拟键盘（实时）",
     "algo_xsalsa20": "XSalsa20",
     "algo_xchacha20": "XChaCha20",
-    "auth_tofu": "手动审批",
+    "auth_tofu": "人工认证",
     "auth_url_fragment": "扫码认证",
     "approval_title": "认证请求",
     "approval_detail": "来自 {ip} · 识别码一致再点「允许」",
