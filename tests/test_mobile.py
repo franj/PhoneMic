@@ -44,6 +44,31 @@ MOBILE_I18N = json.loads(
 )["mobile"]
 
 
+def _bubble_re(key: str, **subs) -> "re.Pattern[str]":
+    """把 i18n 文案编译成「整条匹配」的正则，用于断言气泡文案。
+
+    文案里的占位符分两类：测试自己能填的（`{name}`，通过 `subs` 给出）和**运行期才知道**
+    的（`{speed}` —— 完成气泡里的全程平均速率，由 `FilePanel._formatSpeed` 现算）。后者
+    一律放宽成 `.*?`。
+
+    ⚠️ 不这么做的后果不是「报错」而是**静默失效**：直接拿
+    `MOBILE_I18N[...].replace("{name}", ...)` 去比，字面量里还留着一个 `{speed}`，
+    于是 `in bubbles` 永远为假（正向断言假失败），`not in bubbles` 永远为真
+    （负向断言退化成空断言——「不该出现的成功气泡」再出现也拦不住）。
+    """
+    pat = re.escape(MOBILE_I18N[key])
+    for name, value in subs.items():
+        pat = pat.replace(re.escape("{" + name + "}"), re.escape(str(value)))
+    pat = re.sub(r"\\\{[a-z_]+\\\}", ".*?", pat)     # 剩余占位符放宽
+    return re.compile("^" + pat + "$")
+
+
+def _any_bubble(bubbles, key: str, **subs) -> bool:
+    """气泡文案列表里是否存在与 i18n 文案匹配的一条。"""
+    pattern = _bubble_re(key, **subs)
+    return any(pattern.match(b) for b in bubbles)
+
+
 def _b64url_nopad(raw: bytes) -> str:
     """URL-safe base64 去 padding——与 sodium.base64_VARIANT_URLSAFE_NO_PADDING 一致。"""
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -61,7 +86,7 @@ window.__mockWS = {
     instances: [],
     // 模拟「一个正常工作的 PC」：收到 data 块异步回逐块 ack、收到 cancel 回取消回执、
     // 收到 hello 回显探活号。默认关闭——需要走到 end 的用例显式 autoAck(true)
-    //（停等生效后没有 ack 就发不出第 2 块；取消生效后没有回执就解锁不了界面）。
+    //（窗口闸门生效后没有 ack 就填不满窗口、走不到 end；取消生效后没有回执就解锁不了界面）。
     autoAckFn: null,
     received: {},
     // mock 侧 Provider：与客户端 secure 的 Provider **共享同一会话密钥**，
@@ -528,7 +553,7 @@ def test_transfer_chunk_size_follows_file_size(mobile_page):
     """分块按体积自适应（协议 §9）：3MB → 12 块 × 256KB。
 
     夹具页面跑在 localhost ⇒ 局域网档，上限 LINK_LAN.chunkMax = 1MB。
-    这里接管 ``transport.sendFrame`` 同步回 ack —— 停等生效后，没有 ack 就发不出第 2 块。
+    这里接管 ``transport.sendFrame`` 同步回 ack —— 窗口闸门生效后，没有 ack 就走不到 end。
     （FilePanel 不走 onCommand 回调注入，帧出口就是 ``panel.transport.sendFrame``。）
     """
     page = mobile_page
@@ -634,7 +659,7 @@ class TestLinkAwareChunkCap:
 class TestLinkAwareTimeouts:
     """超时也按链路取值（协议 §9）：CF 上行窄、排队深，实测一块 256KB 连回执要 8~10s。
 
-    拿局域网的短超时去等它，正常等待会被误判成超时——白白发探活、白白把停等降级；
+    拿局域网的短超时去等它，正常等待会被误判成超时——白白发探活、白白把滑动窗口降级；
     反过来把 CF 的宽超时套在局域网上，则「PC 真卡死了」这种异常迟迟发现不了。
 
     断言的是**关系**与**来源**，不是具体数字：数字是留给人的调参旋钮，改它不该挂测试；
@@ -716,19 +741,23 @@ def test_config_message_sets_max_frame_size(mobile_page):
     assert page.evaluate("() => window._filePanel.constructor.serverMaxFrame") == 0
 
 
-class TestStopAndWait:
-    """停等闸门：没收到上一块的 ack 就不发下一帧（协议 §9）。
+class TestSlidingWindow:
+    """滑动窗口闸门：在途未确认块数到达 MAX_INFLIGHT 就停住不发（协议 §9）。
 
     动机：`bufferedAmount` 只覆盖「浏览器 → 网络栈」，数据一旦离开浏览器（手机内核、
     无线在途、CF 回源、PC 内核、写盘）全是本端盲区 ⇒ 浏览器侧能一路「发得出去」而链路
     早已积压，表现为「bufferedAmount ≈ 0 却传得极慢、取消后很久才停」。等对端 ack 才是
-    真正端到端的节流：在途量被钉死在 MAX_INFLIGHT 块以内。
+    真正端到端的节流：在途量被钉死在 MAX_INFLIGHT 块以内（=1 即停等，>1 即滑动窗口）。
+
+    ⚠️ 断言一律从页面读 `MAX_INFLIGHT`（`_window`），**不写死 1 或 2**。它是 `FilePanel`
+    上的可调常量，写死了下次再调窗口就会重演「实现改了、用例没跟上」——本类正是从
+    「停等（=1）」演进过来的。
     """
 
     FAKE = ("{name: 'sw.bin', size: 3 * 1024 * 1024,"
             " slice: (a, b) => new Blob([new Uint8Array(b - a)])}")
     ID = 1                      # mobile_page 上首次传输的 id（_start 里自增得到）
-    CHUNK = 256 * 1024          # 3MB / 12 块
+    CHUNK = 256 * 1024          # 3MB / 12 块（远多于一个窗口，才看得出闸门在起作用）
 
     def _start_async(self, page):
         page.evaluate(
@@ -736,9 +765,21 @@ class TestStopAndWait:
             f"{self.FAKE}, 'file'); }}"
         )
 
+    def _window(self, page):
+        """当前滑动窗口大小 = 在途未确认块数上限，从页面读而不写死。"""
+        return page.evaluate("() => window._filePanel.constructor.MAX_INFLIGHT")
+
     def _data_count(self, page):
         return page.evaluate(
             "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length")
+
+    def _wait_data_count(self, page, count, timeout=30000):
+        """等已发出的 data 帧恰好 `count` 条。"""
+        page.wait_for_function(
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length"
+            f" === {count}",
+            timeout=timeout,
+        )
 
     def _ack(self, page, n):
         """模拟 PC 对第 n 块的逐块 ack（累计 received 取前 n+1 块）。"""
@@ -748,41 +789,41 @@ class TestStopAndWait:
             f" received:{(n + 1) * self.CHUNK}}})"
         )
 
-    def test_no_ack_no_next_chunk(self, mobile_page):
-        """核心断言：一个 ack 都不回时只发得出第 0 块（停在闸门上）。"""
+    def test_no_ack_fills_only_the_window(self, mobile_page):
+        """核心断言：一个 ack 都不回时，只发得出「一个窗口」的块，然后停在闸门上。"""
         page = mobile_page
+        window = self._window(page)
         self._start_async(page)
-        page.wait_for_function(
-            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
-        page.wait_for_timeout(400)      # 若无停等，这段时间够把 12 块全推出去
-        assert self._data_count(page) == 1
+        self._wait_data_count(page, window)
+        page.wait_for_timeout(400)      # 若无闸门，这段时间够把 12 块全推出去
+        assert self._data_count(page) == window
         assert page.evaluate(
             "() => window.__mockWS.sentMessages.some(m => m.a === 'end')") is False
 
     def test_one_ack_releases_exactly_one_chunk(self, mobile_page):
-        """放行一块 ack 只多发一块 —— 严格「在途 ≤ 1 块」。"""
+        """放行一块 ack 只再多发一块 —— 严格「在途 ≤ MAX_INFLIGHT 块」。"""
         page = mobile_page
+        window = self._window(page)
         self._start_async(page)
-        page.wait_for_function(
-            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+        self._wait_data_count(page, window)
 
+        # 块 0 被 ack ⇒ 恰好解锁第 `window` 块（后者的闸门条件是 ack(n − MAX_INFLIGHT) = ack(0)）
         self._ack(page, 0)
-        page.wait_for_function(
-            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 2")
-        page.wait_for_timeout(200)      # 再等等：不该冒出第 3 块（第 1 块还没 ack）
-        assert self._data_count(page) == 2
+        self._wait_data_count(page, window + 1)
+        page.wait_for_timeout(200)      # 再等等：不该冒出第 window+1 块（块 1 还没 ack）
+        assert self._data_count(page) == window + 1
 
     def test_disconnect_while_waiting_for_chunk_ack_finishes(self, mobile_page):
         """等块 ack 期间断连：ACK 不会再来，必须收尾，不能卡死在闸门上。"""
         page = mobile_page
+        window = self._window(page)
         page.evaluate("() => { window.__wsClient.connect = () => {}; }")   # 掐掉重连
         self._start_async(page)
-        page.wait_for_function(
-            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+        self._wait_data_count(page, window)
 
         page.evaluate("window.__mockWS.triggerClose()")
         page.wait_for_function("() => window._filePanel._state === 'idle'", timeout=3000)
-        assert self._data_count(page) == 1          # 没有继续把剩余块推出去
+        assert self._data_count(page) == window     # 没有继续把剩余块推出去
         assert page.evaluate("() => window._filePanel._gateGaveUp") is False  # 是断连，不是超时降级
 
     def test_ack_timeout_degrades_to_pipeline(self, mobile_page):
@@ -843,7 +884,7 @@ class TestStartFrameFailure:
         bubbles = page.evaluate(
             "() => Array.from(document.querySelectorAll('.message')).map(m => m.textContent)")
         assert self.FAILED in bubbles
-        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "sf.bin") not in bubbles
+        assert not _any_bubble(bubbles, "bubble_file_done", name="sf.bin")
 
 
 class TestEndAck:
@@ -859,8 +900,8 @@ class TestEndAck:
     def _send_async(self, page, auto_ack=True):
         """起一次发送但不 await：返回时数据已全部交出，正卡在等 end ack。
 
-        auto_ack=True 让 mock 对每个 data 块回逐块 ack —— 停等生效后，
-        没有 ack 就发不出第 2 块，也就永远走不到 end。
+        auto_ack=True 让 mock 对每个 data 块回逐块 ack —— 窗口闸门生效后，
+        没有 ack 就填不满窗口、走不到 end。
         """
         page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
         page.evaluate(
@@ -879,7 +920,7 @@ class TestEndAck:
         page = mobile_page
         self._send_async(page)
 
-        # 数据已全部交出、块 ack 也全部回来了（停等保证在途 ≤ 1 块），但 end ack 未到
+        # 数据已全部交出、块 ack 也全部回来了（窗口保证在途 ≤ MAX_INFLIGHT 块），但 end ack 未到
         # ⇒ 封顶 99% + 文案「等待电脑确认」，**绝不放行 100% 与成功气泡**。
         assert page.evaluate("() => window._filePanel._shownPct") == 99
         assert page.evaluate("() => window._filePanel._endConfirmed") is False
@@ -892,7 +933,7 @@ class TestEndAck:
         page.wait_for_function("() => window._filePanel._state === 'idle'")
 
         assert page.evaluate("() => window._filePanel._shownPct") == 100
-        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") in self._bubbles(page)
+        assert _any_bubble(self._bubbles(page), "bubble_file_done", name="x.bin")
 
     def test_local_estimate_cannot_outrun_ack_by_more_than_one_chunk(self, mobile_page):
         """真机实测回归：10.1MB 的 jpg，手机已全部交出，PC 只 ack 了 2MB。
@@ -966,7 +1007,7 @@ class TestEndAck:
 
         bubbles = self._bubbles(page)
         assert MOBILE_I18N["bubble_file_unknown"].replace("{name}", "x.bin") in bubbles
-        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") not in bubbles
+        assert not _any_bubble(bubbles, "bubble_file_done", name="x.bin")
 
     def test_disconnect_while_awaiting_ack_reports_failure(self, mobile_page):
         """等 ack 期间连接断了：ACK 不会再来，立刻报失败，不让用户干等。"""
@@ -978,7 +1019,7 @@ class TestEndAck:
 
         bubbles = self._bubbles(page)
         assert MOBILE_I18N["bubble_file_failed"].replace("{name}", "x.bin") in bubbles
-        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "x.bin") not in bubbles
+        assert not _any_bubble(bubbles, "bubble_file_done", name="x.bin")
 
 
 class TestCancelAck:
@@ -997,7 +1038,7 @@ class TestCancelAck:
 
     def _start_async(self, page, auto_ack, until="data"):
         """起一次发送。until="data" 停在「第 0 块已发出、闸门未放行」处；
-        until="end" 一路发到 end（需 auto_ack=True，否则停等发不出第 2 块）。"""
+        until="end" 一路发到 end（需 auto_ack=True，否则填不满窗口、走不到 end）。"""
         page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
         page.evaluate(
             "() => { window.__sendP = window._filePanel._start("
@@ -1160,7 +1201,7 @@ class TestCancelAck:
         bubbles = self._bubbles(page)
         assert [b for b in bubbles if b == self.CANCELED] == [self.CANCELED], \
             "「已取消」气泡只该出现一次"
-        assert MOBILE_I18N["bubble_file_done"].replace("{name}", "cx.bin") not in bubbles
+        assert not _any_bubble(bubbles, "bubble_file_done", name="cx.bin")
         assert self._locked(page) is False
 
 
@@ -1574,14 +1615,20 @@ class TestLocalizedWaits:
     )
 
     def _start_at_gate(self, page, auto_ack=False):
-        """起一次发送，停在「第 0 块已发出、停等闸门未放行」处。"""
+        """起一次发送，停在「窗口已填满、闸门正等着 ack」处。
+
+        等的必须是**窗口填满**（= `MAX_INFLIGHT` 块）而不是「≥ 1 块」：只有块数涨到窗口
+        上限，发送循环才会走到 `_waitChunkAck` 并挂上闸门的那个 `ack` 订阅 —— 下面用例断
+        言的 `ack` 槽数（常驻 1 + 闸门 1）依赖的正是它。撞在窗口没填满的瞬态上会数错。
+        """
         page.evaluate(f"() => window.__mockWS.autoAck({str(auto_ack).lower()})")
         page.evaluate(
             "() => { window.__sendP = window._filePanel._start("
             f"{self.FAKE}, 'file'); }}"
         )
         page.wait_for_function(
-            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length === 1")
+            "() => window.__mockWS.sentMessages.filter(m => m.a === 'data').length"
+            " === window._filePanel.constructor.MAX_INFLIGHT")
 
     def _cancel_ack(self, page):
         page.evaluate(
@@ -1625,7 +1672,7 @@ class TestLocalizedWaits:
         _set_wait_timeouts(page, cancel_ms=200, hello_ms=5000)
         self._start_at_gate(page)
         before = page.evaluate(self.SLOTS)
-        assert before == {"ack": 2, "hello": 0}, before   # 常驻 1 + 停等闸门 1
+        assert before == {"ack": 2, "hello": 0}, before   # 常驻 1 + 窗口闸门 1
 
         page.evaluate("() => window._filePanel._cancel()")
         during = page.evaluate(self.SLOTS)

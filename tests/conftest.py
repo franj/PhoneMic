@@ -14,8 +14,23 @@
 
 import base64
 import json
+import os
 import socket
 from hashlib import blake2b
+
+# Qt 测试一律跑在 offscreen 平台：窗口只在内存里，屏幕上什么都不弹。
+#
+# 起因：test_dashboard_mode.py 有一批用例必须 show() 之后才有真实几何（isVisible /
+# 尺寸断言），而 show() 会真的在桌面弹出主窗口——一个文件三十来个用例，跑一遍就像
+# 有人反复开关窗口。offscreen 平台下 isVisible()、布局几何、字体度量语义与真平台
+# 一致，断言照常成立，但不会创建任何可见窗口。
+#
+# 必须早于 QApplication 构造：Qt 只在那一刻读这个变量，而 conftest 在收集阶段就被
+# 导入，早于任何 fixture 创建 QApplication。
+#
+# 用 setdefault 而非直接赋值：偶尔要肉眼看一眼界面时，先设 QT_QPA_PLATFORM=windows
+# 覆盖即可，这里不会把你的选择盖掉。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from nacl.bindings import crypto_scalarmult
 from nacl.public import PrivateKey, PublicKey, SealedBox
