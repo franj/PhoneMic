@@ -215,6 +215,10 @@ class ApprovalRequest:
     """一条待审批连接。
 
     ``id`` 是给界面用的身份：按钮回调带回来的就是它，而不是"当前那条"。
+    ``queue_seq`` 是**队列位置**（见 ``ApprovalRegistry.items()``），只用于排序、
+    不进快照。它不一定等于"这条连接什么时候来的"：同 IP 重连会**借走**被它取代
+    那条的位置，让界面上的那条原地换码、而不是往下跳一位（见 ``request()``）。
+    所以别拿 ``queue_seq`` 当时间用（要时间看 ``created``）。
     ``future`` 的结果是 ApprovalDecision，由结算方（用户点击 / 超时 / 对端断开）
     写入；只有仍在注册表里的请求才允许写入，因此结算天然幂等。
     """
@@ -224,6 +228,7 @@ class ApprovalRequest:
     ip: str
     websocket: Any
     created: float
+    queue_seq: int
     deadline: float
     future: asyncio.Future
     state: str = "pending"
@@ -254,12 +259,25 @@ class ApprovalRegistry:
 
     def __init__(self) -> None:
         self._requests: Dict[str, ApprovalRequest] = {}
+        # 队列位置号，只增不减。同 IP 重连会借走旧号，所以它不连续——那不重要，
+        # 它只回答"谁排在谁前面"。
+        self._seq = 0
 
     # ---- 查询 ----
 
     def items(self) -> List[ApprovalRequest]:
-        """待审批请求，**新的在前**——界面只显示第一条（见 dashboard）。"""
-        return sorted(self._requests.values(), key=lambda r: r.created, reverse=True)
+        """待审批请求，**排队最久的在前**——界面只显示第一条（见 dashboard）。
+
+        按 ``queue_seq`` 升序（＝注册先后），刻意**不是**"谁最新谁在前"。这条不只
+        是观感，它守的是人工审批本身：队首那个 4 位数字是用户低头看手机、逐位核对、
+        再决定按不按的那一个；界面在核对途中把它换掉，用户就会为"自己核对过的码"
+        批准"另一条请求"——等于把核对这一步作废。而"新来的排到后面等着"的代价，
+        只是它多等一次结算（队首被处理后立刻轮到它，否则等自己的 30s）。
+
+        于是队首只在**被结算**时换人：用户点掉、超时、对端断开。同 IP 重连是
+        例外中的例外——它借位置，所以连"队首是谁"都不变，只换了识别码。
+        """
+        return sorted(self._requests.values(), key=lambda r: r.queue_seq)
 
     def pending_count(self) -> int:
         return len(self._requests)
@@ -270,36 +288,57 @@ class ApprovalRegistry:
 
     # ---- 变更 ----
 
-    def request(self, pin: str, ip: str, websocket, timeout: float) -> ApprovalRequest:
-        """登记一条新请求，并让同 IP 的旧请求让位。
+    def _next_seq(self) -> int:
+        """取一个新的队列位置号——只有"新占一个位置"才取它。"""
+        self._seq += 1
+        return self._seq
 
-        同 IP 取代：手机刷新页面 / 网络抖动重连时，旧那条已经没人在等（屏幕上
+    def request(self, pin: str, ip: str, websocket, timeout: float) -> ApprovalRequest:
+        """登记一条新请求；同 IP 的旧请求让位，但**位置留给新来的这一条**。
+
+        同 IP 让位：手机刷新页面 / 网络抖动重连时，旧那条已经没人在等（屏幕上
         显示的是新页面），留着只会占着队列、把并发数抬过风险提示的阈值制造误报。
         只让 **pending** 让位——已认证的连接不在这张表里，绝不能提前踢：新连接
         还没认证，提前踢掉旧的就成了一段时间内谁都连不上（抢占由
         ``ConnectionManager.connect()`` 在认证成功后完成）。
+
+        **位置不动**：新连接借走被取代者的 ``queue_seq``，于是界面上那条**原地
+        换码**，不往下跳一位。这是刷新场景的要害——用户对"自己刷新了页面"是有
+        预期的，对"屏幕上的数字忽然变成另一台设备的"没有预期，而后者正是他可能
+        按错的那一下（``items()`` 里那条时序）。deadline / created 仍按**本次**连接
+        重算，不继承旧的：手机端 35s 预算从它自己发 auth 那刻起算，继承旧 deadline
+        会让两边错位（服务端可能只剩 3s、手机还有 35s，用户核对完点「允许」时
+        PC 早已超时）。
         """
         loop = asyncio.get_running_loop()
         now = loop.time()
-        self._supersede(
+        replaced = self._supersede(
             lambda other: other.ip == ip and other.websocket is not websocket,
             f"same-ip:{ip}",
         )
+        if replaced:
+            # 原地刷新：借最靠前的那个位置（同 IP 同时最多一条，取 min 只是不依赖这点）
+            seq = min(r.queue_seq for r in replaced)
+        else:
+            seq = self._next_seq()
         req = ApprovalRequest(
             id=secrets.token_hex(8),
             pin=pin,
             ip=ip,
             websocket=websocket,
             created=now,
+            queue_seq=seq,
             deadline=now + timeout,
             future=loop.create_future(),
         )
         # 每连接独立的 deadline：等待时长出自实例自己，而不是一个裸常量，
         # 「超时」于是和「用户点了」「对端走了」一样，只是结算的一种。
         self._requests[req.id] = req
+        # seq 进日志：两条 requested 的 seq 相同 ⇒ 后者是原地刷新（借了前者的位置），
+        # 否则界面上的队首就该换人了——排查"界面为什么没跳"时这是唯一直接证据。
         logger.info(
-            "TOFU approval requested: id=%s pin=%s ip=%s (pending=%d)",
-            req.id, pin, ip, len(self._requests),
+            "TOFU approval requested: id=%s pin=%s ip=%s seq=%d (pending=%d)",
+            req.id, pin, ip, req.queue_seq, len(self._requests),
         )
         self._emit()
         return req
@@ -380,17 +419,21 @@ class ApprovalRegistry:
         )
         return True
 
-    def _supersede(self, predicate, why: str) -> int:
-        """让所有命中 predicate 的待审批请求作废（不推快照，由调用方统一推）。"""
-        n = 0
+    def _supersede(self, predicate, why: str) -> List[ApprovalRequest]:
+        """让所有命中 predicate 的待审批请求作废（不推快照，由调用方统一推）。
+
+        返回被作废的那些：``request()`` 要用它们的 ``queue_seq`` 做"原地刷新"
+        （新连接接管旧位置），所以这里不能只返回条数。
+        """
+        settled: List[ApprovalRequest] = []
         for req in list(self._requests.values()):
             if predicate(req) and self._settle(req, False, "superseded"):
                 logger.info(
                     "TOFU approval superseded: id=%s pin=%s ip=%s (%s)",
                     req.id, req.pin, req.ip, why,
                 )
-                n += 1
-        return n
+                settled.append(req)
+        return settled
 
     def _emit(self) -> None:
         """推全量快照。空队列也要推——「收起面板」由空快照表达，不另发隐藏事件。"""

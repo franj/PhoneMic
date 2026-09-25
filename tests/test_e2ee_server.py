@@ -199,7 +199,7 @@ class PhoneSimulator:
 # ---------- 审批快照辅助 ----------
 #
 # 审批事件的载荷是**全量快照**（``phonemic/server/api.py::ApprovalRegistry``）：
-#   {"items": [{"id","pin","ip","remaining"}, ...], "pending": N}   新的在前，只显示队首
+#   {"items": [{"id","pin","ip","remaining"}, ...], "pending": N}   排队最久的在前，只显示队首
 # 界面按 id 结算，因此测试也必须从快照里取 id，不能凭"当前那条"去猜。
 # remaining 是剩余**秒数**（不是绝对时刻）——这份 bridge 就是跨进程的
 # （QueueEventBridge），给绝对时间戳会直接失效。

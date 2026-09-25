@@ -352,7 +352,7 @@ class TestTofuApprovalUi:
 
     @staticmethod
     def _snap(*pairs):
-        """构造服务端下发的快照（新的在前）。pairs 形如 ("3847", "10.0.0.7")。"""
+        """构造服务端下发的快照（排队最久的在前）。pairs 形如 ("3847", "10.0.0.7")。"""
         return [
             # remaining：服务端给的剩余秒数，界面据此画标题里的倒计时
             {"id": f"req-{i}", "pin": pin, "ip": ip, "remaining": 30}
@@ -523,7 +523,7 @@ class TestApprovalQueue:
         ]
 
     def test_head_is_displayed_when_queue_has_more(self, shown):
-        """队列里有多条时只显示队首（新的在前），标题给出总数。"""
+        """队列里有多条时只显示队首（排队最久的在前），标题给出总数。"""
         shown.show_approval_snapshot(self._snap(
             ("1111", "10.0.0.1"), ("2222", "10.0.0.2"), ("3333", "10.0.0.3")))
 

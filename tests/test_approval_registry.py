@@ -66,8 +66,13 @@ def _snapshots(bridge):
 class TestConcurrency:
     """并发排队与结算。"""
 
-    def test_two_ips_coexist_newest_first(self, env):
-        """不同来源的请求同时在队列里，新的在前（界面只显示队首）。"""
+    def test_two_ips_coexist_oldest_first(self, env):
+        """不同来源的请求同时在队列里，**先来的在前面**（界面只显示队首）。
+
+        队首是用户正在逐位核对的那一条，所以它必须稳定：新连接只能排到后面等，
+        不能把它顶掉。反过来（新的在前）会造出一条真实的误批路径——用户核对 A 的
+        码时 B 进来、界面换成 B 的码，而用户按下的按钮提交的是**队首的 id**。
+        """
         bridge, registry = env
 
         async def scenario():
@@ -78,13 +83,14 @@ class TestConcurrency:
         a, b = _run(scenario())
 
         assert registry.pending_count() == 2
-        assert [r.id for r in registry.items()] == [b.id, a.id]
-        assert [r.pin for r in registry.items()] == ["2222", "1111"]
+        assert [r.id for r in registry.items()] == [a.id, b.id]
+        assert [r.pin for r in registry.items()] == ["1111", "2222"]
+        assert registry.head().id == a.id, "队首是最先来的那条，不被后到的顶掉"
         snap = _snapshots(bridge)[-1]
         assert snap["pending"] == 2
-        assert [i["id"] for i in snap["items"]] == [b.id, a.id]
-        assert [i["pin"] for i in snap["items"]] == ["2222", "1111"]
-        assert [i["ip"] for i in snap["items"]] == ["10.0.0.2", "10.0.0.1"]
+        assert [i["id"] for i in snap["items"]] == [a.id, b.id]
+        assert [i["pin"] for i in snap["items"]] == ["1111", "2222"]
+        assert [i["ip"] for i in snap["items"]] == ["10.0.0.1", "10.0.0.2"]
 
     def test_approving_one_supersedes_the_rest(self, env):
         """批准一条 ⇒ 其余待审批立刻作废。
@@ -121,7 +127,7 @@ class TestConcurrency:
         assert a.future.result() == api_mod.ApprovalDecision(False, "rejected")
         assert not b.future.done(), "B 不该被 A 的拒绝波及（旧实现会误拒 B）"
         assert registry.pending_count() == 1
-        assert registry.head().id == b.id
+        assert registry.head().id == b.id, "队首被点掉后，下一条顶上来（排队就是这么走的）"
 
     def test_resolve_unknown_id_is_noop(self, env):
         """对已结算的 id 再点一次：什么都不做。
@@ -167,6 +173,51 @@ class TestSupersedeAndExpiry:
         assert not new.future.done()
         assert registry.pending_count() == 1
         assert registry.head().id == new.id
+        assert new.queue_seq == old.queue_seq, "接管被取代者的队列位置，不是另起一位"
+
+    def test_same_ip_refresh_keeps_the_front_position(self, env):
+        """队首那台手机刷新页面 ⇒ 位置不动，别家的请求不上位。
+
+        "界面不许跳闪"的核心用例：A 在队首、B 在后面等，A 刷新自己的页面。若刷新
+        换一个新位置，A 就排到 B 后面 ⇒ 屏幕上的数字从 A 的变成 B 的。用户对"自己
+        刷新了页面"有预期，对"屏幕上忽然变成另一台设备的码"没有预期——而那一跳
+        正是他会按错的地方。
+        """
+        _bridge, registry = env
+
+        async def scenario():
+            a1 = registry.request("1111", "10.0.0.50", FakeWS("a1"), timeout=30)
+            b = registry.request("2222", "10.0.0.7", FakeWS("b"), timeout=30)
+            a2 = registry.request("3333", "10.0.0.50", FakeWS("a2"), timeout=30)
+            return a1, b, a2
+
+        a1, b, a2 = _run(scenario())
+
+        assert a1.future.result() == api_mod.ApprovalDecision(False, "superseded")
+        assert [r.id for r in registry.items()] == [a2.id, b.id]
+        assert registry.head().id == a2.id, "队首还是那台手机：换了码，没换位置"
+        assert a2.pin != a1.pin, "识别码是新的（本次连接重新指派）"
+        assert registry.pending_count() == 2
+
+    def test_same_ip_refresh_restarts_its_own_deadline(self, env):
+        """刷新借走的是**位置**，不是剩余时间：deadline 按本次连接重算。
+
+        手机端那份 35s 预算从它自己发 auth 那刻起算。服务端若继承旧 deadline
+        （可能只剩几秒），用户核对完点「允许」时 PC 早已超时——两边对不上，现象是
+        "明明点了允许却连不上"。
+        """
+        bridge, registry = env
+
+        async def scenario():
+            old = registry.request("1111", "10.0.0.50", FakeWS("old"), timeout=2)
+            new = registry.request("2222", "10.0.0.50", FakeWS("new"), timeout=30)
+            return old, new
+
+        old, new = _run(scenario())
+
+        item = _snapshots(bridge)[-1]["items"][0]
+        assert item["id"] == new.id
+        assert item["remaining"] >= 29, "预算按本次连接重算，不是继承旧的那 2s"
 
     def test_same_ip_does_not_touch_other_ips(self, env):
         """同 IP 取代只针对同一个来源：别的设备还在等，不该被顺手清掉。"""

@@ -334,8 +334,8 @@ def main():
             dashboard.update_connection_status(True, algo)
             tray.update_connection_status(True)
         elif event_type == "approval_snapshot":
-            # TOFU 审批队列的全量快照：payload = {"items": [{"id","pin","ip"}, ...],
-            # "pending": N}，新的在前。界面只显示 items[0]；空列表即收起面板——
+            # TOFU 审批队列的全量快照：payload = {"items": [{"id","pin","ip","remaining"}, ...],
+            # "pending": N}，排队最久的在前。界面只显示 items[0]；空列表即收起面板——
             # 撤销 / 换人 / 补位都不另发事件，界面因此可以是纯函数（见 dashboard）。
             if isinstance(payload, dict):
                 dashboard.show_approval_snapshot(payload.get("items") or [])
