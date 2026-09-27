@@ -59,12 +59,18 @@ This software (PhoneMic) is open-sourced under the Apache 2.0 License (see LICEN
     Note: Used for end-to-end encryption (NaCl crypto_box: X25519 + XSalsa20-Poly1305).
           PC-side key generation, sealed box decryption, message encryption/decryption.
 
-12. libsodium.js
-    License: ISC
-    Homepage: https://github.com/jedisct1/libsodium.js/
-    Note: Mobile-side crypto library (WASM binding of libsodium), used for key
+12. noble crypto libraries (@noble/ciphers / @noble/curves / @noble/hashes / @serenity-kit/noble-sodium)
+    License: MIT
+    Note: Mobile-side crypto library (pure JavaScript, no WASM), used for key
           generation, sealed box encryption, message encryption/decryption.
-          Interoperable with PC-side PyNaCl.
+          Interoperable with PC-side PyNaCl. Assembled into
+          phonemic/resources/sodium.js (libsodium.js is no longer included; the
+          file name and snake_case API are kept from the old version for
+          compatibility, so callers need no changes) from:
+         - @noble/ciphers (MIT, https://github.com/paulmillr/noble-ciphers): XSalsa20-Poly1305 / XChaCha20-Poly1305
+         - @noble/curves (MIT, https://github.com/paulmillr/noble-curves): X25519 key exchange, Ed25519 signatures
+         - @noble/hashes (MIT, https://github.com/paulmillr/noble-hashes): BLAKE2b hashing
+         - @serenity-kit/noble-sodium (MIT, https://github.com/serenity-kit/noble-sodium): NaCl-style API wrapper
 
 13. Nuitka (used only for packaging, not included in final distribution)
     License: Apache 2.0

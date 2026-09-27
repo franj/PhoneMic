@@ -175,7 +175,8 @@ PhoneMic 支持自定义命令，在手机完成发送文本后，电脑将特�
 - pyparsing (MIT)
 - PyNaCl (BSD 3-Clause) – [主页](https://github.com/pyca/pynacl)
 - msgpack (Apache 2.0) – [主页](https://github.com/msgpack/msgpack-python)
-- libsodium.js (ISC) – [主页](https://github.com/jedisct1/libsodium.js/)
+- @noble/ciphers / @noble/curves / @noble/hashes (MIT) – [ciphers](https://github.com/paulmillr/noble-ciphers) / [curves](https://github.com/paulmillr/noble-curves) / [hashes](https://github.com/paulmillr/noble-hashes)
+- @serenity-kit/noble-sodium (MIT) – [主页](https://github.com/serenity-kit/noble-sodium)
 - @msgpack/msgpack.js (MIT) – [主页](https://github.com/msgpack/msgpack-javascript)
 - cloudflared (Apache 2.0, 可选) – [主页](https://github.com/cloudflare/cloudflared)
 
