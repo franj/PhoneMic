@@ -1,0 +1,19 @@
+{
+  "name": "noble-sodium-build",
+  "version": "0.0.0",
+  "private": true,
+  "description": "构建 phonemic/resources/sodium.js（手机端加密库，全局名 sodium）",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@serenity-kit/noble-sodium": "0.2.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

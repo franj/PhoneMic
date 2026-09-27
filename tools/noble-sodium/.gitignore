@@ -1,0 +1,4 @@
+# 构建依赖不签入：产物是 vendor 进 phonemic/resources/ 的单个文件，
+# 仓库不该为它背一个 node_modules。可复现性由 package.json（精确版本）
+# + package-lock.json（完整性哈希）保证 —— 换机器跑 `npm ci` 即可。
+node_modules/
