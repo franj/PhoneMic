@@ -182,6 +182,8 @@
     "status_load_failed_text": "Crypto library failed to load, please refresh the page",
     "confirm_resend": "Resend this message?",
     "confirm_resend_file": "Resend this file?",
+    "dialog_ok": "OK",
+    "dialog_cancel": "Cancel",
     "log_ws_connected": "[WS] Connected",
     "log_ws_disconnected": "[WS] Disconnected",
     "log_ws_unknown_type": "[WS] Unknown message type:",

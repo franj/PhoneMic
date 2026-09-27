@@ -183,6 +183,8 @@
     "status_load_failed_text": "加密庫載入失敗，請重新整理頁面重試",
     "confirm_resend": "重新傳送這則訊息？",
     "confirm_resend_file": "重傳這個檔案？",
+    "dialog_ok": "確定",
+    "dialog_cancel": "取消",
     "log_ws_connected": "[WS] 已連線",
     "log_ws_disconnected": "[WS] 中斷連線",
     "log_ws_unknown_type": "[WS] 未處理的訊息類型:",

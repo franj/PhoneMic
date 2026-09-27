@@ -562,6 +562,60 @@
             from { opacity: 0; transform: translateY(8px); }
             to   { opacity: 1; transform: translateY(0); }
         }
+        /* 非阻塞确认框：替代 confirm()。
+           原生 confirm 有两个问题：① 微信浏览器的防骚扰策略会在短时间反复弹框后
+           把「取消」改写成「关闭网页」（用户点一下就被带走）；② 它是阻塞式的，
+           会冻住主线程。自绘浮层两个问题都没有。 */
+        #dialog-host {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;                 /* 盖住 toast(9998) 与日志浮层 */
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            box-sizing: border-box;
+            background: rgba(0, 0, 0, 0.35);
+        }
+        #dialog-host.visible { display: flex; }
+        #dialog-host .dialog-card {
+            width: 100%;
+            max-width: 320px;
+            background: rgba(32, 32, 32, 0.95);
+            color: #ffffff;
+            border-radius: 12px;
+            padding: 18px 16px 14px;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+            animation: dialog-in 140ms ease-out;
+        }
+        #dialog-host .dialog-title {
+            font-size: 15px;
+            line-height: 1.5;
+            text-align: center;
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin-bottom: 16px;
+        }
+        #dialog-host .dialog-actions { display: flex; gap: 10px; }
+        #dialog-host .dialog-btn {
+            flex: 1;
+            min-height: 44px;              /* 触屏：够大才好点 */
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.16);
+            color: #ffffff;
+        }
+        #dialog-host .dialog-btn.primary {
+            background: var(--send-btn-bg);
+            color: var(--send-btn-color);
+        }
+        @keyframes dialog-in {
+            from { opacity: 0; transform: scale(0.96); }
+            to   { opacity: 1; transform: scale(1); }
+        }
     </style>
 </head>
 <body data-page-node-id="ozgAGjuilWqVKDdnG8ntQq">
@@ -2155,18 +2209,18 @@
                 // 文件气泡：取消/失败的点击 → 确认后重发同一文件（完成态不响应）
                 if (msg.dataset.kind === 'file') {
                     if (msg.classList.contains('file-cancel') && msg._fileRef && window._filePanel) {
-                        if (confirm(t('confirm_resend_file'))) {
-                            window._filePanel.resend(msg._fileRef);
-                        }
+                        showConfirm(t('confirm_resend_file')).then((ok) => {
+                            if (ok) window._filePanel.resend(msg._fileRef);
+                        });
                     }
                     return;
                 }
                 // 图片气泡（photo）：到电脑剪贴板的结果展示，不参与重发
                 if (msg.dataset.kind === 'photo') return;
                 if (!this.wsClient.getConnected()) return;
-                if (confirm(t('confirm_resend'))) {
-                    this.ui.sendExternalMessage(msg.textContent);
-                }
+                showConfirm(t('confirm_resend')).then((ok) => {
+                    if (ok) this.ui.sendExternalMessage(msg.textContent);
+                });
             });
         }
         _onStart(e) {
@@ -2185,7 +2239,10 @@
                     this.ui.inputBox.value = newValue;
                     this.ui.adjustHeight();
                     this.ui.wsClient.send('preview', newValue);
+                    // ⚠️ 这里是**程序化赋值**，不会触发 input 事件 ⇒ 依赖 input 事件的两个
+                    // 联动必须手动补：modeToggle 隐藏、三横按钮换成「发送」。
                     this.ui.updateModeToggleVisibility();
+                    this.ui.updatePlusSendVisibility();
                     if (navigator.vibrate) navigator.vibrate(30);
                     this.longPressTriggered = true;
                 }
@@ -3912,6 +3969,70 @@
         host.appendChild(box);
         setTimeout(close, ms);
         return close;
+    }
+
+    /**
+     * 非阻塞确认框：替代 confirm()。
+     *
+     * 为什么必须自绘（两个理由，都实测过）：
+     *   1. 微信浏览器有防骚扰策略：短时间内反复弹原生框之后，它会把「取消」
+     *      改写成「关闭网页」—— 用户想取消却被带走，这个页面还扛不住误关。
+     *   2. 原生 confirm 阻塞主线程（同 showToast 那段注释：断线重连全靠定时器）。
+     *
+     * 同一时刻只允许存在一个：重复调用会先把上一个按「取消」收掉，否则连点气泡
+     * 会弹出一摞框（原生 confirm 是模态的，不会出现这个问题，自绘就得自己管）。
+     *
+     * @param {string} title 主文案
+     * @returns {Promise<boolean>} 点确定 → true；点取消 / 点背景 → false
+     */
+    function showConfirm(title) {
+        if (window._confirmClose) window._confirmClose(false);   // 收掉上一个
+
+        let host = document.getElementById('dialog-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'dialog-host';
+            // 点背景 = 取消。只在这里挂一次：每次调用都挂的话监听会越叠越多。
+            host.addEventListener('click', (e) => {
+                if (e.target === host && window._confirmClose) window._confirmClose(false);
+            });
+            document.body.appendChild(host);
+        }
+
+        const card = document.createElement('div');
+        card.className = 'dialog-card';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'dialog-title';
+        titleEl.textContent = title;
+        const actions = document.createElement('div');
+        actions.className = 'dialog-actions';
+        const btnCancel = document.createElement('button');
+        btnCancel.type = 'button';
+        btnCancel.className = 'dialog-btn';
+        btnCancel.textContent = t('dialog_cancel');
+        const btnOk = document.createElement('button');
+        btnOk.type = 'button';
+        btnOk.className = 'dialog-btn primary';
+        btnOk.textContent = t('dialog_ok');
+        actions.append(btnCancel, btnOk);
+        card.append(titleEl, actions);
+        host.replaceChildren(card);
+        host.classList.add('visible');
+
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (value) => {
+                if (done) return;
+                done = true;
+                if (window._confirmClose === finish) window._confirmClose = null;
+                host.classList.remove('visible');
+                host.replaceChildren();
+                resolve(value);
+            };
+            window._confirmClose = finish;
+            btnOk.addEventListener('click', () => finish(true));
+            btnCancel.addEventListener('click', () => finish(false));
+        });
     }
 
     class FilePanel {

@@ -183,6 +183,8 @@
     "status_load_failed_text": "加密库加载失败，请刷新页面重试",
     "confirm_resend": "重发这条消息？",
     "confirm_resend_file": "重发这个文件？",
+    "dialog_ok": "确定",
+    "dialog_cancel": "取消",
     "log_ws_connected": "[WS] 已连接",
     "log_ws_disconnected": "[WS] 断开",
     "log_ws_unknown_type": "[WS] 未处理的消息类型:",
