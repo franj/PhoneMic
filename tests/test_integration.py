@@ -136,11 +136,14 @@ def _prepare_html(channel, offered, tofu_first=False):
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
     msgpack_js = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
+    debug_js = (RES_DIR / "debug_log.js").read_text(encoding="utf-8")
     html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
     html = html.replace(
         '<script src="msgpack.min.js" defer></script>', f"<script>{msgpack_js}</script>"
     )
     html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
+    # 日志浮层的实现由服务端注入（api.py:_serve_mobile，仅源码运行）；见 test_mobile。
+    html = html.replace("<!--PHONEMIC_DEV_MODE-->", f"<script>{debug_js}</script>")
     html = html.replace(
         "window.i18n = {};",
         "window.i18n = " + json.dumps(MOBILE_I18N, ensure_ascii=False) + ";",

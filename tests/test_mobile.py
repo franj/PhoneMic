@@ -8,7 +8,7 @@ mobile.html UI 测试
 （auth → auth_challenge → auth_proof），下行数据帧全部整帧加密。
 
 Mock 策略：
-- 内联加载 sodium.js、msgpack.min.js 和 crypto_providers.js
+- 内联加载 sodium.js、msgpack.min.js、crypto_providers.js 与 debug_log.js
   （set_content 无法加载外部脚本）
 - 页面按 **url_fragment 模式**加载：head 的 boot 脚本在 SecureClient.init 之前
   注入 ``location.hash = "#k=<PC公钥>&a=xchacha20"``，故 _authMode === 'url_fragment'，
@@ -259,11 +259,16 @@ def _build_mobile_html(pc_public_key_b64: str) -> str:
     sodium_js = (RES_DIR / "sodium.js").read_text(encoding="utf-8")
     msgpack_js = (RES_DIR / "msgpack.min.js").read_text(encoding="utf-8")
     crypto_js = (RES_DIR / "crypto_providers.js").read_text(encoding="utf-8")
+    debug_js = (RES_DIR / "debug_log.js").read_text(encoding="utf-8")
     html = html.replace('<script src="sodium.js" defer></script>', f"<script>{sodium_js}</script>")
     html = html.replace(
         '<script src="msgpack.min.js" defer></script>', f"<script>{msgpack_js}</script>"
     )
     html = html.replace('<script src="crypto_providers.js" defer></script>', f"<script>{crypto_js}</script>")
+    # 日志浮层的实现也由服务端注入（api.py:_serve_mobile 把占位符展开成
+    # <script src="debug_log.js"></script>，仅源码运行）；set_content 加载不了
+    # 外链，这里同样内联。打包版对应的分支不注入 —— 见 TestPackagedMode。
+    html = html.replace("<!--PHONEMIC_DEV_MODE-->", f"<script>{debug_js}</script>")
     html = html.replace(
         "window.i18n = {};",
         "window.i18n = " + json.dumps(MOBILE_I18N, ensure_ascii=False) + ";",
@@ -1470,6 +1475,38 @@ class TestPackagedMode:
         # 未接管 console：记录一行也不会进缓冲
         page.evaluate("() => console.log('[TEST] 打包版不应留痕')")
         assert page.evaluate("() => window.PhoneLog.text()") == ""
+
+
+class TestDevModeInjection:
+    """服务端注入：源码运行才下发 debug_log.js，打包版连标签都不发。
+
+    这是「打包版没有调试日志」的第一道保证（第二道是产物里根本没有该文件，
+    第三道是 ``_serve_debug_log`` 在 frozen 下直接 404）。这里只钉第一道，
+    因为它最容易在改 ``_serve_mobile`` 时被无声破坏。
+    """
+
+    def _serve(self, frozen: bool) -> str:
+        from phonemic.server import api
+
+        old = api.is_frozen
+        api.is_frozen = lambda: frozen
+        try:
+            return api._serve_mobile().body.decode("utf-8")
+        finally:
+            api.is_frozen = old
+
+    def test_dev_injects_log_impl(self):
+        html = self._serve(False)
+        assert "<script>window.__PHONEMIC_DEV__ = true;</script>" in html
+        assert '<script src="debug_log.js"></script>' in html
+        # 占位符必须被吃掉：留着它等于页面少一段脚本
+        assert "<!--PHONEMIC_DEV_MODE-->" not in html
+
+    def test_frozen_injects_flag_only(self):
+        html = self._serve(True)
+        assert "<script>window.__PHONEMIC_DEV__ = false;</script>" in html
+        assert '<script src="debug_log.js">' not in html
+        assert "<!--PHONEMIC_DEV_MODE-->" not in html
 
 
 class TestSignalBus:

@@ -127,7 +127,13 @@ class TestEncryptedPathGuard:
 
     def test_secret_subresources_200(self, enc_server):
         host, port, sc, _ = enc_server
-        for path in ("/sodium.js", "/msgpack.min.js", "/crypto_providers.js", "/favicon.ico"):
+        for path in (
+            "/sodium.js",
+            "/msgpack.min.js",
+            "/crypto_providers.js",
+            "/debug_log.js",
+            "/favicon.ico",
+        ):
             status, _ = _get(host, port, f"/{sc.secret_path}{path}")
             assert status == 200, f"{path} 应返回 200"
 
@@ -250,7 +256,13 @@ class TestBareUrlPathGuard:
 
     def test_known_resources_200(self, bare_server):
         host, port, sc, _ = bare_server
-        for path in ("/sodium.js", "/msgpack.min.js", "/crypto_providers.js", "/favicon.ico"):
+        for path in (
+            "/sodium.js",
+            "/msgpack.min.js",
+            "/crypto_providers.js",
+            "/debug_log.js",
+            "/favicon.ico",
+        ):
             status, _ = _get(host, port, path)
             assert status == 200, f"{path} 应返回 200"
 

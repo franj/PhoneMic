@@ -546,7 +546,9 @@ def test_sodium_js_route(server_no_sc):
     assert resp.status == 200
     assert "javascript" in resp.headers.get("content-type", "")
     body = resp.read()
-    assert len(body) > 100000, f"sodium.js too small: {len(body)} bytes"
+    # 内容已由 libsodium（1.0MB）换成 noble 产物（62.6KB）：仍要求是完整库，
+    # 只是量级下降一个数量级。
+    assert len(body) > 50000, f"sodium.js too small: {len(body)} bytes"
 
 
 def test_sodium_js_gzip_route(server_no_sc):
@@ -560,7 +562,9 @@ def test_sodium_js_gzip_route(server_no_sc):
     assert resp.status == 200
     assert resp.headers.get("Content-Encoding") == "gzip"
     body = resp.read()
-    assert len(body) > 100000, f"sodium.js.gz too small: {len(body)} bytes"
+    # 预压缩的 sodium.js.gz 已删除（它会在 gzip 请求下继续发旧 libsodium）；
+    # 现在由 GZipMiddleware 实时压缩 62.6KB 的 noble 产物，约 23KB。
+    assert len(body) > 20000, f"sodium.js gzip too small: {len(body)} bytes"
 
 
 # ---------- 测试手机端日志回传（POST /{secret}/api/client-log）----------

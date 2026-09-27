@@ -2,15 +2,9 @@
 <html lang="zh-CN" data-page-node-id="OdDZ0JrbLdGfTGAOHmoYSu">
 <head data-page-node-id="q1cVDYXEhzxDo1WXSci2gi">
     <meta charset="UTF-8" data-page-node-id="Fln4GtuE48PfyKHh6NZGki">
-    <!-- 开发模式标记：服务端返回页面时把下面这行替换成
-         <script>window.__PHONEMIC_DEV__ = true|false;</script>（见
-         phonemic/server/api.py 的 _serve_mobile，依据 is_frozen()）。
-         打包版为 false，脚本块 0 的日志模块据此完全不启动。
-         直接打开本文件（不经服务端）时标记保持原样，页面按非开发模式降级。 -->
-    <!--PHONEMIC_DEV_MODE-->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" data-page-node-id="K4prVEkhpn7pbiFcp4F54P">
     <title>📱🎙️PhoneMic💬💻</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico" data-page-node-id="qBgFHmT0lBATGS2YtEW321">
+    <link rel="icon" type="image/png" href="data:image/png;base64,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" data-page-node-id="qBgFHmT0lBATGS2YtEW321">
     <script src="sodium.js" defer></script>
     <script src="msgpack.min.js" defer></script>
     <script src="crypto_providers.js" defer></script>
@@ -452,7 +446,7 @@
             font-size: 13px;
             margin-top: 12px;
         }
-        /* ---------- 手机端日志浮层（诊断用，见脚本块 0） ---------- */
+        /* ---------- 手机端日志浮层（诊断用，见 debug_log.js） ---------- */
         #phone-log-btn {
             position: fixed;
             left: 8px;
@@ -613,282 +607,27 @@
     </div>
 </div>
 
+<!-- 开发模式标记：服务端返回页面时把下面这行替换成
+     <script>window.__PHONEMIC_DEV__ = true|false;</script>；
+     源码运行（dev）时**额外**追加一个指向 debug_log.js 的 script 标签
+     （日志浮层的实现）—— 见 phonemic/server/api.py 的 _serve_mobile。
+     打包版两样都不下发，页面里只剩下面这个空壳接口。
+     直接打开本文件（不经服务端）时标记保持原样，页面按非开发模式降级。
+     ⚠️ 注入点必须在**这里**（正文已解析完）而不是 <head>：page.set_content() 这类
+     场景下页面脚本执行时 readyState 已经是 complete，而 <head> 处 body 还没建出来，
+     日志模块的 build() 会立刻执行并因 document.body 为 null 而建不出入口按钮。 -->
+<!--PHONEMIC_DEV_MODE-->
 <script>
-    // ========== 手机端日志（仅开发模式） ==========
-    // 手机上（尤其微信内置浏览器）打不开 devtools，所以开发时自备查看入口：
-    // 屏幕上可直接看/复制，另可转发到 PC 的 cmd。
-    // 只有从源码运行才启动——标记由服务端返回页面时注入（见 <head> 里的
-    // PHONEMIC_DEV_MODE 与 api.py 的 _serve_mobile）；打包版为 false，
-    // 于是不接管 console、不缓冲、不转发、不创建入口按钮。
+    // ========== 手机端日志：接口空壳 ==========
+    // 真实实现见 resources/debug_log.js —— **只有从源码运行**时服务端才注入它
+    // （见 api.py 的 _serve_mobile）；打包版既不下发那个标签、也不把该文件打进
+    // 产物 ⇒ 这里就是全部。调用方（FilePanel 的 PhoneLog.snap()、各 console 记录点）
+    // 拿到空值，不报错。
     window.WS_DIAG = window.__PHONEMIC_DEV__ === true;
-
-    window.PhoneLog = (function () {
-        // 非开发模式：只留空壳接口，保证调用方（FilePanel 的 PhoneLog.snap()）
-        // 不报错；其余一概不做——不接管 console、不缓冲、不转发、不建面板。
-        if (!window.WS_DIAG) {
-            return { push: () => {}, open: () => {}, text: () => '', snap: () => '' };
-        }
-
-        const MAX = 300;         // 环形缓冲条数（面板与转发共用同一份）
-        const MAX_LEN = 300;     // 单条截断长度，避免日志本身把回传请求撑爆
-        const FLUSH_MS = 2000;   // 转发节流间隔
-        // 级别门槛：低于它的记录既不进面板也不转发。
-        // log 与 debug 归为最细一档——[SEC]/[Config]/[NET] 那类每次连接都重复、
-        // 内容恒定的记录都在这一档，默认不显示；需要时在面板里切到 debug。
-        const LEVELS = { log: 10, debug: 10, info: 20, warn: 30, error: 40 };
-        let minLevel = LEVELS.info;
-        const lines = [];        // {ts, lvl, text}：本地面板的数据源
-        let queue = [];          // [ts, lvl, text]：待转发，失败会塞回队首重试
-        let forward = false;     // 转发默认关闭：要排查时在面板里手动打开
-        let opened = false;
-        let el = {};             // DOM 引用，首次打开时构建
-
-        const pad = (n, w = 2) => String(n).padStart(w, '0');
-
-        function clock(ts) {
-            const d = new Date(ts);
-            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
-        }
-
-        /** 单个参数压成有界字符串：二进制只报类型和长度，不做逐字节序列化 */
-        function one(a) {
-            let s;
-            if (a instanceof Error) s = `${a.name}: ${a.message}`;
-            else if (typeof a === 'string') s = a;
-            else if (a instanceof ArrayBuffer || ArrayBuffer.isView(a)) {
-                s = `<${a.constructor && a.constructor.name || 'binary'} ${a.byteLength}>`;
-            } else {
-                try { s = JSON.stringify(a); } catch (e) { s = String(a); }
-            }
-            if (s === undefined) s = String(a);
-            return s.length > MAX_LEN ? s.slice(0, MAX_LEN) + '…' : s;
-        }
-
-        const fmt = (args) => args.map(one).join(' ').replace(/\s+/g, ' ').trim();
-
-        /** 当前级别下可见的记录。
-         * 缓冲始终全量保留、只在展示与转发时过滤——否则「出了问题才打开面板」
-         * 的排查流程里，切到 debug 也回看不到连接当时发生了什么。 */
-        const visible = () => lines.filter((l) => (LEVELS[l.lvl] || LEVELS.info) >= minLevel);
-
-        /** 记一条：入环形缓冲 + 排入转发队列 + 刷新面板（若已打开） */
-        function push(lvl, args) {
-            const ts = Date.now();
-            const text = fmt(args);
-            if (!text) return;
-            lines.push({ ts, lvl, text });
-            while (lines.length > MAX) lines.shift();
-            // 转发按门槛过滤：不够级别的直接不排队，省掉一趟无用的网络请求
-            if (forward && (LEVELS[lvl] || LEVELS.info) >= minLevel) {
-                queue.push([ts, lvl, text]);
-                if (queue.length > MAX) queue.shift();
-            }
-            if (opened) render();
-        }
-
-        // 接管 console：既有日志（i18n / WS / SEC / FILE / NET）自动进缓冲，
-        // 仍然调用原方法，接远程调试时行为不变
-        ['log', 'info', 'warn', 'error', 'debug'].forEach((name) => {
-            const orig = console[name].bind(console);
-            console[name] = (...args) => { orig(...args); push(name, args); };
-        });
-        // 未捕获异常与未处理的 Promise 拒绝也要留痕：手机上这些平时完全不可见
-        window.addEventListener('error', (e) => {
-            push('error', ['[JS] ' + (e.message || 'error'), `${e.filename || ''}:${e.lineno || 0}`]);
-        });
-        window.addEventListener('unhandledrejection', (e) => {
-            push('error', ['[JS] unhandledrejection', e.reason]);
-        });
-
-        // 网络与页面生命周期快照。
-        // Android WebView（尤其 MIUI 一类厂商 ROM）会在切后台、熄屏、唤起文件选择器时
-        // 把 WebSocket 掐掉，两端都收不到关闭帧，只剩一个 1006。
-        // 断连现场只有这几条能区分「网络真的断了」与「页面被冻住/被回收」，必须留痕。
-        // 注意：页面恢复时浏览器会把后台积压的事件一次性补发，事件时间戳 ≠ 真实发生时刻。
-        const netSnap = () => {
-            const c = navigator.connection || {};
-            const extra = c.effectiveType ? ` eff=${c.effectiveType}` : (c.type ? ` net=${c.type}` : '');
-            return `online=${navigator.onLine} vis=${document.visibilityState}${extra}`;
-        };
-        window.addEventListener('online', () => push('info', ['[LIFE] online', netSnap()]));
-        window.addEventListener('offline', () => push('warn', ['[LIFE] offline', netSnap()]));
-        // pagehide 要排在下面 sendBeacon 那条之前注册，否则这一行进不了最后一批
-        ['visibilitychange', 'pageshow', 'pagehide'].forEach((name) => {
-            document.addEventListener(name, () => push('info', [`[LIFE] ${name}`, netSnap()]));
-        });
-        ['freeze', 'resume'].forEach((name) => {
-            document.addEventListener(name, () => push('warn', [`[LIFE] ${name}`, netSnap()]));
-        });
-
-        /** 转发一批到 PC 的 cmd；失败塞回队首，下轮再试，不丢日志 */
-        async function flush() {
-            if (!forward || queue.length === 0) return;
-            const batch = queue.splice(0, 50);
-            try {
-                const res = await fetch('api/client-log', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ua: navigator.userAgent, entries: batch }),
-                });
-                // 4xx 是「这个地址根本不存在」——典型是旧会话的页面（secret_path 已经换了）。
-                // 重试永远不会成功，直接丢弃；否则这个僵尸页面会一直往后端打无效请求。
-                if (res.status >= 400 && res.status < 500) return;
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-            } catch (e) {
-                queue = batch.concat(queue).slice(-MAX);
-            }
-        }
-        setInterval(flush, FLUSH_MS);
-        // 页面被隐藏/关闭时尽力送出最后一批：sendBeacon 不受页面生命周期限制
-        window.addEventListener('pagehide', () => {
-            if (!forward || queue.length === 0) return;
-            try {
-                const body = JSON.stringify({ ua: navigator.userAgent, entries: queue });
-                navigator.sendBeacon('api/client-log', new Blob([body], { type: 'application/json' }));
-                queue = [];
-            } catch (e) { /* 发不出去就算了，日志在本地面板里还在 */ }
-        });
-
-        const text = () => visible().map((l) => `${clock(l.ts)} ${l.lvl.toUpperCase()} ${l.text}`).join('\n');
-
-        // ---------- 面板 UI（首次打开才创建，避免干扰正常使用的布局） ----------
-
-        function render() {
-            if (!el.body) return;
-            const vis = visible();
-            el.title.textContent = `${t('dbg_log_title')} ${vis.length}`;
-            el.level.textContent = `${t('dbg_log_level')}:${minLevel === LEVELS.info ? 'info' : 'debug'}`;
-            el.clear.textContent = t('dbg_log_clear');
-            el.copy.textContent = t('dbg_log_copy');
-            el.fwd.textContent = forward ? t('dbg_log_forward_on') : t('dbg_log_forward_off');
-            el.close.textContent = t('dbg_log_close');
-            // 只在已经贴底时才自动滚到底，翻看历史不被新日志打断
-            const atBottom = el.body.scrollHeight - el.body.scrollTop - el.body.clientHeight < 40;
-            el.body.textContent = '';
-            if (vis.length === 0) {
-                el.body.textContent = t('dbg_log_empty');
-            } else {
-                const frag = document.createDocumentFragment();
-                vis.forEach((l) => {
-                    const row = document.createElement('div');
-                    row.className = 'pl-' + l.lvl;
-                    row.textContent = `${clock(l.ts)} ${l.text}`;
-                    frag.appendChild(row);
-                });
-                el.body.appendChild(frag);
-            }
-            if (atBottom) el.body.scrollTop = el.body.scrollHeight;
-        }
-
-        async function copyAll() {
-            const data = text();
-            try {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    await navigator.clipboard.writeText(data);
-                } else {
-                    // 非安全上下文（http:// 局域网直连）没有 clipboard API，退回选中 + 复制
-                    const ta = document.createElement('textarea');
-                    ta.value = data;
-                    ta.style.position = 'fixed';
-                    ta.style.opacity = '0';
-                    document.body.appendChild(ta);
-                    ta.select();
-                    ta.setSelectionRange(0, data.length);
-                    const ok = document.execCommand('copy');
-                    document.body.removeChild(ta);
-                    if (!ok) throw new Error('execCommand copy failed');
-                }
-                push('info', [t('dbg_log_copied')]);
-            } catch (e) {
-                push('warn', [t('dbg_log_copy_failed')]);
-            }
-        }
-
-        function setOpen(v) {
-            if (!el.panel) return;
-            opened = v;
-            el.panel.classList.toggle('visible', v);
-            // 不再重复记 env()：build() 时已记过一次，重复记只会在每次打开面板时
-            // 白刷 4 条；之后网络/可见性的变化由 [LIFE] 事件覆盖
-            if (v) render();
-        }
-
-        function build() {
-            const btn = document.createElement('button');
-            btn.id = 'phone-log-btn';
-            btn.textContent = '🐞';
-            btn.addEventListener('click', () => setOpen(true));
-            document.body.appendChild(btn);
-
-            const panel = document.createElement('div');
-            panel.id = 'phone-log-panel';
-            // 静态骨架，无任何外部数据，可安全用 innerHTML
-            panel.innerHTML =
-                '<div id="phone-log-head">' +
-                '<span class="pl-title"></span>' +
-                '<button data-act="level"></button>' +
-                '<button data-act="clear"></button>' +
-                '<button data-act="copy"></button>' +
-                '<button data-act="forward"></button>' +
-                '<button data-act="close"></button>' +
-                '</div><div id="phone-log-body"></div>';
-            document.body.appendChild(panel);
-
-            el = {
-                btn,
-                panel,
-                title: panel.querySelector('.pl-title'),
-                body: panel.querySelector('#phone-log-body'),
-                level: panel.querySelector('[data-act="level"]'),
-                clear: panel.querySelector('[data-act="clear"]'),
-                copy: panel.querySelector('[data-act="copy"]'),
-                fwd: panel.querySelector('[data-act="forward"]'),
-                close: panel.querySelector('[data-act="close"]'),
-            };
-            el.close.addEventListener('click', () => setOpen(false));
-            el.clear.addEventListener('click', () => { lines.length = 0; queue = []; render(); });
-            el.copy.addEventListener('click', copyAll);
-            el.fwd.addEventListener('click', () => { forward = !forward; if (forward) flush(); render(); });
-            // 级别两档切换：info（默认，只留状态机与动作轨迹）/ debug（连常量噪音一起看）
-            el.level.addEventListener('click', () => {
-                minLevel = minLevel === LEVELS.info ? LEVELS.debug : LEVELS.info;
-                render();
-            });
-            // 走到这里必然是开发模式（非开发模式已在 IIFE 开头提前返回）
-            btn.classList.add('visible');
-            // 状态栏是最自然的「出问题了」指示器，点它即可展开日志
-            const bar = document.getElementById('status-bar');
-            if (bar) bar.addEventListener('click', () => setOpen(true));
-            env();
-        }
-
-        /** 环境摘要：排查时先看这几行。刻意不打印完整 URL —— hash 里是 E2EE 密钥 */
-        function env() {
-            push('info', ['[ENV] origin=' + location.origin]);
-            push('info', [`[ENV] win=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio}`]);
-            push('info', [`[ENV] online=${navigator.onLine} vis=${document.visibilityState} hash=${location.hash ? 'yes' : 'no'}`]);
-            push('info', ['[ENV] ua=' + navigator.userAgent]);
-        }
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', build);
-        } else {
-            build();
-        }
-
-        return {
-            push: (lvl, ...args) => push(lvl, args),
-            open: () => setOpen(true),
-            text,
-            snap: netSnap,
-            // 级别：接受 'info'/'debug'/'warn' 或数值；同时供面板按钮与测试使用
-            setLevel: (lv) => {
-                minLevel = (typeof lv === 'string' ? LEVELS[lv] : lv) || LEVELS.info;
-                render();
-            },
-            getLevel: () => (minLevel === LEVELS.info ? 'info' : 'debug'),
-        };
-    })();
+    // debug_log.js 加载在先（injected in <head>），此时已经有真实现 ⇒ 不覆盖它。
+    window.PhoneLog = window.PhoneLog || {
+        push: () => {}, open: () => {}, text: () => '', snap: () => '',
+    };
 </script>
 
 <script>
@@ -1864,9 +1603,12 @@
         }
     }
 
-    // 诊断总开关定义在脚本块 0（window.WS_DIAG）：同时控制日志浮层与
+    // 诊断总开关由页面开头的空壳脚本定义（window.WS_DIAG）：同时控制日志浮层与
     // 「关闭码随弹窗/状态栏显示」两件事。此处只取本地引用，收尾时改那一处即可。
-    const WS_DIAG = window.WS_DIAG !== false;
+    // ⚠️ 判定必须是 `=== true` 而不是 `!== false`：诊断实现（debug_log.js）只在开发态
+    // 存在，若某天它没加载、`window.WS_DIAG` 成了 undefined，`!== false` 会判成「开」，
+    // 打包版就白做诊断。缺省必须落在安全的一侧。
+    const WS_DIAG = window.WS_DIAG === true;
     // 「文件选择器在飞」标记的有效期（ms）：只兜「页面再没回过前台」这种极端情况，
     // 避免标记永久挂住、把之后再发生的真断连也一起静默掉。
     const PICKER_CTX_MS = 300000;
