@@ -150,8 +150,9 @@ def _prepare_html(channel, offered, tofu_first=False):
         1,
     )
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
-    # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
-    # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    # 一并注入调试模式标记：真实环境由服务端下发（api.py:_serve_mobile，
+    # 需要 PHONEMIC_DEBUG=1 / --debug），set_content 不走服务端，必须手动补上，
+    # 否则手机端日志模块不会启动。
     # localStorage 替身必须在这里（早于主脚本）：about:blank 下读写 localStorage
     # 会抛 SecurityError，而 TOFU 路径要存/清 PC 公钥（e2ee-always-on-design §8.6）。
     storage_stub = (

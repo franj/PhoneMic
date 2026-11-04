@@ -35,7 +35,8 @@ from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.manager import TunnelManager
 from phonemic.tunnel.mode import TunnelMode, set_mode, get_mode, effective_auth_method
 from phonemic.utils.network import get_all_lan_ips, find_free_port, find_candidate_by_mac
-from phonemic.utils.paths import get_res_path, is_frozen
+from phonemic.utils.debug import is_debug_mode, set_debug_mode
+from phonemic.utils.paths import get_res_path
 from phonemic.utils.i18n import I18n
 from phonemic.utils.command_processor import CommandInterceptor
 from phonemic.utils.text_corrector import TextCorrector
@@ -90,11 +91,21 @@ def parse_args():
     parser.add_argument("--silent", action="store_true", help="Start minimized to system tray (no main window)")
     parser.add_argument("--select-mode", choices=["auto", "last", "ask"],
                         help="Override network selection strategy: auto=best, last=previous, ask=prompt")
+    # 调试模式：手机端日志浮层 + 回传、/test 页面、鼠标曲线调试窗口。
+    # 默认关闭 —— 直接运行就是正常使用，不额外多出诊断入口。
+    # 与 PHONEMIC_DEBUG=1 等价，命令行优先（见 phonemic/utils/debug.py）。
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug mode (mobile log console, /test page, mouse debug window)")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.debug:
+        set_debug_mode(True)
+    if is_debug_mode():
+        logger.info("调试模式已开启（PHONEMIC_DEBUG / --debug）")
 
     app = QApplication.instance()
     if app is None:
@@ -192,7 +203,7 @@ def main():
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     dashboard.tray = tray
 
-    if not is_frozen():
+    if is_debug_mode():
         # 鼠标帧调试窗口（临时工具）：独立弹出、默认隐藏，从 Dashboard「程序」菜单打开
         mouse_debug_win = MouseDebugWindow()
         set_stats_hook(mouse_debug_win.widget.push)

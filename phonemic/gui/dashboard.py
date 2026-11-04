@@ -16,7 +16,8 @@ from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.gui.dictionary_dialog import DictionaryDialog
 from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
-from phonemic.utils.paths import get_app_root, get_build_info, is_frozen
+from phonemic.utils.debug import is_debug_mode
+from phonemic.utils.paths import get_app_root, get_build_info
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
 
@@ -619,8 +620,9 @@ class Dashboard(QMainWindow):
         dictionary_action.triggered.connect(self._open_dictionary_dialog)
         program_menu.addAction(dictionary_action)
 
-        if not is_frozen():
+        if is_debug_mode():
             # 鼠标曲线调试（临时工具，验证帧率与位移是否抖动）
+            # 归属调试开关（PHONEMIC_DEBUG=1 / --debug），默认运行不出现
             debug_action = QAction("鼠标曲线调试", self)
             debug_action.triggered.connect(self._open_mouse_debug)
             program_menu.addAction(debug_action)

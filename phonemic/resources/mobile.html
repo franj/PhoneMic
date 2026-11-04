@@ -661,22 +661,24 @@
     </div>
 </div>
 
-<!-- 开发模式标记：服务端返回页面时把下面这行替换成
+<!-- 调试模式标记：服务端返回页面时把下面这行替换成
      <script>window.__PHONEMIC_DEV__ = true|false;</script>；
-     源码运行（dev）时**额外**追加一个指向 debug_log.js 的 script 标签
-     （日志浮层的实现）—— 见 phonemic/server/api.py 的 _serve_mobile。
-     打包版两样都不下发，页面里只剩下面这个空壳接口。
-     直接打开本文件（不经服务端）时标记保持原样，页面按非开发模式降级。
+     调试模式（PHONEMIC_DEBUG=1 或启动参数 --debug）下**额外**追加一个指向
+     debug_log.js 的 script 标签（日志浮层的实现）—— 见 phonemic/server/api.py
+     的 _serve_mobile。
+     默认运行（不设 PHONEMIC_DEBUG、不带 --debug）两样都不下发，页面里只剩
+     下面这个空壳接口 —— 与是否打包无关，发布版也带着这些资源。
+     直接打开本文件（不经服务端）时标记保持原样，页面按非调试模式降级。
      ⚠️ 注入点必须在**这里**（正文已解析完）而不是 <head>：page.set_content() 这类
      场景下页面脚本执行时 readyState 已经是 complete，而 <head> 处 body 还没建出来，
      日志模块的 build() 会立刻执行并因 document.body 为 null 而建不出入口按钮。 -->
 <!--PHONEMIC_DEV_MODE-->
 <script>
     // ========== 手机端日志：接口空壳 ==========
-    // 真实实现见 resources/debug_log.js —— **只有从源码运行**时服务端才注入它
-    // （见 api.py 的 _serve_mobile）；打包版既不下发那个标签、也不把该文件打进
-    // 产物 ⇒ 这里就是全部。调用方（FilePanel 的 PhoneLog.snap()、各 console 记录点）
-    // 拿到空值，不报错。
+    // 真实实现见 resources/debug_log.js —— **只有调试模式**下服务端才注入它
+    // （PHONEMIC_DEBUG=1 / --debug，见 api.py 的 _serve_mobile）；默认运行不下发
+    // 那个标签，_serve_debug_log 也直接 404 ⇒ 这里就是全部。调用方（FilePanel 的
+    // PhoneLog.snap()、各 console 记录点）拿到空值，不报错。
     window.WS_DIAG = window.__PHONEMIC_DEV__ === true;
     // debug_log.js 由服务端注入在**本行上方**（非 defer，先于本脚本执行），
     // 此时已经有真实现 ⇒ 不覆盖它。
@@ -1660,9 +1662,9 @@
 
     // 诊断总开关由页面开头的空壳脚本定义（window.WS_DIAG）：同时控制日志浮层与
     // 「关闭码随弹窗/状态栏显示」两件事。此处只取本地引用，收尾时改那一处即可。
-    // ⚠️ 判定必须是 `=== true` 而不是 `!== false`：诊断实现（debug_log.js）只在开发态
-    // 存在，若某天它没加载、`window.WS_DIAG` 成了 undefined，`!== false` 会判成「开」，
-    // 打包版就白做诊断。缺省必须落在安全的一侧。
+    // ⚠️ 判定必须是 `=== true` 而不是 `!== false`：诊断实现（debug_log.js）只在调试
+    // 模式下存在，若某天它没加载、`window.WS_DIAG` 成了 undefined，`!== false` 会判成
+    // 「开」，非调试运行就白做诊断。缺省必须落在安全的一侧。
     const WS_DIAG = window.WS_DIAG === true;
     // 「文件选择器在飞」标记的有效期（ms）：只兜「页面再没回过前台」这种极端情况，
     // 避免标记永久挂住、把之后再发生的真断连也一起静默掉。

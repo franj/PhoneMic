@@ -36,6 +36,7 @@ from phonemic.tunnel.crypto.errors import CryptoError
 from phonemic.tunnel.frame import FrameError
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
+from phonemic.utils.debug import is_debug_mode
 from phonemic.utils.paths import get_res_path, is_frozen
 from phonemic.utils.settings_manager import SettingsManager
 from phonemic.utils.i18n import I18n
@@ -1008,18 +1009,18 @@ async def _serve_messages(websocket, session) -> None:
 
 # ---------- HTTP 资源处理 ----------
 
-# 手机端「开发模式」标记的注入点（对应 mobile.html 正文里、紧邻日志空壳脚本块的
+# 手机端「调试模式」标记的注入点（对应 mobile.html 正文里、紧邻日志空壳脚本块的
 # 那一行；**不能放 <head>** —— page.set_content() 这类场景下页面脚本执行时
 # readyState 已是 complete 而 <head> 处 body 尚未建出，日志模块的 build() 会立刻
 # 执行并因 document.body 为 null 而建不出入口按钮）。
-# 打包版整个日志通道都不启动——不接管 console、不缓冲、不转发、不建入口按钮，
+# 非调试模式整个日志通道都不启动——不接管 console、不缓冲、不转发、不建入口按钮，
 # 所以这个标记必须在**页面返回时**就定下来；等 WebSocket 的 config 帧就太晚了，
 # 那时页面脚本早已执行完。占位符缺失时客户端按 false 降级（安全的一侧）。
 #
-# 同一个占位符还承担第二件事：源码运行时在后面追加一个指向 debug_log.js 的
-# script 标签（日志浮层的实现）。打包版不追加，产物里也没有那个文件 ——
-# 「打包版没有调试日志」由**文件不存在**保证（build_nuitka.py 里有对应的
-# --noinclude-data-files=*/debug_log.js，别删）。
+# 同一个占位符还承担第二件事：调试模式下在后面追加一个指向 debug_log.js 的
+# script 标签（日志浮层的实现）。非调试模式不追加 —— 「默认运行没有调试日志」
+# 完全由**显式开关**保证（phonemic/utils/debug.py），与是否打包无关：发布产物里
+# 也带着 debug_log.js，只是不开开关就没人请它（_serve_debug_log 同样 404）。
 _DEV_MODE_MARK = "<!--PHONEMIC_DEV_MODE-->"
 
 
@@ -1027,19 +1028,19 @@ def _serve_mobile() -> Response:
     """返回手机端聊天页面（mobile.html）。
 
     页面不含任何翻译文本，语言包由手机端自行请求 /api/lang.json 获取。
-    返回前注入开发模式标记（页面据此决定诊断开关），源码运行时另外注入
-    日志浮层的实现 debug_log.js —— 打包版两样都不下发，页面只剩空壳接口。
+    返回前注入调试模式标记（页面据此决定诊断开关），调试模式下另外注入
+    日志浮层的实现 debug_log.js —— 默认运行两样都不下发，页面只剩空壳接口。
     """
     html_path = get_res_path("mobile.html")
     try:
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
-        frozen = is_frozen()
-        dev = "false" if frozen else "true"
+        debug = is_debug_mode()
+        dev = "true" if debug else "false"
         # 非 defer：日志模块要赶在紧随其后的空壳脚本块之前接管 window.PhoneLog，
         # 且必须早于脚本块里的 window.WS_DIAG 读取。
         inject = f"<script>window.__PHONEMIC_DEV__ = {dev};</script>"
-        if not frozen:
+        if debug:
             inject += '\n<script src="debug_log.js"></script>'
         html = html.replace(_DEV_MODE_MARK, inject)
         return HTMLResponse(content=html)
@@ -1134,9 +1135,9 @@ async def _receive_client_log(request: Request) -> Response:
     """
     global _last_client_ua
 
-    # 打包版不接收手机端日志：页面侧根本不会启动日志模块（见 _serve_mobile），
+    # 非调试模式不接收手机端日志：页面侧根本不会启动日志模块（见 _serve_mobile），
     # 这里同时兜住旧缓存页面与伪造请求。返回 404，与「路径不存在」一致。
-    if is_frozen():
+    if not is_debug_mode():
         # body 也得读掉再返回，否则和 405 同一个坑：Connection: close 下未读数据
         # 会让关闭变成 RST，客户端读不到这个 404（见 _drain_request_body）。
         await _drain_request_body(request)
@@ -1176,30 +1177,40 @@ async def _receive_client_log(request: Request) -> Response:
 
 
 def _serve_test() -> Response:
-    """返回手机输入测试页面（test.html）。"""
+    """返回手机输入测试页面（test.html）。
+
+    **只有调试模式**下才下发：加密模式里 secret 前缀下的路径是**直接透传**的
+    （见 _normalize_path 的 secret 分支），把判断写在分发/归一化层只能管住明文
+    那一条分支，`/{secret}/test` 照样 200。所以门禁放在这里 —— 两条分支都必经。
+    """
+    if not is_debug_mode():
+        return Response(status_code=404)
     html_path = get_res_path("test.html")
+    if not os.path.isfile(html_path):
+        # 产物里缺文件时直接 404：与「路径不存在」一致，也别让下游 read 抛成 500
+        logger.error(f"test.html not found: {html_path}")
+        return Response(status_code=404)
     try:
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
         return HTMLResponse(content=html)
     except Exception as e:
         logger.error(f"Failed to load test.html: {e}")
-        return HTMLResponse(
-            content='<h3>Error: test.html not found. Please check resources/ directory.</h3>',
-            status_code=404,
-        )
+        return Response(status_code=404)
 
 def _serve_debug_log() -> Response:
     """返回 debug_log.js（手机端日志浮层的实现）。
 
-    **只有从源码运行**时页面才会请求它（服务端在 _serve_mobile 里把占位符展开成
-    <script src="debug_log.js">）；打包版既不下发那个标签、也不把该文件打进产物
-    （build_nuitka.py 的 --noinclude-data-files=*/debug_log.js）。
-    这里再兜一道 —— 打包版直接 404，否则请求会打到不存在的文件上变成 500。
+    **只有调试模式**下页面才会请求它（服务端在 _serve_mobile 里把占位符展开成
+    <script src="debug_log.js">）；非调试模式既不下发那个标签，这里也直接 404。
+    产物里带了本文件（发布版也能用 --debug 调试），所以拦住的只有开关本身。
+    文件缺失时同样 404 —— 否则 FileResponse 会在发送阶段抛错变成 500。
     """
-    if is_frozen():
+    if not is_debug_mode():
         return Response(status_code=404)
     path = get_res_path("debug_log.js")
+    if not os.path.isfile(path):
+        return Response(status_code=404)
     return FileResponse(path, media_type="application/javascript")
 
 
@@ -1249,9 +1260,9 @@ _PUBLIC_PATHS = {
     "/sodium.js",
     "/crypto_providers.js",
     "/msgpack.min.js",
-    # 手机端日志浮层的实现（debug_log.js）：**只有从源码运行时**页面才会请求它，
-    # 打包版既不下发那个 <script>、也不把该文件打进产物。白名单里留着是为了
-    # 明文开发模式（_normalize_path 的另一条分支），漏了就是静默 404。
+    # 手机端日志浮层的实现（debug_log.js）：**只有调试模式**下页面才会请求它，
+    # 非调试模式既不下发那个 <script>、_serve_debug_log 也直接 404。白名单里留着
+    # 是为了明文模式（_normalize_path 的另一条分支），漏了就是静默 404。
     "/debug_log.js",
     "/ws",
     "/api/lang.json",
@@ -1281,7 +1292,10 @@ def _normalize_path(path: str) -> Optional[str]:
     else:
         if path in _PUBLIC_PATHS:
             return path
-        if not is_frozen() and path == "/test":
+        # /test 的调试门禁在 _serve_test 内部：secret 分支是**整条透传**的，
+        # 判断写在这里只能管住明文这一条分支（/{secret}/test 会直接 200）。
+        # 与 /debug_log.js 同构：归一化只认路径，是否下发由处理器决定。
+        if path == "/test":
             return path
         return None
 
@@ -1295,9 +1309,9 @@ async def _dispatch_http(request: Request, path: str) -> Response:
     # 「路径对不对」会从状态码差异里漏出去。这也与 POST 由路由层直接
     # 返回 405 时的既有行为保持一致（见 tests/test_dispatcher.py）。
     #
-    # 注意这里**不判 is_frozen()**：打包版关掉日志入口是 `_receive_client_log`
+    # 注意这里**不判 is_debug_mode()**：非调试模式关掉日志入口是 `_receive_client_log`
     # 自己的职责（排空 body 后回 404，与「路径不存在」一致）。若在分发层拦成
-    # 405，那个 frozen 分支就成了不可达代码，两处语义还会漂移。
+    # 405，那个非调试分支就成了不可达代码，两处语义还会漂移。
     if request.method == "POST":
         if normalized == "/api/client-log":
             return await _receive_client_log(request)
@@ -1318,13 +1332,14 @@ async def _dispatch_http(request: Request, path: str) -> Response:
     if normalized in ["/sodium.js", "/crypto_providers.js", "/msgpack.min.js"]:
         return FileResponse(get_res_path(normalized[1:]), media_type="application/javascript")
     if normalized == "/debug_log.js":
-        # 单独一条：打包版要 404（见 _serve_debug_log）。塞进上面的列表里做
-        # 条件判断，会让这个「第三道保证」函数变成没人调用的死代码。
+        # 单独一条：非调试模式要 404（见 _serve_debug_log）。塞进上面的列表里做
+        # 条件判断，会让这个门禁函数变成没人调用的死代码。
         return _serve_debug_log()
     if normalized == "/favicon.ico":
         # 返回**网页用**的 favicon（小图标：只有5.7KB）。mobile.html 里已内联成 data URI，这条路由只兜底兼容老浏览器。
         return FileResponse(get_res_path("favicon_small.ico"), media_type="image/x-icon")
     if normalized == "/test":
+        # 同上：调试门禁在 _serve_test 内部，两条入口分支都必经（见其 docstring）
         return _serve_test()
     return Response(status_code=404)
 

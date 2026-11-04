@@ -568,6 +568,16 @@ def test_sodium_js_gzip_route(server_no_sc):
 
 
 # ---------- 测试手机端日志回传（POST /{secret}/api/client-log）----------
+@pytest.fixture
+def debug_mode(monkeypatch):
+    """打开调试开关。
+
+    日志回传入口只在调试模式（PHONEMIC_DEBUG=1 / --debug）下存在，默认运行
+    一律 404；这里打桩等价于带着开关启动，服务端跑在本进程线程里，调用时现查。
+    """
+    monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
+
+
 def _post(url, payload: bytes):
     """POST 原始字节并返回响应（异常由调用方断言状态码）。"""
     req = urllib.request.Request(
@@ -577,7 +587,7 @@ def _post(url, payload: bytes):
     return urllib.request.urlopen(req, timeout=2)
 
 
-def test_client_log_route(server_no_sc, caplog):
+def test_client_log_route(server_no_sc, caplog, debug_mode):
     """手机端日志应原样打进服务端日志，并返回 204（不回帧、不落盘）"""
     host, port, _, sc = server_no_sc
     url = http_url(host, port, sc, "/api/client-log")
@@ -598,7 +608,7 @@ def test_client_log_route(server_no_sc, caplog):
     assert "pytest-mobile-ua" in caplog.text
 
 
-def test_client_log_rejects_bad_payload(server_no_sc):
+def test_client_log_rejects_bad_payload(server_no_sc, debug_mode):
     """非法 JSON 或缺 entries 一律 400：日志入口不能变成异常源"""
     host, port, _, sc = server_no_sc
     url = http_url(host, port, sc, "/api/client-log")
@@ -610,7 +620,7 @@ def test_client_log_rejects_bad_payload(server_no_sc):
         assert ei.value.code == 400
 
 
-def test_client_log_rejects_oversize(server_no_sc):
+def test_client_log_rejects_oversize(server_no_sc, debug_mode):
     """超过体积上限直接 413，避免日志入口被滥用打爆服务端日志"""
     host, port, _, sc = server_no_sc
     url = http_url(host, port, sc, "/api/client-log")
@@ -906,7 +916,7 @@ class TestConnectionPreemption:
 
             with pytest.raises(Exception):
                 ws_a.recv(timeout=2)
-# ---------- 日志级别与开发模式标记 ----------
+# ---------- 日志级别与调试模式标记 ----------
 
 
 class TestLogLevelResolution:
@@ -931,20 +941,24 @@ class TestLogLevelResolution:
 
 
 class TestDevModeMarkInjection:
-    """注入给手机页面的开发模式标记：源码运行为 true，打包版为 false。"""
+    """注入给手机页面的调试标记：调试模式为 true，默认运行（含打包版）为 false。
 
-    def _body(self, monkeypatch, frozen):
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: frozen)
+    判定依据是显式开关 phonemic.utils.debug.is_debug_mode()，不再由
+    is_frozen()（源码/打包）代劳。
+    """
+
+    def _body(self, monkeypatch, debug):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: debug)
         return api_mod._serve_mobile().body.decode("utf-8")
 
-    def test_source_run_injects_true(self, monkeypatch):
-        body = self._body(monkeypatch, False)
+    def test_debug_mode_injects_true(self, monkeypatch):
+        body = self._body(monkeypatch, True)
         assert "window.__PHONEMIC_DEV__ = true" in body
         # 占位符必须被替换掉，否则客户端拿不到标记
         assert api_mod._DEV_MODE_MARK not in body
 
-    def test_packaged_injects_false(self, monkeypatch):
-        body = self._body(monkeypatch, True)
+    def test_default_run_injects_false(self, monkeypatch):
+        body = self._body(monkeypatch, False)
         assert "window.__PHONEMIC_DEV__ = false" in body
         assert api_mod._DEV_MODE_MARK not in body
 
@@ -992,22 +1006,23 @@ def _clear_secret_path(monkeypatch):
 
 
 class TestClientLogEndpoint:
-    """手机端日志回传入口：打包版整个关掉（手机端也不会发）。"""
+    """手机端日志回传入口：非调试模式整个关掉（手机端也不会发）。"""
 
-    def test_404_when_packaged(self, monkeypatch):
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
+    def test_404_when_not_debug(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: False)
         req = _FakeLogRequest()
         assert _run_in_thread(api_mod._receive_client_log(req)).status_code == 404
         # 404 之前必须排空 body，否则 Connection: close 下客户端读不到响应
         assert req.drained is True
 
-    def test_dispatch_404_when_packaged(self, monkeypatch):
+    def test_dispatch_404_when_not_debug(self, monkeypatch):
         """走分发层也必须 404，不能在 _dispatch_http 里先拦成 405。
 
-        曾经在分发处加过 `not is_frozen()` 判断：打包版这个端点变成 405，
-        而 _receive_client_log 的 frozen 分支成了生产路径不可达的死代码。
+        曾经在分发处加过 `not is_frozen()`（现为 `not is_debug_mode()`）判断：
+        关掉时这个端点会变成 405，而 _receive_client_log 的非调试分支成了
+        生产路径不可达的死代码。
         """
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: False)
         _clear_secret_path(monkeypatch)
         req = _FakeLogRequest()
         resp = _run_in_thread(api_mod._dispatch_http(req, "/api/client-log"))
@@ -1016,21 +1031,27 @@ class TestClientLogEndpoint:
 
 
 class TestDebugLogRoute:
-    """debug_log.js：源码运行才下发，打包版 404（_serve_debug_log 唯一入口）。"""
+    """debug_log.js：只在调试模式下下发，默认运行 404（_serve_debug_log 唯一入口）。"""
 
-    def test_source_serves_file(self, monkeypatch):
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: False)
+    def test_debug_mode_serves_file(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
         resp = api_mod._serve_debug_log()
         assert resp.status_code == 200
         assert resp.media_type == "application/javascript"
 
-    def test_frozen_404(self, monkeypatch):
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
+    def test_not_debug_404(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: False)
+        assert api_mod._serve_debug_log().status_code == 404
+
+    def test_missing_file_404(self, monkeypatch, tmp_path):
+        """产物里缺文件（自定义构建）：必须 404，不能拖到 FileResponse 抛 500。"""
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
+        monkeypatch.setattr(api_mod, "get_res_path", lambda _name: str(tmp_path / "nope.js"))
         assert api_mod._serve_debug_log().status_code == 404
 
     def test_dispatch_reaches_it(self, monkeypatch):
         """分发处必须真的调用 _serve_debug_log（否则它又是死代码）。"""
-        monkeypatch.setattr(api_mod, "is_frozen", lambda: True)
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: False)
         _clear_secret_path(monkeypatch)
 
         class _Req:
@@ -1038,3 +1059,30 @@ class TestDebugLogRoute:
 
         resp = _run_in_thread(api_mod._dispatch_http(_Req(), "/debug_log.js"))
         assert resp.status_code == 404
+
+
+class TestTestPageRoute:
+    """/test：与 debug_log.js 同构 —— 调试门禁在处理器内部。
+
+    门禁必须在 `_serve_test` 里而不是 `_normalize_path`：加密模式的 secret 分支
+    是整条透传的，归一化层只看得见明文分支，`/{secret}/test` 会绕过开关
+    （回归用例见 test_dispatcher.py::TestDebugOnlyResources）。
+    """
+
+    def test_debug_mode_serves_page(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
+        resp = api_mod._serve_test()
+        assert resp.status_code == 200
+        assert resp.media_type == "text/html"
+
+    def test_not_debug_404(self, monkeypatch):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: False)
+        resp = api_mod._serve_test()
+        assert resp.status_code == 404
+        # 裸 404（与 debug_log.js 一致），不是带错误提示的 HTML
+        assert resp.body == b""
+
+    def test_missing_file_404(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
+        monkeypatch.setattr(api_mod, "get_res_path", lambda _name: str(tmp_path / "nope.html"))
+        assert api_mod._serve_test().status_code == 404

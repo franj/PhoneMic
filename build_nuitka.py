@@ -145,11 +145,12 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--lto=yes",
         "--enable-plugin=pyside6",
         "--include-data-dir=./phonemic/resources=phonemic/resources",
-        "--noinclude-data-files=*/test.html",
-        # 手机端日志浮层的实现只在源码运行时下发（见 api.py:_serve_mobile /
-        # _serve_debug_log）。不排除就会被打进产物 —— 「打包版没有调试日志」
-        # 得真由「文件不存在」保证，而不是只靠服务端不注入标签。
-        "--noinclude-data-files=*/debug_log.js",
+        # 调试资源（test.html / debug_log.js）随产物一起发布：发布版也能带着
+        # --debug（或 PHONEMIC_DEBUG=1）临时打开手机端日志浮层与 /test 页面。
+        # 默认运行不会下发它们 —— 门禁在运行期（phonemic/utils/debug.py 的
+        # is_debug_mode()，_serve_test / _serve_debug_log 各自兜底），不再靠
+        # 「文件不在产物里」。别在这里重新加 --noinclude-data-files 排除这两者，
+        # 否则打包版开 --debug 只会拿到 404。
         f"--include-data-files={build_info_path}=build_info.json",
         "--include-data-files=./LICENSE=LICENSE",
         "--include-data-files=./LICENSE.LGPL.txt=LICENSE.LGPL.txt",

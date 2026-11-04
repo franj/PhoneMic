@@ -275,8 +275,9 @@ def _build_mobile_html(pc_public_key_b64: str) -> str:
         1,
     )
     # head 可能带属性（如 data-page-node-id），不能假设精确等于 "<head>"
-    # 一并注入开发模式标记：真实环境由服务端下发（api.py:_serve_mobile），
-    # set_content 不走服务端，必须手动补上，否则手机端日志模块不会启动。
+    # 一并注入调试模式标记：真实环境由服务端下发（api.py:_serve_mobile，
+    # 需要 PHONEMIC_DEBUG=1 / --debug），set_content 不走服务端，必须手动补上，
+    # 否则手机端日志模块不会启动。
     #
     # location.hash 必须在这里设：boot 脚本先于主脚本与 SecureClient.init 执行，
     # 页面据此进入 url_fragment 模式（有 k= → 不落 TOFU 审批路径）。
@@ -1526,11 +1527,15 @@ class TestPhoneLog:
 
 
 class TestPackagedMode:
-    """打包版（服务端注入 __PHONEMIC_DEV__ = false）：日志模块完全不启动。"""
+    """默认运行（服务端注入 __PHONEMIC_DEV__ = false）：日志模块完全不启动。
+
+    打桩用的是「非调试模式」而非「打包版」：注入的 false 现在来自显式开关，
+    打包版只是恰好也走这条路（产物里连 debug_log.js 都没有）。
+    """
 
     def test_no_log_module_without_dev_mark(self, page):
         html = MOBILE_HTML_PATH.read_text(encoding="utf-8")
-        # 模拟打包版：服务端把占位符替换成 false（见 api.py:_serve_mobile）
+        # 模拟默认运行：服务端把占位符替换成 false（见 api.py:_serve_mobile）
         html = html.replace(
             "<!--PHONEMIC_DEV_MODE-->",
             "<script>window.__PHONEMIC_DEV__ = false;</script>",
@@ -1538,7 +1543,7 @@ class TestPackagedMode:
         page.set_content(html)
 
         assert page.evaluate("() => window.WS_DIAG") is False
-        # 入口按钮不创建（打包版连按钮都不保留）
+        # 入口按钮不创建（非调试模式连按钮都不保留）
         assert page.evaluate("() => document.getElementById('phone-log-btn')") is None
         # 但空壳接口仍在，保证 FilePanel 调用 PhoneLog.snap() 不报错
         assert page.evaluate("() => window.PhoneLog.snap()") == ""
@@ -1548,33 +1553,34 @@ class TestPackagedMode:
 
 
 class TestDevModeInjection:
-    """服务端注入：源码运行才下发 debug_log.js，打包版连标签都不发。
+    """服务端注入：只有调试模式才下发 debug_log.js，默认运行连标签都不发。
 
-    这是「打包版没有调试日志」的第一道保证（第二道是产物里根本没有该文件，
-    见 build_nuitka.py 的 --noinclude-data-files=*/debug_log.js；第三道是
-    ``_serve_debug_log`` 在 frozen 下直接 404，分发处真的会调用它）。这里只钉
-    第一道，因为它最容易在改 ``_serve_mobile`` 时被无声破坏。
+    这是「默认运行没有调试日志」的第一道保证（判定来自显式开关
+    ``phonemic.utils.debug.is_debug_mode()``，不再是 is_frozen 取反；第二道是
+    ``_serve_debug_log`` 在非调试模式下直接 404，分发处真的会调用它）。
+    发布产物里是**带着** debug_log.js 的（发布版也能 --debug 调试），所以只剩
+    这两道 —— 这里钉第一道，因为它最容易在改 ``_serve_mobile`` 时被无声破坏。
     """
 
-    def _serve(self, frozen: bool) -> str:
+    def _serve(self, debug: bool) -> str:
         from phonemic.server import api
 
-        old = api.is_frozen
-        api.is_frozen = lambda: frozen
+        old = api.is_debug_mode
+        api.is_debug_mode = lambda: debug
         try:
             return api._serve_mobile().body.decode("utf-8")
         finally:
-            api.is_frozen = old
+            api.is_debug_mode = old
 
-    def test_dev_injects_log_impl(self):
-        html = self._serve(False)
+    def test_debug_injects_log_impl(self):
+        html = self._serve(True)
         assert "<script>window.__PHONEMIC_DEV__ = true;</script>" in html
         assert '<script src="debug_log.js"></script>' in html
         # 占位符必须被吃掉：留着它等于页面少一段脚本
         assert "<!--PHONEMIC_DEV_MODE-->" not in html
 
-    def test_frozen_injects_flag_only(self):
-        html = self._serve(True)
+    def test_default_run_injects_flag_only(self):
+        html = self._serve(False)
         assert "<script>window.__PHONEMIC_DEV__ = false;</script>" in html
         assert '<script src="debug_log.js">' not in html
         assert "<!--PHONEMIC_DEV_MODE-->" not in html

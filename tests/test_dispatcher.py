@@ -106,6 +106,71 @@ def bare_server():
     time.sleep(0.3)
 
 
+@pytest.fixture
+def debug_mode(monkeypatch):
+    """打开调试开关（等价 PHONEMIC_DEBUG=1 / --debug）。
+
+    服务端跑在本进程的线程里，而分发处是调用时现查 api.is_debug_mode，
+    所以在这里打桩就能改变线上行为，不用重启服务。
+    """
+    from phonemic.server import api as api_mod
+
+    monkeypatch.setattr(api_mod, "is_debug_mode", lambda: True)
+    yield
+
+
+class TestDebugOnlyResources:
+    """调试模式专属入口（debug_log.js、/test）：默认运行一律 404。
+
+    这里钉的是「默认安静」这条产品行为：直接运行不该凭空多出诊断页面。
+    """
+
+    def test_debug_log_404_by_default(self, bare_server):
+        host, port, _, _ = bare_server
+        assert _get(host, port, "/debug_log.js")[0] == 404
+
+    def test_debug_log_200_in_debug_mode(self, bare_server, debug_mode):
+        host, port, _, _ = bare_server
+        status, headers = _get(host, port, "/debug_log.js")
+        assert status == 200
+        assert "javascript" in headers.get("content-type", "")
+
+    def test_test_page_404_by_default(self, bare_server):
+        host, port, _, _ = bare_server
+        assert _get(host, port, "/test")[0] == 404
+
+    def test_test_page_200_in_debug_mode(self, bare_server, debug_mode):
+        host, port, _, _ = bare_server
+        status, headers = _get(host, port, "/test")
+        assert status == 200
+        assert "text/html" in headers.get("content-type", "")
+
+    def test_test_page_404_by_default_encrypted(self, enc_server):
+        """加密模式：/{secret}/test 也必须被拦住。
+
+        回归用例：secret 分支在 _normalize_path 里是**整条透传**的，门禁若只写在
+        归一化层，这条路径就会绕过开关直接 200（门禁现在在 _serve_test 内部）。
+        """
+        host, port, sc, _ = enc_server
+        assert _get(host, port, f"/{sc.secret_path}/test")[0] == 404
+
+    def test_test_page_200_in_debug_mode_encrypted(self, enc_server, debug_mode):
+        host, port, sc, _ = enc_server
+        status, headers = _get(host, port, f"/{sc.secret_path}/test")
+        assert status == 200
+        assert "text/html" in headers.get("content-type", "")
+
+    def test_debug_log_404_by_default_encrypted(self, enc_server):
+        """debug_log.js 在加密模式下同样只认开关（_serve_debug_log 内部兜底）。"""
+        host, port, sc, _ = enc_server
+        assert _get(host, port, f"/{sc.secret_path}/debug_log.js")[0] == 404
+
+    def test_debug_log_200_in_debug_mode_encrypted(self, enc_server, debug_mode):
+        host, port, sc, _ = enc_server
+        status, _ = _get(host, port, f"/{sc.secret_path}/debug_log.js")
+        assert status == 200
+
+
 class TestEncryptedPathGuard:
     """加密模式：根路由不可见，仅 /{secret} 前缀放行。"""
 
@@ -127,11 +192,11 @@ class TestEncryptedPathGuard:
 
     def test_secret_subresources_200(self, enc_server):
         host, port, sc, _ = enc_server
+        # debug_log.js 不在其中：它只在调试模式下下发（见 TestDebugOnlyResources）
         for path in (
             "/sodium.js",
             "/msgpack.min.js",
             "/crypto_providers.js",
-            "/debug_log.js",
             "/favicon.ico",
         ):
             status, _ = _get(host, port, f"/{sc.secret_path}{path}")
@@ -256,11 +321,11 @@ class TestBareUrlPathGuard:
 
     def test_known_resources_200(self, bare_server):
         host, port, sc, _ = bare_server
+        # debug_log.js 不在其中：它只在调试模式下下发（见 TestDebugOnlyResources）
         for path in (
             "/sodium.js",
             "/msgpack.min.js",
             "/crypto_providers.js",
-            "/debug_log.js",
             "/favicon.ico",
         ):
             status, _ = _get(host, port, path)

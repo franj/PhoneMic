@@ -75,6 +75,8 @@ def test_parse_args_default():
     args = pm.parse_args()
     assert args.silent is False
     assert args.select_mode is None
+    # 默认不进调试模式（显式开关见 phonemic/utils/debug.py）
+    assert args.debug is False
 
 
 def test_parse_args_silent():
@@ -87,6 +89,12 @@ def test_parse_args_select_mode():
     sys.argv = ["PhoneMic.py", "--select-mode", "last"]
     args = pm.parse_args()
     assert args.select_mode == "last"
+
+
+def test_parse_args_debug():
+    sys.argv = ["PhoneMic.py", "--debug"]
+    args = pm.parse_args()
+    assert args.debug is True
 
 
 # ---------- 主流程测试 ----------

@@ -1,12 +1,12 @@
-    // ========== 手机端日志（仅开发模式加载） ==========
-    // 手机上（尤其微信内置浏览器）打不开 devtools，所以开发时自备查看入口：
+    // ========== 手机端日志（仅调试模式加载） ==========
+    // 手机上（尤其微信内置浏览器）打不开 devtools，所以调试时自备查看入口：
     // 屏幕上可直接看/复制，另可转发到 PC 的 cmd。
     //
-    // ⚠️ 本文件**只在从源码运行**时加载：服务端返回 mobile.html 时把 PHONEMIC_DEV_MODE
-    // 占位符展开成一段指向本文件的 script 标签（见 phonemic/server/api.py 的
-    // _serve_mobile）。打包版既不下发那个标签、
-    // 也不把本文件打进产物 —— 「打包版没有调试日志」由**文件不存在**保证，
-    // 而不是运行期判断。
+    // ⚠️ 本文件**只在调试模式**（PHONEMIC_DEBUG=1 或启动参数 --debug）下加载：
+    // 服务端返回 mobile.html 时把 PHONEMIC_DEV_MODE 占位符展开成一段指向本文件的
+    // script 标签（见 phonemic/server/api.py 的 _serve_mobile）。默认运行既不下发
+    // 那个标签，_serve_debug_log 也直接 404。本文件**随产物一起发布**（发布版也能
+    // 带 --debug 调试），所以拦住它的只有开关，不是「文件不存在」。
     //
     // 页面侧只留一个空壳 window.PhoneLog（见 mobile.html 同名脚本块），本文件
     // 加载后接管它。依赖：全局 t()（i18n，仅在面板渲染时调用 ⇒ 晚绑定）。
@@ -237,7 +237,7 @@
                 minLevel = minLevel === LEVELS.info ? LEVELS.debug : LEVELS.info;
                 render();
             });
-            // 走到这里必然是开发模式（非开发模式已在 IIFE 开头提前返回）
+            // 走到这里必然是调试模式（非调试模式已在 IIFE 开头提前返回）
             btn.classList.add('visible');
             // 状态栏是最自然的「出问题了」指示器，点它即可展开日志
             const bar = document.getElementById('status-bar');
