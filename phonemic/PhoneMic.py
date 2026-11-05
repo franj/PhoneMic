@@ -77,12 +77,12 @@ def wait_for_server(host: str, port: int, secret_path: str = "", timeout: float 
     start = time.time()
     while time.time() - start < timeout:
         try:
-            resp = urllib.request.urlopen(url, timeout=0.5)
+            resp = urllib.request.urlopen(url, timeout=0.1)
             if resp.status == 200:
                 return True
         except (urllib.error.URLError, OSError):
             pass
-        time.sleep(0.2)
+        time.sleep(0.05)
     return False
 
 
