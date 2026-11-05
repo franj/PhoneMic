@@ -200,6 +200,10 @@ def main():
     # 5. 创建 Dashboard 和 Tray
     dashboard = Dashboard(selected_ip, actual_port)
     hud = HudWindow()
+    # 悬浮窗首次 show() 要做一次性初始化（绘制/字体引擎、DWM 合成通道，实测
+    # 300~600ms），之后只要几毫秒。这段初始化没法拆分，只能延后到启动之后再跑，
+    # 否则第一次说话时窗口要等半秒才出现。延后 300ms 是让主界面先画完首帧。
+    QTimer.singleShot(300, hud.prewarm)
     tray = SystemTray(dashboard, get_res_path("favicon.ico"))
     dashboard.tray = tray
 
