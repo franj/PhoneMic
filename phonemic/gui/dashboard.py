@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
 from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.gui.dictionary_dialog import DictionaryDialog
+from phonemic.gui.about_dialog import AboutDialog
 from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
 from phonemic.utils.debug import is_debug_mode
-from phonemic.utils.paths import get_app_root, get_build_info
+from phonemic.utils.paths import get_app_root
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
 
@@ -769,9 +770,9 @@ class Dashboard(QMainWindow):
         self._refresh_qr()
 
     def show_about(self):
-        version, commit, _ = get_build_info()
-        content = self.i18n.tr("about.content", version=version, commit=commit)
-        QMessageBox.about(self, self.i18n.tr("about.title"), content)
+        # 用自定义窗口而非 QMessageBox.about：版本号要可选中复制，链接要真的能点开
+        # （理由见 about_dialog.py 顶部）。
+        AboutDialog(self).exec()
 
     def open_user_guide(self):
         guide_path = get_app_root() / "USER_GUIDE.md"

@@ -1,0 +1,34 @@
+﻿PhoneMic 许可与第三方组件说明
+PhoneMic - License and Third-Party Components
+
+--------------------------------------------------------------------
+
+PhoneMic 以 Apache License 2.0 发布。
+完整条款见安装目录下的 LICENSE 文件，或：
+https://www.apache.org/licenses/LICENSE-2.0
+
+本软件包含若干第三方组件（PySide6 / Starlette / Uvicorn / PyNaCl /
+noble 等）。其中 PySide6 (Qt for Python) 以 LGPL v3 动态链接使用：
+您有权替换安装目录下 pyside6\ 与 shiboken6\ 中的任何文件，Qt 的完整
+源代码可从 https://www.qt.io/offline-installers 获取，详见安装目录
+下的 LICENSE.LGPL.txt。
+
+其余组件的清单、许可证与项目地址，见安装目录下的 NOTICE.txt。
+
+安装目录中的许可文件：LICENSE、NOTICE.txt、LICENSE.LGPL.txt
+
+--------------------------------------------------------------------
+
+PhoneMic is released under the Apache License 2.0.
+The full text is in the LICENSE file in the installation directory, or at
+https://www.apache.org/licenses/LICENSE-2.0
+
+This software bundles third-party components (PySide6 / Starlette /
+Uvicorn / PyNaCl / noble and others). PySide6 (Qt for Python) is used
+under LGPL v3 via dynamic linking: you may replace any file under the
+pyside6\ and shiboken6\ directories. The complete Qt source code is
+available at https://www.qt.io/offline-installers - see LICENSE.LGPL.txt.
+
+See NOTICE.txt for the full list of bundled components and their licenses.
+
+--------------------------------------------------------------------

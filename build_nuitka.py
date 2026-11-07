@@ -155,6 +155,7 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--include-data-files=./LICENSE=LICENSE",
         "--include-data-files=./LICENSE.LGPL.txt=LICENSE.LGPL.txt",
         "--include-data-files=./NOTICE.txt=NOTICE.txt",
+        "--include-data-files=./NOTICE_en.txt=NOTICE_en.txt",
         "--include-data-files=./README.md=README.md",
         "--include-data-files=./USER_GUIDE.md=USER_GUIDE.md",
         # uvicorn 的 ws 协议类是字符串动态导入（uvicorn.config.load → import_from_string），

@@ -39,7 +39,11 @@ InstallDirRegKey HKCU "${REGPATH_UNINST}" "UninstallString"
 !endif
 OutFile "dist\${APP_NAME}_Setup_${BUILD_SUFFIX}.exe"
 
-LicenseData "NOTICE.txt"
+; 许可页显示「许可与第三方组件说明」摘要，而不是 NOTICE.txt 的 105 行组件清单：
+; 这一页的语义是「你要同意的条款」（按钮是 I Agree），NOTICE 是归属声明、不是条款。
+; 摘要页保留了两件必须「显著告知」的事：Apache 2.0 与 PySide6 的 LGPL v3 可替换声明。
+; 全文不靠这一页满足——LICENSE / NOTICE.txt / LICENSE.LGPL.txt 随产物装进 $INSTDIR。
+LicenseData "INSTALLER_LICENSE.txt"
 Page license
 Page directory
 Page instfiles

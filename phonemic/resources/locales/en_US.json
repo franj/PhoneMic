@@ -129,7 +129,12 @@
   },
   "about": {
     "title": "About PhoneMic",
-    "content": "<h3>PhoneMic</h3><p>Version {version} commit: {commit}</p><p>Seamlessly transfer text from your phone to your computer via voice input.</p><p>Tech stack: PySide6, Starlette, WebSocket</p><p>© 2026 PhoneMic Team</p>"
+    "version_line": "Version {version} · build {commit}",
+    "version_tooltip": "Selectable - include this line when reporting a problem",
+    "tagline": "Seamlessly transfer text from your phone to your computer via voice input.",
+    "tech_stack": "Built with PySide6 · Starlette · WebSocket",
+    "copyright": "© 2026 PhoneMic Team",
+    "close": "Close"
   },
   "close_choice": {
     "title": "Choose Close Action",
