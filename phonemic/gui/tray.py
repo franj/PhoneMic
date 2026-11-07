@@ -1,6 +1,9 @@
 import logging
 import os
 
+import win32api
+import win32gui
+import win32process
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction, QActionGroup
 from PySide6.QtCore import QObject, Slot, Qt
@@ -12,6 +15,44 @@ from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
 
 logger = logging.getLogger(__name__)
+
+
+def _bring_to_front(widget) -> None:
+    """显示窗口并把它提到系统最前。
+
+    Qt 侧只有 show() / raise_() / activateWindow()，形态上已经够用了，但 Windows
+    有一条「防抢焦点」规则：调用线程不是当前前台线程时，系统会直接忽略
+    SetForegroundWindow 请求。于是窗口从托盘恢复出来时 raise/activate 静默失效，
+    z 序仍在别的程序下面——表现就是「点了托盘，窗口没露出来」。
+
+    补的那一手是 Win32 的标准做法：AttachThreadInput 把自己的线程挂到当前前台
+    线程的输入队列上（同一输入队列内允许抢焦点），SetForegroundWindow，再摘下。
+    托盘点击本身就是明确的用户意图，这里抢焦点是合理的。
+    """
+    if widget.isMinimized():
+        widget.showNormal()
+    elif not widget.isVisible():
+        widget.show()
+    widget.raise_()
+    widget.activateWindow()
+
+    hwnd = int(widget.winId())
+    fg = win32gui.GetForegroundWindow()
+    fg_thread = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+    cur_thread = win32api.GetCurrentThreadId()
+    # 前台窗口本来就在本线程（例如焦点还在悬浮窗上）时无需附加
+    attached = bool(fg_thread) and fg_thread != cur_thread
+    try:
+        if attached:
+            win32process.AttachThreadInput(cur_thread, fg_thread, True)
+        win32gui.SetForegroundWindow(hwnd)
+    except Exception:
+        # 置前失败不影响「窗口已显示」这一事实，降级为可能被挡
+        logger.exception("窗口置前失败")
+    finally:
+        if attached:
+            win32process.AttachThreadInput(cur_thread, fg_thread, False)
+
 
 class SystemTray(QObject):
     def __init__(self, dashboard: Dashboard, icon_path: str):
@@ -62,15 +103,11 @@ class SystemTray(QObject):
         if self.dashboard.isVisible():
             self.dashboard.hide()
         else:
-            self.dashboard.show()
-            self.dashboard.raise_()
-            self.dashboard.activateWindow()
+            _bring_to_front(self.dashboard)
 
     def show_main_window(self):
-        if self.dashboard.isHidden():
-            self.dashboard.show()
-            self.dashboard.raise_()
-            self.dashboard.activateWindow()
+        """显示主界面并提到最前（菜单「显示主界面」走同一条路）。"""
+        _bring_to_front(self.dashboard)
 
     def _create_status_icon(self, connected: bool) -> QIcon:
         """根据连接状态生成带圆点的图标（包含多分辨率版本）"""
