@@ -383,8 +383,13 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 连接握手成功后服务端**主动下发一次**，**所有认证方式一致**——不挂在握手的任何一条消息上；它同时充当了"通道已建立"的确认（见 §7 握手小节）：
 
 ```
-{"type":"config", "mobile_max_records":10, "max_frame_size":16777216}
+{"type":"config", "mobile_max_records":10, "mobile_send_mode":"", "max_frame_size":16777216}
 ```
+
+- **`mobile_send_mode`**：手机端默认发送方式，取自 PC 端 `设置 → 手机端设置 → 发送方式`。
+  `"auto"` = 识别出文字即自动发送；`"manual"` = 只填入输入框，等用户点发送；
+  `""`（空）= 不下发偏好，手机端沿用自身默认（自动发送），此时**不得**覆盖用户在手机端的临时切换。
+  该键同时在 PC 端设置变更时以单键形式热推送（见上）。
 
 - **`max_frame_size`**：服务端 WebSocket 单帧上限（字节），即 `uvicorn` 的 `ws_max_size`（`api.py:WS_MAX_FRAME_SIZE`，当前 16MB）。手机端据此**收紧**文件分块上限，但不会越过该链路的 `CHUNK_MAX`，见 §9。
   为什么必须下发：超帧会被服务端以 **close 1009 断开整条连接**（不是丢弃单帧），无法靠 `收到错误就换小块重试` 来兜底，只能两端对齐后主动限流。

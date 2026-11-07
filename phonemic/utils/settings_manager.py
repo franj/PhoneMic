@@ -50,6 +50,7 @@ class SettingsManager(QObject):
             "hud_font_size": 14,
             "hud_escape_enabled": True,
             "mobile_max_records": 10,
+            "mobile_send_mode": "",               # 手机端发送方式: ""(默认，等同自动), "auto"(自动发送), "manual"(手动发送)
             "language": system_lang.detect_system_language(),
             "close_action": None,                # None, "quit", "tray"
             "network_selection_mode": "ask",      # "auto", "last", "ask"
@@ -96,6 +97,9 @@ class SettingsManager(QObject):
                 # 校验 text_input_mode
                 if loaded.get("text_input_mode") not in ("paste", "type", "direct"):
                     loaded["text_input_mode"] = default["text_input_mode"]
+                # 校验 mobile_send_mode（"" 表示不干预，手机端用自己的默认值）
+                if loaded.get("mobile_send_mode") not in ("", "auto", "manual"):
+                    loaded["mobile_send_mode"] = default["mobile_send_mode"]
                 self._settings = loaded
             except Exception:
                 # 文件损坏，重置为默认配置

@@ -51,8 +51,8 @@ class SettingsDialog(QDialog):
         content_layout.setContentsMargins(0, 0, 0, 0)
 
         content_layout.addWidget(self._create_hud_group())
-        content_layout.addWidget(self._create_input_group())
-        content_layout.addWidget(self._create_chat_group())
+        # 上屏方式只由主界面菜单栏与托盘菜单提供，不进设置窗口
+        content_layout.addWidget(self._create_mobile_group())
         content_layout.addWidget(self._create_close_action_group())
         content_layout.addWidget(self._create_startup_group())   # 新增
         content_layout.addWidget(self._create_other_group())
@@ -93,23 +93,8 @@ class SettingsDialog(QDialog):
 
         return group
 
-    def _create_input_group(self):
-        group = QGroupBox(self.i18n.tr("settings.input_group"))
-        layout = QFormLayout(group)
-        layout.setSpacing(12)
-        layout.setContentsMargins(12, 16, 12, 12)
-
-        self.input_mode_combo = QComboBox()
-        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_paste"), "paste")
-        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_type"), "type")
-        self.input_mode_combo.addItem(self.i18n.tr("settings.input_mode_direct"), "direct")
-        self.input_mode_combo.setToolTip(self.i18n.tr("settings.input_mode_tooltip"))
-        layout.addRow(self.i18n.tr("settings.input_mode") + ":", self.input_mode_combo)
-
-        return group
-
-    def _create_chat_group(self):
-        group = QGroupBox(self.i18n.tr("settings.chat_group"))
+    def _create_mobile_group(self):
+        group = QGroupBox(self.i18n.tr("settings.mobile_group"))
         layout = QFormLayout(group)
         layout.setSpacing(12)
         layout.setContentsMargins(12, 16, 12, 12)
@@ -119,6 +104,14 @@ class SettingsDialog(QDialog):
         self.max_records_spin.setSuffix(self.i18n.tr("settings.records_suffix"))
         self.max_records_spin.setToolTip(self.i18n.tr("settings.max_records_tooltip"))
         layout.addRow(self.i18n.tr("settings.max_records") + ":", self.max_records_spin)
+
+        # 发送方式：留空表示不下发偏好，手机端沿用自身默认（自动发送）
+        self.send_mode_combo = QComboBox()
+        self.send_mode_combo.addItem(self.i18n.tr("settings.send_mode_default"), "")
+        self.send_mode_combo.addItem(self.i18n.tr("settings.send_mode_auto"), "auto")
+        self.send_mode_combo.addItem(self.i18n.tr("settings.send_mode_manual"), "manual")
+        self.send_mode_combo.setToolTip(self.i18n.tr("settings.send_mode_tooltip"))
+        layout.addRow(self.i18n.tr("settings.send_mode") + ":", self.send_mode_combo)
 
         return group
 
@@ -201,9 +194,8 @@ class SettingsDialog(QDialog):
         font_val = self.sm.get("hud_font_size", 14)
         self.set_combo_index(self.font_combo, font_val)
 
-        self.set_combo_index(self.input_mode_combo, self.sm.get("text_input_mode", "paste"))
-
         self.max_records_spin.setValue(self.sm.get("mobile_max_records", 10))
+        self.set_combo_index(self.send_mode_combo, self.sm.get("mobile_send_mode", "") or "")
 
         # 关闭行为
         close_action = self.sm.get("close_action", None)
@@ -240,9 +232,10 @@ class SettingsDialog(QDialog):
         else:
             self.sm.set("hud_font_size", selected_data)
 
-        self.sm.set("text_input_mode", self.input_mode_combo.currentData())
-
         self.sm.set("mobile_max_records", self.max_records_spin.value())
+
+        # 发送方式（""=默认，不下发偏好）
+        self.sm.set("mobile_send_mode", self.send_mode_combo.currentData() or "")
 
         # 关闭行为
         current_index = self.close_combo.currentIndex()

@@ -315,5 +315,30 @@ def test_text_input_mode_invalid_value_reset_to_default(mock_config_path, reset_
     assert sm.get("text_input_mode") == "paste"
 
 
+def test_mobile_send_mode_default_is_empty(mock_config_path, reset_singleton):
+    """默认值为空串，表示不下发偏好，手机端用自己的默认（自动发送）"""
+    sm = SettingsManager.instance()
+    assert sm.get("mobile_send_mode") == ""
+
+
+def test_mobile_send_mode_valid_values(mock_config_path, reset_singleton):
+    config_file = mock_config_path / "settings.json"
+    for mode in ("", "auto", "manual"):
+        SettingsManager._instance = None
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"mobile_send_mode": mode}, f)
+        sm = SettingsManager.instance()
+        assert sm.get("mobile_send_mode") == mode
+
+
+def test_mobile_send_mode_invalid_value_reset_to_default(mock_config_path, reset_singleton):
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"mobile_send_mode": "sometimes"}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("mobile_send_mode") == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

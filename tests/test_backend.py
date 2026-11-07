@@ -254,6 +254,38 @@ def test_config_message_on_connect(secure_server):
         assert isinstance(inner["mobile_max_records"], int)
 
 
+def test_config_message_includes_send_mode(secure_server):
+    """初始 config 必须携带手机端发送方式（空串=默认，不干预手机端）"""
+    host, port, queue, sc = secure_server
+    phone = PhoneSimulator(sc.get_public_key_b64())
+
+    with ws_connect(ws_url(host, port, sc)) as ws:
+        authenticate(ws, phone)
+        consume_connect(queue)
+
+        inner = phone.decrypt(ws.recv(timeout=2))
+        assert inner["type"] == "config"
+        assert "mobile_send_mode" in inner
+        assert inner["mobile_send_mode"] in ("", "auto", "manual")
+
+
+def test_push_send_mode_to_connected_phone(secure_server):
+    """设置变更时以单键形式推送 mobile_send_mode"""
+    host, port, queue, sc = secure_server
+    phone = PhoneSimulator(sc.get_public_key_b64())
+
+    with ws_connect(ws_url(host, port, sc)) as ws:
+        authenticate(ws, phone)
+        consume_connect(queue)
+        consume_initial_config(ws, phone)
+
+        assert push_config("mobile_send_mode", "manual") is True
+
+        inner = phone.decrypt(ws.recv(timeout=2))
+        assert inner["type"] == "config"
+        assert inner["mobile_send_mode"] == "manual"
+
+
 def test_push_config_to_connected_phone(secure_server):
     """push_config 应实时推送加密的配置更新到已连接的手机端"""
     host, port, queue, sc = secure_server

@@ -452,6 +452,33 @@ class TestConfigSync:
         )
         assert mobile_page.evaluate("() => window.chatManagerInstance.maxHistory") == 10
 
+    def test_config_sets_manual_send_mode(self, mobile_page):
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_send_mode: 'manual'})"
+        )
+        assert mobile_page.evaluate(
+            "() => document.body.classList.contains('auto-mode')"
+        ) is False
+
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_send_mode: 'auto'})"
+        )
+        assert mobile_page.evaluate(
+            "() => document.body.classList.contains('auto-mode')"
+        ) is True
+
+    def test_config_empty_send_mode_keeps_phone_choice(self, mobile_page):
+        """空值=不下发偏好：不覆盖用户在手机端的临时切换"""
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_send_mode: 'manual'})"
+        )
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_send_mode: ''})"
+        )
+        assert mobile_page.evaluate(
+            "() => document.body.classList.contains('auto-mode')"
+        ) is False
+
 
 class TestDisconnect:
     """非选择器路径的断连（首连失败、前台掉线）的界面表现：立刻显示 + 输入禁用。

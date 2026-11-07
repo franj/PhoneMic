@@ -245,25 +245,30 @@
             align-items: center;
             justify-content: center;
         }
-        #btn-plus .hamburger {
-            width: 18px;
-            height: 2px;
-            background: currentColor;
+        /* 空输入时显示「+」（同微信），一根横杆 + 一根竖杆拼成 */
+        #btn-plus .plus-icon {
             position: relative;
-            border-radius: 1px;
+            width: 20px;
+            height: 20px;
         }
-        #btn-plus .hamburger::before,
-        #btn-plus .hamburger::after {
+        #btn-plus .plus-icon::before,
+        #btn-plus .plus-icon::after {
             content: '';
             position: absolute;
-            left: 0;
-            width: 100%;
-            height: 2px;
+            top: 50%;
+            left: 50%;
             background: currentColor;
             border-radius: 1px;
+            transform: translate(-50%, -50%);
         }
-        #btn-plus .hamburger::before { top: -6px; }
-        #btn-plus .hamburger::after { top: 6px; }
+        #btn-plus .plus-icon::before {
+            width: 20px;
+            height: 2px;
+        }
+        #btn-plus .plus-icon::after {
+            width: 2px;
+            height: 20px;
+        }
         #btn-plus:active {
             transform: scale(0.92);
         }
@@ -637,7 +642,7 @@
             <textarea id="input-box" rows="1"></textarea>
             <button id="mode-toggle" data-page-node-id="NQ0W5iXZWejDTUyEOEimOR">⚡</button>
         </div>
-        <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="hamburger" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
+        <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="plus-icon" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
         <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
         <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
         <div id="panel-tabs" class="hidden">
@@ -2615,6 +2620,17 @@
                 this.inputBox.placeholder = t('input_placeholder_manual');
             }
             this.updatePlusSendVisibility();
+        }
+        /**
+         * 应用 PC 下发的发送方式。手机端工具栏上的切换按钮仍可临时改动，
+         * PC 只在连接建立或设置变更时重新下发，不会持续覆盖。
+         */
+        setAutoMode(enabled) {
+            const next = !!enabled;
+            if (this.autoMode === next) return;
+            this.autoMode = next;
+            this.updateSendButtonUI();
+            this.updateModeToggleVisibility();
         }
         updateModeToggleVisibility() {
             if (!this.wsClient.getConnected()) {
@@ -5173,6 +5189,11 @@
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.debug(t('log_config_updated') + data.mobile_max_records);
+            }
+            // 发送方式：PC 端「手机端设置」下发。空值=默认，不干预手机端当前选择
+            if (data.mobile_send_mode !== undefined && data.mobile_send_mode !== '') {
+                uiController.setAutoMode(data.mobile_send_mode === 'auto');
+                console.debug('[Config] send mode = ' + data.mobile_send_mode);
             }
             // 服务端单帧上限 → 收紧文件分块（未下发时用 CHUNK_MAX，随链路取值）
             if (data.max_frame_size !== undefined) FilePanel.setServerMaxFrame(data.max_frame_size);

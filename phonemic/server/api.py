@@ -63,12 +63,19 @@ class ConnectionManager:
         # 配置热重载支持
         self.sm = SettingsManager.instance()
         self.max_records = self.sm.get("mobile_max_records", 10)
+        self.send_mode = self.sm.get("mobile_send_mode", "") or ""
         self.sm.connect_changed("mobile_max_records", self._on_max_records_changed)
+        self.sm.connect_changed("mobile_send_mode", self._on_send_mode_changed)
 
     def _on_max_records_changed(self, new_value: int) -> None:
         self.max_records = new_value
         logger.info(f"Mobile max records updated to {new_value}")
         push_config("mobile_max_records", self.max_records)
+
+    def _on_send_mode_changed(self, new_value) -> None:
+        self.send_mode = new_value or ""
+        logger.info(f"Mobile send mode updated to {self.send_mode or 'default'}")
+        push_config("mobile_send_mode", self.send_mode)
 
     async def connect(self, websocket, session) -> None:
         """
@@ -106,10 +113,12 @@ class ConnectionManager:
             await _send_frame(websocket, {
                 "type": "config",
                 "mobile_max_records": self.max_records,
+                "mobile_send_mode": self.send_mode,
                 "max_frame_size": WS_MAX_FRAME_SIZE,
             })
             logger.debug(
                 f"Sent config to client: max_records={self.max_records}, "
+                f"send_mode={self.send_mode or 'default'}, "
                 f"max_frame_size={WS_MAX_FRAME_SIZE}"
             )
         except Exception as e:

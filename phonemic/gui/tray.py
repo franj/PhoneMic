@@ -172,7 +172,7 @@ class SystemTray(QObject):
         menu.addAction(self.i18n.tr("dashboard.menu_dictionary")).triggered.connect(self._open_dictionary_dialog)
         menu.addSeparator()
 
-        # 上屏方式（三选一），与主界面菜单 / 偏好设置保持一致。
+        # 上屏方式（三选一），与主界面菜单保持一致。
         # 与主界面「网络」菜单一致：用互斥组，Qt 会画成单选圆点。
         self._input_group = QActionGroup(menu)
         self._input_group.setExclusive(True)

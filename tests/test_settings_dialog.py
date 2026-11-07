@@ -405,5 +405,55 @@ def test_silent_preference_saved_on_accept(qtbot, settings_manager, mock_languag
     # 配置已持久化
     assert settings_manager.get("auto_start_silent") is True
 
+# ===================== 手机端设置：发送方式 =====================
+
+def test_send_mode_defaults_to_empty(qtbot, settings_manager, mock_languages):
+    """未设置时选中「默认」（空串），且三个选项齐全"""
+    settings_manager.set("mobile_send_mode", "")
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+
+    combo = dialog.send_mode_combo
+    assert combo.currentData() == ""
+    assert {combo.itemData(i) for i in range(combo.count())} == {"", "auto", "manual"}
+    dialog.close()
+
+
+def test_send_mode_loads_saved_value(qtbot, settings_manager, mock_languages):
+    settings_manager.set("mobile_send_mode", "manual")
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+    assert dialog.send_mode_combo.currentData() == "manual"
+    dialog.close()
+
+
+def test_send_mode_save(qtbot, settings_manager, mock_languages):
+    settings_manager.set("mobile_send_mode", "")
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.send_mode_combo.setCurrentIndex(dialog.send_mode_combo.findData("auto"))
+    dialog.accept()
+    assert settings_manager.get("mobile_send_mode") == "auto"
+
+    # 再改回默认，配置应回到空串而不是残留 auto
+    settings_manager.set("mobile_send_mode", "auto")
+    dialog2 = SettingsDialog()
+    qtbot.addWidget(dialog2)
+    dialog2.send_mode_combo.setCurrentIndex(dialog2.send_mode_combo.findData(""))
+    dialog2.accept()
+    assert settings_manager.get("mobile_send_mode") == ""
+
+
+def test_send_mode_cancel_does_not_save(qtbot, settings_manager, mock_languages):
+    settings_manager.set("mobile_send_mode", "auto")
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+
+    dialog.send_mode_combo.setCurrentIndex(dialog.send_mode_combo.findData("manual"))
+    dialog.reject()
+    assert settings_manager.get("mobile_send_mode") == "auto"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

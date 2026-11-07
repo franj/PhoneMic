@@ -689,7 +689,7 @@ class Dashboard(QMainWindow):
         self.act_restart_service.triggered.connect(self._on_restart_service)
         network_menu.addAction(self.act_restart_service)
 
-        # 上屏方式菜单 - 与偏好设置面板中的「上屏方式」等价，作为快速配置入口。
+        # 上屏方式菜单 - 与托盘菜单同源（都写 text_input_mode）
         # 与「网络」菜单保持一致：用互斥组，Qt 会画成单选圆点。
         input_group = QActionGroup(self)
         input_group.setExclusive(True)
