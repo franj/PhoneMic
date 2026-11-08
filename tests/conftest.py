@@ -47,6 +47,10 @@
 #      曾经的 sleep(0.3) 是"端口来不及释放"的保险，实测 40 轮连续启停去掉它 0 失败
 #      （端口本来就每轮换新，见 get_test_port）；而它让 80 条用例白赔 24 秒。
 #      真正需要确认的是"线程退了没有"，那是 shutdown_server() 干的事。
+#
+# 跑全量请并行：``pytest -n 8``（22 核机器实测 103s → 25s；-n 4 约 32s）。
+# 端口由 _worker_port_offset() 按 worker 分段，不用手工改代码。单独跑某个文件或
+# 要下断点调试时照旧不带 -n —— 所以别把 -n 写进 addopts。
 # ---------------------------------------------------------------------------
 
 
@@ -84,8 +88,23 @@ from phonemic.tunnel.frame import encode as frame_encode
 
 _HOST = "127.0.0.1"
 
+
+def _worker_port_offset() -> int:
+    """并行跑（pytest-xdist）时给每个 worker 分一段独立端口。
+
+    每个 worker 是独立进程，各自的 ``_next_port`` 都从同一个数开始往上涨 ⇒
+    不打散的话四个 worker 会同时从 20000 发起探测，抢同一批端口。
+    ``PYTEST_XDIST_WORKER`` 是 gw0 / gw1 / gw2 / gw3，每段留 1000 个够用；
+    不在 xdist 下时环境变量不存在，偏移为 0，行为与从前完全一致。
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker.startswith("gw") and worker[2:].isdigit():
+        return int(worker[2:]) * 1000
+    return 0
+
+
 # 起始端口选在动态端口池（1024–14999）之外，避免被系统临时分配
-_START_PORT = 20000
+_START_PORT = 20000 + _worker_port_offset()
 
 _next_port = _START_PORT
 
