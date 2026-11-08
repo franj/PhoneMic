@@ -45,3 +45,15 @@ dev = [
     "pytest-playwright>=0.7.0,<1.0.0",
     "pytest-xdist>=3.8.0",
 ]
+
+# 全量就这么跑：`uv run pytest`。1165 条 25 秒（串行 103 秒）。
+#
+# 为什么并行度写死 4 而不是 -n auto：auto 按核数开（开发机 22 核），而每个 worker
+# 都要拉一个 chromium，二十几个浏览器反而更慢、还把 10G 可用内存吃光。
+# 8 是开发机器实测的甜点（-n 4 = 32s，-n 8 = 25s，再往上收益归零），但考虑4足够。
+#
+# 什么情况下加 -n0：跑单个文件、要看真实执行顺序、要下断点（xdist 下断点不会命中）。
+# 这是唯一的例外，其余时候不用记参数。
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-n 4 -ra --durations=10"
