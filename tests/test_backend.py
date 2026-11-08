@@ -736,12 +736,16 @@ def test_server_start_stop():
 
     assert wait_for_server_ready(host, port, sc.secret_path), "Server did not start"
 
-    stop_server()
+    # shutdown_server 返回时线程已退出、监听套接字已关闭，不必再 sleep 等端口。
+    # 那条 sleep(0.5) 在慢机器上照样可能不够（真的没释放时它却会白白通过前一秒）。
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.5)
 
+    # timeout 只用来区分"秒回"和"不回应"：服务端活着时本机 5ms 内就会给 404，
+    # 0.2s 已是 40 倍余量。而 Windows 对无人监听的端口**丢包不回 RST**，给 1s
+    # 就是让这条断言每次实等满 1 秒（同 test_keepalive 里的那个坑）。
     with pytest.raises((urllib.error.URLError, OSError, ConnectionRefusedError)):
-        urllib.request.urlopen(f"http://{host}:{port}/", timeout=1.0)
+        urllib.request.urlopen(f"http://{host}:{port}/", timeout=0.2)
 
 
 def test_server_restart_cycle():
@@ -757,8 +761,7 @@ def test_server_restart_cycle():
     start_server(host, port, bridge)
     assert wait_for_server_ready(host, port, sc.secret_path), "First start failed"
 
-    stop_server()
-    time.sleep(0.5)
+    shutdown_server()
 
     start_server(host, port2, bridge)
     assert wait_for_server_ready(host, port2, sc.secret_path), "Restart failed"
@@ -775,9 +778,8 @@ def test_server_restart_cycle():
         assert msg_type == "preview"
         assert text == "after restart"
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 # ---------- 测试 restart_server（模式切换）----------
@@ -807,9 +809,8 @@ def test_restart_server_with_different_host():
         assert msg_type == "preview"
         assert text == "after mode switch"
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 def test_restart_server_preserves_bridge():
@@ -824,8 +825,7 @@ def test_restart_server_preserves_bridge():
     start_server("127.0.0.1", port, bridge)
     assert wait_for_server_ready("127.0.0.1", port, sc.secret_path)
 
-    stop_server()
-    time.sleep(0.5)
+    shutdown_server()
     start_server("127.0.0.1", port2, bridge)
     assert wait_for_server_ready("127.0.0.1", port2, sc.secret_path)
 
@@ -843,9 +843,8 @@ def test_restart_server_preserves_bridge():
         inner = phone.decrypt(msg)
         assert inner["text"] == "post-restart"
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 # ---------- 并发连接：认证后才抢占 ----------

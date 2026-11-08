@@ -383,18 +383,17 @@ def test_dynamic_secret_switch_without_restart():
     assert wait_for_server_ready(host, port, sc1.secret_path)
     assert _get(host, port, f"/{sc1.secret_path}/")[0] == 200
 
-    # 运行中替换（模拟算法/模式切换），服务器不重启
+    # 运行中替换（模拟算法/模式切换），服务器不重启。path 守卫每次请求现读
+    # _secure_channel，所以不需要 sleep 等生效——那 0.3s 从来等的是空气。
     sc2 = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc2)
-    time.sleep(0.3)
 
     assert sc1.secret_path != sc2.secret_path
     assert _get(host, port, f"/{sc1.secret_path}/")[0] == 404   # 旧路径立即失效
     assert _get(host, port, f"/{sc2.secret_path}/")[0] == 200   # 新路径可用
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 def test_get_secret_path_tracks_latest_channel():

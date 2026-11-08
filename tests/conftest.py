@@ -48,8 +48,13 @@
 #      （端口本来就每轮换新，见 get_test_port）；而它让 80 条用例白赔 24 秒。
 #      真正需要确认的是"线程退了没有"，那是 shutdown_server() 干的事。
 #
-# 全量就这么跑：``uv run pytest``（并行度等默认值配在 pyproject 的 [tool.pytest.ini_options]，
-# 22 核机器实测 103s → 25s）。端口由 _worker_port_offset() 按 worker 分段，不用手工改代码。
+#   3. **别用"连不上"来断言"服务已停"** —— Windows 对无人监听的端口丢包不回 RST，
+#      这种断言每次都会实等满 timeout。要么用 shutdown_server() 的线程守卫，要么把
+#      timeout 压到 0.2s 以内（活着的本机服务 5ms 就应答了，够区分）。
+#
+# 全量就这么跑：``uv run pytest``（并行度与分发策略配在 pyproject 的
+# [tool.pytest.ini_options]，串行 93s → 4 个 worker 约 28s）。端口由
+# _worker_port_offset() 按 worker 分段，不用手工改代码。
 # 只有三种情况加 ``-n0``：跑单个文件、要看真实执行顺序、要下断点（xdist 下断点不命中）。
 # ---------------------------------------------------------------------------
 
