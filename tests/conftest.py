@@ -32,12 +32,34 @@
 # 那种断言换个画法就会红，而真正画歪了它又拦不住。老老实实截图人工核对。
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 服务器类 fixture 的两条约定（2026-11 全量从 207s 砍到 103s 时立的，别倒退回去）
+#
+#   1. **保持函数作用域，不要为了省时间改成 module/session 级。**
+#      test_backend / test_dispatcher / test_e2ee_server 里的服务器是进程级单例
+#      （set_bridge / set_secure_channel / push_config / 审批注册表全是模块全局），
+#      用例之间正是靠"每条重启一次"拿到干净状态。改成 module 级等于用隔离性换速度，
+#      一旦某条用例漏清队列，失败会以"后面某条毫不相干的用例红了"的形式出现——
+#      那是拿最贵的调试成本去换最便宜的墙钟时间。真要合并，先把状态显式化
+#      （把 bridge / sc / registry 都变成 fixture 显式重置），顺序反了必踩。
+#
+#   2. **收尾不要用 time.sleep() 兜底，用 shutdown_server()。**
+#      曾经的 sleep(0.3) 是"端口来不及释放"的保险，实测 40 轮连续启停去掉它 0 失败
+#      （端口本来就每轮换新，见 get_test_port）；而它让 80 条用例白赔 24 秒。
+#      真正需要确认的是"线程退了没有"，那是 shutdown_server() 干的事。
+# ---------------------------------------------------------------------------
+
 
 import base64
 import json
 import os
 import socket
+import time
+import urllib.error
+import urllib.request
 from hashlib import blake2b
+
+import pytest
 
 # Qt 测试一律跑在 offscreen 平台：窗口只在内存里，屏幕上什么都不弹。
 #
@@ -98,6 +120,62 @@ def get_test_port(max_tries: int = 500) -> int:
     raise RuntimeError(
         f"在 {max_tries} 次尝试内未找到空闲端口（起始端口 {_START_PORT}）"
     )
+
+
+def wait_for_server_ready(
+    host: str,
+    port: int,
+    secret_path: str = "",
+    timeout: float = 5.0,
+    ok_statuses: tuple = (200, 404),
+) -> bool:
+    """等服务器真的能应答 HTTP，返回是否就绪。
+
+    为什么不是「一条 urlopen 失败就 sleep(0.1) 再重试」：
+    ``start_server()`` 返回后，端口 67ms 就已经能连上（实测），但 uvicorn 开始
+    accept 之前还有一个几毫秒的缝。第一枪落在这条缝里时，请求会**一直挂着**
+    直到客户端超时——旧实现给的是 ``timeout=0.5``，于是每条用例的 setup 稳定
+    吃掉 0.61s，而服务器其实 67ms 就起好了。80 条用例走这条路，纯白赔 40 秒。
+
+    这里改成「先探 TCP（50ms 超时）→ 再发一次 HTTP（50ms 超时）→ 间隙只歇
+    5ms」，同一环境实测 66~104ms 就绪，不再有 0.5s 的悬崖。
+    """
+    prefix = f"/{secret_path}" if secret_path else ""
+    url = f"http://{host}:{port}{prefix}/"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.05)
+            if sock.connect_ex((host, port)) != 0:
+                time.sleep(0.005)
+                continue
+        try:
+            with urllib.request.urlopen(url, timeout=0.05) as resp:
+                if resp.status in ok_statuses:
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code in ok_statuses:
+                return True
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.005)
+    return False
+
+
+def shutdown_server() -> None:
+    """停服，并确认后台线程真的退出了。
+
+    ``stop_server()`` 里的 join 有 5s 上限，超时只是"放生"——线程还活着、端口
+    还占着，后面的用例就会莫名其妙变慢或撞端口（本文件开头那段 10048 的血泪
+    就是这么攒出来的）。把这件事变成一条明确失败，比让它悄悄拖垮后面几百条
+    用例划算得多。
+    """
+    from phonemic.server import api as api_mod
+
+    thread = api_mod._server_thread
+    api_mod.stop_server()
+    if thread is not None and thread.is_alive():
+        pytest.fail("服务端线程未在 join 超时内退出：有连接卡住了 graceful shutdown")
 
 
 class PhoneSimulator:

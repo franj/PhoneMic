@@ -72,7 +72,9 @@ def probe_server():
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     state = _State()
     httpd.state = state
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    # poll_interval 默认 0.5s ⇒ shutdown() 要等这一拍才返回，每条用例白赔半秒。
+    # 这里只是本机假源站，压到 20ms 完全够。
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
     thread.start()
 
     urllib.request.install_opener(
@@ -206,11 +208,16 @@ class TestProbeBehaviour:
             ka.stop()
 
     def test_connection_refused_is_unreachable(self):
-        """域名解析失败 / 连不上边缘 → 判不可达，且只上报一次。"""
+        """域名解析失败 / 连不上边缘 → 判不可达，且只上报一次。
+
+        timeout 给 0.05 而不是 1.0：本机对"没人监听的端口"是**丢包**而非 RST
+        （实测每次 urlopen 都跑满整个 timeout 才 TimeoutError），给 1.0 就是每条
+        用例白赔 2 秒。这里断言的是"探不通 ⇒ 上报不可达"，与失败方式无关。
+        """
         dead_port = get_test_port()
         states = []
         ka = TunnelKeepalive(
-            on_state_change=states.append, interval=0.05, timeout=1.0, fail_threshold=1
+            on_state_change=states.append, interval=0.05, timeout=0.05, fail_threshold=1
         )
         ka.start(f"http://127.0.0.1:{dead_port}")
         try:

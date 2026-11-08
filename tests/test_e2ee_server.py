@@ -1,4 +1,4 @@
-"""
+﻿"""
 SecureChannel 服务器端集成测试。
 验证 auth 握手、加密消息处理、状态机在真实 WebSocket 连接中的行为。
 
@@ -13,8 +13,6 @@ import json
 import multiprocessing
 import re
 import time
-import urllib.request
-import urllib.error
 
 import pytest
 from queue import Empty
@@ -26,7 +24,7 @@ from nacl.public import PrivateKey, PublicKey, SealedBox
 
 from phonemic.bridge_queue import QueueEventBridge
 from phonemic.server.api import (
-    set_bridge, start_server, stop_server,
+    set_bridge, start_server,
     set_secure_channel, send_to_phone,
     resolve_approval,
 )
@@ -35,31 +33,12 @@ from phonemic.tunnel.crypto import create_provider
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 
-from conftest import get_test_port
+from conftest import get_test_port, shutdown_server, wait_for_server_ready
 
 ALGO = "xchacha20"
 
 
 # ---------- 辅助函数 ----------
-
-
-def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
-    """探测服务器就绪：请求入口路径（url_fragment 带 /{secret} 前缀），200/404 均视为已响应。"""
-    prefix = f"/{secret_path}" if secret_path else ""
-    url = f"http://{host}:{port}{prefix}/"
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = urllib.request.urlopen(url, timeout=0.5)
-            if resp.status in (200, 404):
-                return True
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return True
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(0.1)
-    return False
 
 
 def ws_url(host, port, sc):
@@ -252,14 +231,13 @@ def secure_server():
 
     start_server(host, port, bridge)
     if not wait_for_server_ready(host, port, sc.secret_path):
-        stop_server()
+        shutdown_server()
         pytest.fail("Server did not start within timeout")
 
     yield host, port, queue, sc
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 @pytest.fixture
@@ -276,14 +254,13 @@ def tofu_server():
 
     start_server(host, port, bridge)
     if not wait_for_server_ready(host, port, sc.secret_path):
-        stop_server()
+        shutdown_server()
         pytest.fail("Server did not start within timeout")
 
     yield host, port, queue, sc
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 # ---------- URL fragment 认证握手 ----------
@@ -576,9 +553,12 @@ class TestTofuHandshake:
         回归：deadline 曾在握手开始时一次算好并给两次等待共享，TOFU 审批动辄
         数十秒、早就把它耗光，于是「用户点了允许、auth_proof 却立刻超时」。
         现在 auth 与 auth_proof 各有一份预算，审批不占用任何一方。
+
+        AUTH_TIMEOUT 压到 0.3s（够发一帧），睡 0.8s 就足以躺过它 —— 性质不变，
+        但不用真等 1.5 秒。
         """
         import phonemic.server.api as api_mod
-        monkeypatch.setattr(api_mod, "AUTH_TIMEOUT", 1.0)
+        monkeypatch.setattr(api_mod, "AUTH_TIMEOUT", 0.3)
 
         host, port, queue, sc = tofu_server
         phone = PhoneSimulator()
@@ -588,7 +568,7 @@ class TestTofuHandshake:
             phone.read_sealed_pin(ws.recv(timeout=5))
             req = head_request(queue)
 
-            time.sleep(1.5)          # 躺过原 deadline（1s）
+            time.sleep(0.8)          # 躺过原 deadline（0.3s）
             resolve_approval(req["id"], True)
 
             ws.send(phone.answer_tofu_challenge(ws.recv(timeout=5)))

@@ -25,23 +25,8 @@ from phonemic.tunnel.e2ee import SecureChannel
 from phonemic.tunnel.frame import decode as frame_decode, encode as frame_encode
 from phonemic.tunnel.keepalive import TunnelKeepalive
 
-from conftest import get_test_port, PhoneSimulator
-
-
-def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
-    """探测入口路径返回 200 即视为就绪。"""
-    prefix = f"/{secret_path}" if secret_path else ""
-    url = f"http://{host}:{port}{prefix}/"
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = urllib.request.urlopen(url, timeout=0.5)
-            if resp.status == 200:
-                return True
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(0.1)
-    return False
+from conftest import get_test_port, shutdown_server, wait_for_server_ready
+from conftest import PhoneSimulator
 
 
 def _get(host, port, path):
@@ -78,11 +63,10 @@ def enc_server():
     sc = SecureChannel(auth_method="url_fragment")
     set_secure_channel(sc)
     start_server(host, port, bridge)
-    assert wait_for_server_ready(host, port, sc.secret_path)
+    assert wait_for_server_ready(host, port, sc.secret_path, ok_statuses=(200,))
     yield host, port, sc, bridge
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 @pytest.fixture
@@ -99,11 +83,10 @@ def bare_server():
     sc = SecureChannel(auth_method="tofu", mode="lan")
     set_secure_channel(sc)
     start_server(host, port, bridge)
-    assert wait_for_server_ready(host, port)
+    assert wait_for_server_ready(host, port, ok_statuses=(200,))
     yield host, port, sc, bridge
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 @pytest.fixture

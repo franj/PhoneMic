@@ -31,29 +31,11 @@ from phonemic.tunnel.crypto import create_provider
 from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 
-from conftest import get_test_port, PhoneSimulator
+from conftest import get_test_port, shutdown_server, wait_for_server_ready
+from conftest import PhoneSimulator
 
 
 # ---------- 辅助函数 ----------
-
-
-def wait_for_server_ready(host, port, secret_path="", timeout=5.0):
-    """探测服务器就绪：请求入口路径（加密模式带 /{secret} 前缀），200/404 均视为已响应。"""
-    prefix = f"/{secret_path}" if secret_path else ""
-    url = f"http://{host}:{port}{prefix}/"
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = urllib.request.urlopen(url, timeout=0.5)
-            if resp.status in (200, 404):
-                return True
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return True
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(0.1)
-    return False
 
 
 def _path_prefix(sc):
@@ -121,14 +103,13 @@ def secure_server():
     start_server(host, port, bridge)
 
     if not wait_for_server_ready(host, port, sc.secret_path):
-        stop_server()
+        shutdown_server()
         pytest.fail("Server did not start within timeout")
 
     yield host, port, queue, sc
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 @pytest.fixture
@@ -145,14 +126,13 @@ def server_no_sc():
     start_server(host, port, bridge)
 
     if not wait_for_server_ready(host, port, sc.secret_path):
-        stop_server()
+        shutdown_server()
         pytest.fail("Server did not start within timeout")
 
     yield host, port, bridge, sc
 
-    stop_server()
+    shutdown_server()
     set_secure_channel(None)
-    time.sleep(0.3)
 
 
 # ---------- 测试 WebSocket 消息处理 ----------
@@ -688,7 +668,7 @@ def test_real_server_with_websocket_client():
     start_server(host, port, bridge)
 
     if not wait_for_server_ready(host, port, sc.secret_path):
-        stop_server()
+        shutdown_server()
         pytest.fail("Server did not start within timeout")
 
     phone = PhoneSimulator(sc.get_public_key_b64())

@@ -201,6 +201,12 @@ class TestCrashDetection:
         proc = MagicMock()
         proc.poll.return_value = 0
         proc.stdout = blocking_lines()
+        # 假进程的 stdout 是个"永不结束"的生成器，只有 terminate 才会让它收尾。
+        # 让 terminate 顺手放行这个生成器，stop() 里的 join 就能立刻满足；
+        # 顺带钉住顺序：stop() 必须先置 _stopped 再 terminate，否则监控线程在
+        # finally 里看到的是"没被手动停"，会误报 on_stopped（本用例正是拦这个）。
+        # 旧写法把 block.set() 放在 stop() 之后 ⇒ join 必然等满 3s，白赔三秒。
+        proc.terminate.side_effect = lambda: block.set()
 
         mock_popen.return_value = proc
         tunnel = CloudflareTunnel()
@@ -208,7 +214,6 @@ class TestCrashDetection:
         tunnel.set_callbacks(on_stopped=stopped_cb)
         tunnel.start(12000)
         tunnel.stop()
-        block.set()
         tunnel._monitor_thread.join(timeout=2.0)
 
         stopped_cb.assert_not_called()

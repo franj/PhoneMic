@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -165,6 +166,14 @@ _photo_receiver = PhotoReceiver()
 # 队列按字节限流，满则入队方 await —— 天然背压，不丢帧不爆内存。
 # WS_MAX_FRAME_SIZE 是 WebSocket 单帧上限，同时通过 config 帧下发给手机端。
 WS_MAX_FRAME_SIZE = 16 * 1024 * 1024
+
+# 退出时最多为「已建立的连接」等这么久，超过就掐断。
+#
+# 默认是 None = 无限等：一条卡在半路的 ws（手机切后台、网络断了但 TCP 还没超时）
+# 足以让 stop_server 的 join 永远等下去——用户点了退出，进程却挂在后台。
+# 桌面程序没有「请稍候，正在优雅收尾」的位置，1 秒足够把已排队的帧发完，
+# 剩下的交回给 OS 收尸。
+GRACEFUL_SHUTDOWN_TIMEOUT = 1.0
 
 # 惰性实例：首次用到才创建（生命周期跟随服务，换事件循环时内部自动重建 worker）
 _transfer_queue: Optional[TransferQueue] = None
@@ -1573,6 +1582,8 @@ def start_server(host: str, port: int, bridge: EventBridge) -> None:
             # 能力对齐：ws_max_size 同样生效，1008/1011/1012 关闭码照常送达，帧级日志的
             # logger 仍挂在 uvicorn.error 上 ⇒ PHONEMIC_LOG=trace 不受影响。
             ws="websockets-sansio",
+            # 退出时给已建立的连接设上限（见 GRACEFUL_SHUTDOWN_TIMEOUT）。
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT,
         )
         _server = uvicorn.Server(config)
         try:
@@ -1606,10 +1617,34 @@ def stop_server() -> None:
     _server_thread = None
 
 
+def _wait_port_released(host: str, port: int, timeout: float = 2.0) -> bool:
+    """等这个端口真的能被重新 bind 上，返回是否等到了。
+
+    ``stop_server()`` 返回 ≠ 内核已经放手：线程退出时监听套接字只是"已关闭"，
+    端口可能还压着内核里的残留状态。原先这里盲等 0.5s，能过，但每次重启都白赔
+    半秒。改成 5ms 粒度实测绑定：正常路径 <10ms 就过，异常路径最多等到 timeout。
+
+    刻意**不设** SO_REUSEADDR：那会让"上一个套接字还占着"也误判为可用，
+    问题就推迟到 start_server 里以 [WinError 10048] 炸出来。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, port))
+                return True
+            except OSError:
+                time.sleep(0.005)
+    return False
+
+
 def restart_server(host: str, port: int, bridge: EventBridge) -> None:
     """重启服务端，切换绑定地址。"""
     stop_server()
-    time.sleep(0.5)
+    if not _wait_port_released(host, port):
+        # 等不到就直接起：让 start_server 以真实的 bind 错误暴露问题，
+        # 而不是在这里悄悄吞掉、把失败推迟到客户端连不上。
+        logger.warning(f"端口 {host}:{port} 未在超时内释放，仍尝试启动")
     start_server(host, port, bridge)
 
 
