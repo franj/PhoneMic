@@ -59,8 +59,13 @@
     "binary_not_found": "cloudflared not found, fell back to LAN mode"
   },
   "help": {
+    "title": "Help",
     "warning": "Help File Missing",
-    "file_not_found": "The USER_GUIDE.md help file was not found. Please make sure the program is installed correctly."
+    "file_not_found": "The USER_GUIDE.md help file was not found. Please make sure the program is installed correctly.",
+    "search_placeholder": "Search headings or text",
+    "search_tip": "Typing filters the outline; Enter or ↓ finds the next hit, Shift+Enter or ↑ the previous one (Ctrl+F returns here)",
+    "search_prev": "Previous match (Shift+Enter)",
+    "search_next": "Next match (Enter)"
   },
   "tray": {
     "tray_unavailable": "System tray is not available, PhoneMic will continue without tray icon",

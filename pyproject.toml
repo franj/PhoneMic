@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn[standard]>=0.47.0,<0.48.0",
     "pynacl>=1.6.0,<2.0.0",
     "msgpack>=1.2.2",
+    "markdown-it-py>=4.2.0",
 ]
 
 [project.scripts]

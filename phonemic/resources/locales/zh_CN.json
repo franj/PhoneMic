@@ -59,8 +59,13 @@
     "binary_not_found": "未找到 cloudflared，已回退到局域网模式"
   },
   "help": {
+    "title": "使用帮助",
     "warning": "帮助文件不存在",
-    "file_not_found": "未找到 USER_GUIDE.md 帮助文件，请确保程序已正确安装"
+    "file_not_found": "未找到 USER_GUIDE.md 帮助文件，请确保程序已正确安装",
+    "search_placeholder": "搜索标题或正文",
+    "search_tip": "输入即过滤左侧目录；按 Enter 或 ↓ 往下找，Shift+Enter 或 ↑ 往上找（Ctrl+F 回到这里）",
+    "search_prev": "上一处（Shift+Enter）",
+    "search_next": "下一处（Enter）"
   },
   "tray": {
     "tray_unavailable": "系统托盘不可用，PhoneMic 将继续运行但无托盘图标",

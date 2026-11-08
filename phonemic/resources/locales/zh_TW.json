@@ -59,8 +59,13 @@
     "binary_not_found": "找不到 cloudflared，已回退到區域網路模式"
   },
   "help": {
+    "title": "使用說明",
     "warning": "找不到說明檔",
-    "file_not_found": "找不到 USER_GUIDE.md 說明檔，請確認程式已正確安裝。"
+    "file_not_found": "找不到 USER_GUIDE.md 說明檔，請確認程式已正確安裝。",
+    "search_placeholder": "搜尋標題或內文",
+    "search_tip": "輸入即過濾左側目錄；按 Enter 或 ↓ 往下找，Shift+Enter 或 ↑ 往上找（Ctrl+F 回到這裡）",
+    "search_prev": "上一處（Shift+Enter）",
+    "search_next": "下一處（Enter）"
   },
   "tray": {
     "tray_unavailable": "系統托盤不可用，PhoneMic 將繼續運行但無托盤圖示",

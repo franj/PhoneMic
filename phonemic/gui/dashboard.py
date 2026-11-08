@@ -1,6 +1,4 @@
 from typing import Callable, Optional
-import subprocess
-import sys
 import time
 
 import qrcode
@@ -16,9 +14,9 @@ from phonemic.gui.settings_dialog import SettingsDialog
 from phonemic.gui.commands_dialog import CommandsDialog
 from phonemic.gui.dictionary_dialog import DictionaryDialog
 from phonemic.gui.about_dialog import AboutDialog
+from phonemic.gui.help_window import HelpWindow
 from phonemic.tunnel.mode import TunnelMode, get_mode, set_mode, effective_auth_method
 from phonemic.utils.debug import is_debug_mode
-from phonemic.utils.paths import get_app_root
 from phonemic.utils.i18n import I18n
 from phonemic.utils.settings_manager import SettingsManager
 
@@ -95,6 +93,9 @@ class Dashboard(QMainWindow):
         self.connected = False
         # 隧道公网入口可达性（保活探测结果，见 TunnelKeepalive）。True＝可达/未知。
         self._tunnel_reachable: bool = True
+        # 帮助窗口单例。惰性创建：绝大多数会话不会点「使用帮助」，没必要在启动时
+        # 解析一遍说明书。
+        self._help_window: Optional[HelpWindow] = None
         self._setup_ui(ip, port)
         self._setup_menu()
         self._apply_mode_ui()
@@ -775,15 +776,12 @@ class Dashboard(QMainWindow):
         AboutDialog(self).exec()
 
     def open_user_guide(self):
-        guide_path = get_app_root() / "USER_GUIDE.md"
-        if guide_path.exists():
-            if sys.platform == "win32":
-                subprocess.Popen(["notepad.exe", str(guide_path)],
-                                 shell=False,
-                                 creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                subprocess.run(["open", str(guide_path)] if sys.platform == "darwin" else ["xdg-open", str(guide_path)])
-        else:
+        # 帮助窗口是单例：重复点菜单只把已经开着的那个提到前面，不再开第二个。
+        # 非模态且不带父窗口（见 HelpWindow 的说明）：照步骤操作主界面时需要它一直在
+        # 旁边，但又不能反过来压住主界面——所以它是独立顶层窗口，主界面点到就上来。
+        if self._help_window is None:
+            self._help_window = HelpWindow()
+        if not self._help_window.show_help():
             QMessageBox.warning(self, self.i18n.tr("help.warning"),
                                 self.i18n.tr("help.file_not_found"))
 
@@ -861,6 +859,18 @@ class Dashboard(QMainWindow):
         """从菜单点击退出，直接终止程序"""
         self._is_force_quitting = True
         QApplication.quit()
+
+    def hideEvent(self, event):
+        """主界面收进托盘时，把帮助窗口一起收起来。
+
+        帮助窗口现在是独立顶层窗口（没有父窗口，见 HelpWindow 的说明），Qt 不会再
+        帮我们「父隐子隐」。不管的话，主界面缩到托盘了，说明书还孤零零留在桌面上，
+        用户既没有入口把它关掉，也不知道程序到底退没退。
+        """
+        super().hideEvent(event)
+        help_window = getattr(self, "_help_window", None)
+        if help_window is not None and help_window.isVisible():
+            help_window.hide()
 
     def closeEvent(self, event):
         """重写关闭事件：根据配置决定行为。若为菜单强制退出则直接放行。"""

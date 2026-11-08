@@ -158,6 +158,12 @@ def run_nuitka(onefile: bool, version: str, commit: str):
         "--include-data-files=./NOTICE_en.txt=NOTICE_en.txt",
         "--include-data-files=./README.md=README.md",
         "--include-data-files=./USER_GUIDE.md=USER_GUIDE.md",
+        # 使用帮助窗口按界面语言挑说明书（phonemic/gui/help_window.py 的
+        # guide_path），缺哪份就回退到中文原版——不会崩，但会变成「界面英文、
+        # 说明书中文」，所以四份都打进去。
+        "--include-data-files=./USER_GUIDE_en_US.md=USER_GUIDE_en_US.md",
+        "--include-data-files=./USER_GUIDE_zh_TW.md=USER_GUIDE_zh_TW.md",
+        "--include-data-files=./USER_GUIDE_zh_HK.md=USER_GUIDE_zh_HK.md",
         # uvicorn 的 ws 协议类是字符串动态导入（uvicorn.config.load → import_from_string），
         # Nuitka 静态分析看不到；Nuitka 自带的 uvicorn 包规则只硬编码了 auto /
         # websockets_impl / wsproto_impl 三个（standard.nuitka-package.config.yml），
