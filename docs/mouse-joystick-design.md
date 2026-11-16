@@ -126,7 +126,8 @@ onCommand: ({ type, ...payload }) => wsClient.send(type, payload)
 
 4×4 网格是 §4 早期方案（只有右键 + 拖拽）的**扩展**：把按键类动作也收进同一屏，
 避免在小面板里再来回切页。左键 / 右键 / 双击 / 拖拽 / 滚轮 落 `mouse` 帧，
-Enter / Esc / Del / Ctrl+Z / Ctrl+Y / 方向键 落 `key` 帧。
+Enter / Del / Ctrl+Z / Ctrl+Y / 方向键 落 `key` 帧；「清空」落 `key` 帧的
+`ctrl+a, delete`（全选后删除，一帧组合键完成）。
 
 无浮动层，全部在面板内容区，与左侧 Tab 栏同高。摇杆底盘尺寸由 `ResizeObserver` 自适应：
 取所在列可用宽高的较小值，保持圆形。

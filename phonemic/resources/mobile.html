@@ -2638,7 +2638,13 @@
             this.modeToggle.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (!this.wsClient.getConnected()) return;
-                this.setAutoMode(!this.autoMode);
+                const next = !this.autoMode;
+                this.setAutoMode(next);
+                // ⚡ 和设置页的分段控件改的是同一件事，所以走同一出口：写回 PC。
+                // 只改本地的话，下次重连/刷新就被 settings.json 改回去，用户会以为没生效。
+                this.wsClient.sendFrame({
+                    type: 'config', key: 'mobile_send_mode', value: next ? 'auto' : 'manual'
+                });
                 if (navigator.vibrate) navigator.vibrate(30);
                 this.inputBox.focus();
             });
@@ -2696,8 +2702,11 @@
             this.updatePlusSendVisibility();
         }
         /**
-         * 应用 PC 下发的发送方式。手机端工具栏上的切换按钮仍可临时改动，
-         * PC 只在连接建立或设置变更时重新下发，不会持续覆盖。
+         * 应用发送方式（本地状态）：⚡ 点击、设置页分段控件、PC 下发三个来源都落到这里。
+         *
+         * 单一状态源是 appConfig 的 `sendMode`：写它 → 订阅回调再回到这里，所以三个入口
+         * 的界面表现必然一致。**落盘不在这里**——只有用户手势（⚡ / 分段控件）才发上行帧，
+         * PC 下发的值若也往回发，就成了自己跟自己打乒乓。
          */
         setAutoMode(enabled) {
             const next = !!enabled;
@@ -2705,8 +2714,7 @@
             this.autoMode = next;
             this.updateSendButtonUI();
             this.updateModeToggleVisibility();
-            // 让设置面板的分段控件跟着走。⚡ 是「临时切换」：只改本地、不落盘；
-            // 真正写回 PC 的动作在设置面板里（见 SettingsPanel 的 data-seg 分支）。
+            // 让设置面板的分段控件和 ⚡ 的语义状态跟着走（同值会短路，不会递归）
             this.config.set('sendMode', next ? 'auto' : 'manual');
         }
         updateModeToggleVisibility() {
@@ -2855,7 +2863,7 @@
                 { id: 'enter',      text: 'Enter', cls: 'pv-enter', frame: { type: 'key', keys: 'enter' } },
                 { id: 'double',     i18n: 'panel_btn_double',     frame: { type: 'mouse', a: 'double', btn: 'left' } },
                 { id: 'drag',       i18n: 'panel_btn_drag', toggle: true },
-                { id: 'esc',        text: 'Esc',                  frame: { type: 'key', keys: 'esc' } },
+                { id: 'clear',      i18n: 'qa_clear',             frame: { type: 'key', keys: 'ctrl+a, delete' } },
                 { id: 'shiftenter', text: '⇧Enter', cls: 'pv-enter', title: 'Shift+Enter', frame: { type: 'key', keys: 'shift+enter' } },
                 { id: 'wheelup',    i18n: 'panel_btn_wheel_up',   cls: 'pv-narrow', repeat: true, frame: { type: 'mouse', a: 'wheel', delta: -120 } },
                 { id: 'redo',       text: 'Ctrl+Y', cls: 'pv-narrow', frame: { type: 'key', keys: 'ctrl+y' } },
@@ -3016,11 +3024,16 @@
             border-color: rgba(20, 184, 166, 0.45);
             color: #0d9488;
         }
-        .mouse-joystick .pv-grid button[data-id="del"],
-        .mouse-joystick .pv-grid button[data-id="esc"] {
+        .mouse-joystick .pv-grid button[data-id="del"] {
             background: rgba(100, 116, 139, 0.12);
             border-color: rgba(100, 116, 139, 0.40);
             color: #475569;
+        }
+        /* 清空（全选 + 删除）：破坏性动作，与键盘面板的清空同色 */
+        .mouse-joystick .pv-grid button[data-id="clear"] {
+            background: rgba(239, 68, 68, 0.10);
+            border-color: rgba(239, 68, 68, 0.35);
+            color: #e57373;
         }
         .mouse-joystick .pv-grid button[data-id="up"],
         .mouse-joystick .pv-grid button[data-id="arrleft"],
@@ -4003,9 +4016,9 @@
     // ========== 6.5 键盘面板 ==========
     /**
      * KeyboardPanel：键盘快捷键面板，5 行 × 4 键，无分类标题：
-     *   R1 发送/输入：⇧Enter 换行 ｜ Ctrl+A 全选 ｜ Space ｜ Enter 发送（主键）
-     *   R2 纠错：Ctrl+Z 撤销 ｜ Ctrl+Y 重做 ｜ Del ｜ ⌫ 退格
-     *   R3 界面救急：Esc ｜ Tab ｜ ⇧Tab ｜ Alt+Tab
+     *   R1 发送/输入：Esc ｜ Space ｜ ⇧Enter 换行 ｜ Enter 发送（主键）
+     *   R2 纠错/清理：Ctrl+Z 撤销 ｜ 清空 ｜ Del ｜ ⌫ 退格
+     *   R3 界面救急：Ctrl+Y 重做 ｜ Tab ｜ ⇧Tab ｜ Alt+Tab
      *   R4/R5 光标导航：PgUp·Home·↑·End ／ PgDn·←·↓·→（上下成对，方向键与翻页按住连发）
      * 约定与 MouseJoystick / TouchpadPanel 一致：
      *   - CSS 由类自带（static get STYLES），选择器挂 .keyboard-panel，注入一次（幂等）；
@@ -4026,13 +4039,14 @@
                 { id: 'space',      text: 'Space',   row: 1, repeat: true, frame: { type: 'key', keys: 'space' } },
                 { id: 'shiftenter', text: '⇧Enter', row: 1, frame: { type: 'key', keys: 'shift+enter' } },
                 { id: 'enter',      text: 'Enter',   row: 1, frame: { type: 'key', keys: 'enter' } },
-                // R2 纠错（绿，Del / ⌫ 红色特例）
+                // R2 纠错/清理（绿，清空 / Del / ⌫ 红色特例）
                 { id: 'undo',       text: 'Ctrl+Z',  row: 2, frame: { type: 'key', keys: 'ctrl+z' } },
-                { id: 'redo',       text: 'Ctrl+Y',  row: 2, frame: { type: 'key', keys: 'ctrl+y' } },
+                // 清空 = 全选 + 删除，一次点掉整段；比原本占这格的 Ctrl+Y 常用得多
+                { id: 'clear',      i18n: 'qa_clear', row: 2, frame: { type: 'key', keys: 'ctrl+a, delete' } },
                 { id: 'delete',     text: 'Del',     row: 2, repeat: true, frame: { type: 'key', keys: 'delete' } },
                 { id: 'backspace',  text: '⌫',      row: 2, repeat: true, frame: { type: 'key', keys: 'backspace' } },
-                // R3 界面救急（琥珀）
-                { id: 'selectall',  text: 'Ctrl+A',  row: 3, frame: { type: 'key', keys: 'ctrl+a' } },
+                // R3 界面救急（琥珀，Ctrl+Y 例外，与 Ctrl+Z 同色成对）
+                { id: 'redo',       text: 'Ctrl+Y',  row: 3, frame: { type: 'key', keys: 'ctrl+y' } },
                 { id: 'tab',        text: 'Tab',     row: 3, frame: { type: 'key', keys: 'tab' } },
                 { id: 'shifttab',   text: '⇧Tab',   row: 3, frame: { type: 'key', keys: 'shift+tab' } },
                 { id: 'alttab',     text: 'Alt+Tab', row: 3, frame: { type: 'key', keys: 'alt+tab' } },
@@ -4125,12 +4139,20 @@
             border-color: rgba(139, 92, 246, 0.40);
             color: #8b5cf6;
         }
-        /* 破坏性键（删除 / 退格）：浅红提醒 */
+        /* 破坏性键（清空 / 删除 / 退格）：浅红提醒。清空在 R2 绿行里也保持红，
+           因为它是这一行唯一会一次抹掉整段文字的动作 */
+        .keyboard-panel .kb-grid button[data-id="clear"],
         .keyboard-panel .kb-grid button[data-id="delete"],
         .keyboard-panel .kb-grid button[data-id="backspace"] {
             background: rgba(239, 68, 68, 0.10);
             border-color: rgba(239, 68, 68, 0.35);
             color: #e57373;
+        }
+        /* Ctrl+Y 挪到 R3（琥珀行）后仍与 Ctrl+Z 同色，保住「撤销 / 重做」的成对关系 */
+        .keyboard-panel .kb-grid button[data-id="redo"] {
+            background: rgba(7, 193, 96, 0.12);
+            border-color: rgba(7, 193, 96, 0.45);
+            color: #05944d;
         }
         /* Enter 发送：深绿实心主键 */
         .keyboard-panel .kb-grid button[data-id="enter"] {

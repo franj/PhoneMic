@@ -545,6 +545,41 @@ class TestQuickBar:
         assert quick_bar_page.locator("#quick-bar").is_hidden()
 
 
+class TestModeToggle:
+    """⚡ 与设置页分段控件改的是同一件事，都要写回 PC（否则重连就被 settings.json 改回去）。"""
+
+    def test_toggle_writes_through_to_pc(self, mobile_page):
+        auto = "() => document.body.classList.contains('auto-mode')"
+        assert mobile_page.evaluate(auto) is True
+
+        mobile_page.click("#mode-toggle")
+        assert mobile_page.evaluate(auto) is False
+        assert _last_config(mobile_page, "mobile_send_mode")["value"] == "manual"
+
+        mobile_page.click("#mode-toggle")
+        assert mobile_page.evaluate(auto) is True
+        assert _last_config(mobile_page, "mobile_send_mode")["value"] == "auto"
+
+
+def test_panels_use_clear_button(mobile_page):
+    """键盘面板的清空顶掉「全选」，摇杆面板的 Esc 也换成清空；文案走语言包而非键名。"""
+    _open_panel(mobile_page, "keys")
+    assert mobile_page.locator('#view-keys button[data-id="selectall"]').count() == 0
+    kb_clear = mobile_page.locator('#view-keys button[data-id="clear"]')
+    assert kb_clear.inner_text() == MOBILE_I18N["qa_clear"]
+    kb_clear.click()
+    assert [m["keys"] for m in sent_messages(mobile_page) if m["type"] == "key"] == [
+        "ctrl+a, delete"
+    ]
+
+    _open_panel(mobile_page, "mouse")
+    assert mobile_page.locator("#view-mouse button").count()
+    assert mobile_page.locator('#view-mouse button[data-id="esc"]').count() == 0
+    assert mobile_page.locator(
+        '#view-mouse button[data-id="clear"]'
+    ).inner_text() == MOBILE_I18N["qa_clear"]
+
+
 class TestClearButtonVisibility:
     def test_hidden_by_config(self, mobile_page):
         assert mobile_page.locator("#btn-clear").is_visible()
@@ -557,6 +592,18 @@ class TestClearButtonVisibility:
             "() => window.__mockWS.triggerMessage({type: 'config', mobile_show_clear_btn: true})"
         )
         assert mobile_page.locator("#btn-clear").is_visible()
+
+
+def _open_panel(page, name):
+    """展开附件面板并切到指定 tab（keys / file / touchpad / mouse / settings）。
+
+    按面板自身状态判断是否已展开 —— 连续调用两次时不能再点一次 `#btn-plus`，
+    那是 toggle，会把它关掉。
+    """
+    if page.evaluate("() => window._accessoryPanel.state !== 'visible'"):
+        page.click("#btn-plus")
+        page.wait_for_function("() => window._accessoryPanel.state === 'visible'")
+    page.click(f'#panel-tabs button[data-panel="{name}"]')
 
 
 def _open_settings(page):
