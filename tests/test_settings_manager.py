@@ -340,5 +340,26 @@ def test_mobile_send_mode_invalid_value_reset_to_default(mock_config_path, reset
     assert sm.get("mobile_send_mode") == ""
 
 
+def test_mobile_quick_bar_defaults_to_off(mock_config_path, reset_singleton):
+    """快捷按钮行出厂默认关闭：新装用户看到的界面与加这个功能之前一致。
+
+    垃圾桶按钮默认仍是开的（那是原有界面的一部分），两者别一起改。
+    """
+    sm = SettingsManager.instance()
+    assert sm.get("mobile_show_quick_bar") is False
+    assert sm.get("mobile_show_clear_btn") is True
+
+
+def test_mobile_quick_bar_missing_key_merges_as_off(mock_config_path, reset_singleton):
+    """老配置文件里没有这个键 → 合并成关闭，而不是给它开一行它从没见过的按钮"""
+    config_file = mock_config_path / "settings.json"
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump({"mobile_max_records": 20}, f)
+
+    sm = SettingsManager.instance()
+    assert sm.get("mobile_show_quick_bar") is False
+    assert sm.get("mobile_max_records") == 20
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

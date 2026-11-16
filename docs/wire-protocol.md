@@ -238,6 +238,7 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 | `ping` | 手机端主动探活：服务端收到即原样回 `pong`（见 §7） | `t` |
 | `pong` | 心跳应答：回复服务端下行的 `ping` | — |
 | `hello` | 探活请求：取消回执超时后的兜底（见 §9） | `t` |
+| `config` | 改一项手机端设置（白名单，见 §7） | `key`、`value` |
 
 ### 下行
 
@@ -245,7 +246,7 @@ WS binary 帧 = 加密层输出的密文字节（内部布局由算法实现决�
 |---|---|---|---|
 | `auth_challenge` | 握手挑战：给出本连接的 `nonce` | URL fragment / TOFU 重连：`nonce`(bin)；TOFU 首次：`data`(bin SealedBox `{pc_pk,nonce}`) | 迁移已有 |
 | `sealed` | TOFU 首次：PC 指派给本连接的 4 位识别码（含同源 `nonce`） | `data`(bin SealedBox `{pin,nonce}`) | 新增（`e2ee-always-on-design.md` §5.5.1） |
-| `config` | 单键配置推送 | `key`、`value` | 迁移 `push_config` |
+| `config` | 配置下发：首帧全量、变更时单键热推，**扁平多键** | `mobile_*` 各键、`max_frame_size` | 迁移 `push_config` |
 | `reconnect` | 要求重新扫码 | `reason` | 迁移 `request_client_rescan` |
 | `rekey` | 密钥轮换 | — | 预留 |
 | `error` | 错误通知 | `code`、`msg` | 新增 |
@@ -374,28 +375,86 @@ s→c  {"type":"sealed", "data":<bin SealedBox(phone_public): {"pin":"3847","non
 
 ### config
 
+手机端设置以 **PC 的 `settings.json` 为唯一真相源**：手机端只做渲染与写入，本地不持久化。
+因此这一帧是**双向**的，但两个方向的形状不同（见下）。
+
+#### 下行（PC → 手机）：扁平，可多键
+
+连接握手成功后服务端**主动下发一次全量**，**所有认证方式一致**——不挂在握手的任何一条消息上；
+它同时充当了"通道已建立"的确认（见 §7 握手小节）：
+
 ```
-{"type":"config", "key":"mobile_max_records", "value":50}
+{"type":"config", "mobile_max_records":10, "mobile_send_mode":"",
+ "mobile_show_clear_btn":true, "mobile_show_quick_bar":false,
+ "mobile_quick_actions":[{"keys":"ctrl+a, delete"},{"keys":"ctrl+z"}],
+ "max_frame_size":16777216}
 ```
 
-**单键单值**结构，迁移自 `api.py:188 push_config`。现有代码发的是扁平形式 `{"type":"config","mobile_max_records":50}`，新协议统一规范为 `key` / `value` 两字段，便于通用分派。
-
-连接握手成功后服务端**主动下发一次**，**所有认证方式一致**——不挂在握手的任何一条消息上；它同时充当了"通道已建立"的确认（见 §7 握手小节）：
+PC 端设置变更（设置对话框或手机上行落盘）时，以**单键扁平**形式热推：
 
 ```
-{"type":"config", "mobile_max_records":10, "mobile_send_mode":"", "max_frame_size":16777216}
+{"type":"config", "mobile_show_quick_bar":false}
 ```
 
-- **`mobile_send_mode`**：手机端默认发送方式，取自 PC 端 `设置 → 手机端设置 → 发送方式`。
-  `"auto"` = 识别出文字即自动发送；`"manual"` = 只填入输入框，等用户点发送；
-  `""`（空）= 不下发偏好，手机端沿用自身默认（自动发送），此时**不得**覆盖用户在手机端的临时切换。
-  该键同时在 PC 端设置变更时以单键形式热推送（见上）。
+- 形状是**扁平的单键/多键**，不是 `{key, value}` 两字段：手机端按 `data.<key> !== undefined`
+  逐键解析，首帧还要把所有键拼进同一帧，扁平最省事。
+- 手机端收到任何 config 帧都**以帧里的值为准**覆盖本地。值没变则不重绘（`ConfigManager.set`
+  自带同值短路），因此重复帧不会造成界面抖动。
+- `mobile_send_mode` 的 `""`（空）= 不下发偏好，手机端沿用自身默认（自动发送），此时
+  **不得**覆盖用户在手机端 ⚡ 上的临时切换。手机端写回时必须是 `"auto"` / `"manual"` 之一。
+- **`max_frame_size`**：服务端 WebSocket 单帧上限（字节），即 `uvicorn` 的 `ws_max_size`
+  （`api.py:WS_MAX_FRAME_SIZE`，当前 16MB）。手机端据此**收紧**文件分块上限，但不会越过该
+  链路的 `CHUNK_MAX`，见 §9。
+  为什么必须下发：超帧会被服务端以 **close 1009 断开整条连接**（不是丢弃单帧），无法靠
+  `收到错误就换小块重试` 来兜底，只能两端对齐后主动限流。
+- **手机端必须容错**：字段缺失或非法（非数字 / 非有限值 / 小于 512KB）一律视为 `未下发`，
+  分块上限落到该链路的 `CHUNK_MAX`（局域网 1MB / Cloudflare 256KB），绝不允许产出 `NaN` 分块。
 
-- **`max_frame_size`**：服务端 WebSocket 单帧上限（字节），即 `uvicorn` 的 `ws_max_size`（`api.py:WS_MAX_FRAME_SIZE`，当前 16MB）。手机端据此**收紧**文件分块上限，但不会越过该链路的 `CHUNK_MAX`，见 §9。
-  为什么必须下发：超帧会被服务端以 **close 1009 断开整条连接**（不是丢弃单帧），无法靠 `收到错误就换小块重试` 来兜底，只能两端对齐后主动限流。
-- **手机端必须容错**：字段缺失或非法（非数字 / 非有限值 / 小于 512KB）一律视为 `未下发`，分块上限落到该链路的 `CHUNK_MAX`（局域网 1MB / Cloudflare 256KB），绝不允许产出 `NaN` 分块。
+#### 上行（手机 → PC）：`key` / `value` 两字段
 
-> v1 **不下发面板按钮列表**，按钮集内置在 `mobile.html`。将来若要 PC 可配置，再加独立的 `[{label, keys}]` 结构，不复用 `VoiceCommand`。
+```
+{"type":"config", "key":"mobile_quick_actions", "value":[{"keys":"ctrl+y"}]}
+```
+
+上行一次只改一个键、键名必须显式给出，所以用 `key` / `value`。**白名单**之外的键丢弃并记日志，
+**不回帧**（旧手机页面刷不出新键时不该被惩罚）：
+
+| `key` | 类型 | 范围 | 说明 |
+|---|---|---|---|
+| `mobile_max_records` | int | 5–50（越界夹取） | 手机端聊天记录上限 |
+| `mobile_send_mode` | str | `"auto"` / `"manual"` | `""` 只作「从未配置过」的初始态，上行不接受 |
+| `mobile_show_clear_btn` | bool | — | 输入框左侧「清空草稿」按钮显隐（默认开） |
+| `mobile_show_quick_bar` | bool | — | 输入框下方快捷按钮行显隐（**默认关**，新装用户的界面与旧版一致） |
+| `mobile_quick_actions` | list | ≤ 6 项 | 快捷按钮，顺序即显示顺序 |
+
+`mobile_quick_actions` 的每一项：
+
+```json
+{"keys": "ctrl+z", "label": "撤销"}
+```
+
+- `keys` 必填，格式与 §7 `key` 帧一致（`+` 连修饰键、`,` 分多组合），执行前仍由
+  `gui/keyboard.py:validate_key_sequence` 再校验一次。
+- `label` 可省略。**省略即"用内置池里的默认名"**，由手机端按 `keys` 反查并翻译——
+  这样配置文件里不存任何语言相关的字面文案，换语言包后默认按钮名跟着变；用户改过名的才落
+  `label`，此后不再随语言包变化。
+
+#### 回声约定（上行必须遵守）
+
+> **无论落盘成功还是被拒绝，这条路径恰好回一帧该键的真实值。**
+
+手机端因此可以无脑"乐观更新 + 以 PC 为准自愈"：没有错误码，也不需要超时回滚。
+
+- 值合法且与磁盘不同 → 写盘，由 `setting_changed` 热推发出**唯一一帧**（不再额外补一帧）；
+- 值非法，或与磁盘相同（`set()` 不会发信号）→ 由上行处理处补发一帧当前真实值。
+
+> 实现细节：`api.py` 对 `setting_changed` 的订阅显式使用 `DirectConnection`。默认的
+> AutoConnection 会把回调**排队到 GUI 线程**，而手机上行来自 asyncio 线程——GUI 线程一忙，
+> 这一帧回声就永远发不出去。
+
+> 附注面板（鼠标 / 键盘 / 文件 / 触控板 / 设置）的**按钮集内置在 `mobile.html`**，不走这个帧。
+> 只有「输入框下方的快捷按钮行」是用户可配置的，就是上面的 `mobile_quick_actions`。
+> 将来若要整块面板可配置，按 `docs/panel-plugin-design.md` 另开 `panels/*.json`，不复用 `VoiceCommand`。
 
 ### reconnect
 

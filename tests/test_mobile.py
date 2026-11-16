@@ -480,6 +480,191 @@ class TestConfigSync:
         ) is False
 
 
+@pytest.fixture
+def quick_bar_page(mobile_page):
+    """出厂默认关闭（保持与旧版界面一致），测行的行为前先显式打开。"""
+    mobile_page.evaluate(
+        "() => window.__mockWS.triggerMessage({type: 'config', mobile_show_quick_bar: true})"
+    )
+    return mobile_page
+
+
+class TestQuickBar:
+    """输入框下方的快捷按钮行：内容与显隐全由 appConfig 决定（PC 下发即唯一真相源）。"""
+
+    def _labels(self, page):
+        return page.eval_on_selector_all(
+            "#quick-bar button", "els => els.map(e => e.textContent)"
+        )
+
+    def _config_frames(self, page, key):
+        return [m for m in sent_messages(page)
+                if m["type"] == "config" and m.get("key") == key]
+
+    def test_hidden_by_default(self, mobile_page):
+        """默认不显示：新装用户看到的界面与加这个功能之前完全一致"""
+        assert mobile_page.locator("#quick-bar").is_hidden()
+
+    def test_renders_default_actions_when_enabled(self, quick_bar_page):
+        """打开后即按内置默认值渲染，不需要等 PC 下发列表"""
+        assert self._labels(quick_bar_page) == [
+            MOBILE_I18N["qa_clear"], MOBILE_I18N["qa_undo"],
+            MOBILE_I18N["qa_newline"], MOBILE_I18N["qa_enter"],
+        ]
+        assert quick_bar_page.locator("#quick-bar").is_visible()
+
+    def test_column_count_follows_action_count(self, quick_bar_page):
+        cols = quick_bar_page.evaluate(
+            "getComputedStyle(document.getElementById('quick-bar')).gridTemplateColumns"
+        )
+        assert len(cols.split()) == 4
+
+    def test_tap_sends_single_key_frame(self, quick_bar_page):
+        quick_bar_page.click("#quick-bar button:nth-child(2)")
+        keys = [m["keys"] for m in sent_messages(quick_bar_page) if m["type"] == "key"]
+        assert keys == ["ctrl+z"]
+
+    def test_config_replaces_actions_and_labels(self, quick_bar_page):
+        """PC 下发的列表覆盖本地；没写 label 的走语言包，写了的用用户的字"""
+        quick_bar_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_quick_actions: "
+            "[{keys: 'enter'}, {keys: 'ctrl+z', label: '我的撤销'}]})"
+        )
+        assert self._labels(quick_bar_page) == [MOBILE_I18N["qa_enter"], "我的撤销"]
+
+    def test_hidden_when_switch_off(self, quick_bar_page):
+        quick_bar_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_show_quick_bar: false})"
+        )
+        assert quick_bar_page.locator("#quick-bar").is_hidden()
+
+    def test_hidden_when_action_list_empty(self, quick_bar_page):
+        quick_bar_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_quick_actions: []})"
+        )
+        assert quick_bar_page.locator("#quick-bar").is_hidden()
+
+
+class TestClearButtonVisibility:
+    def test_hidden_by_config(self, mobile_page):
+        assert mobile_page.locator("#btn-clear").is_visible()
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_show_clear_btn: false})"
+        )
+        assert mobile_page.locator("#btn-clear").is_hidden()
+
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_show_clear_btn: true})"
+        )
+        assert mobile_page.locator("#btn-clear").is_visible()
+
+
+def _open_settings(page):
+    """展开附件面板并切到设置 tab（切 tab 只是同步改 class，无需等待）。"""
+    page.click("#btn-plus")
+    page.click('#panel-tabs button[data-panel="settings"]')
+    assert page.evaluate(
+        "() => document.getElementById('view-settings').classList.contains('active')"
+    )
+
+
+def _last_config(page, key):
+    """最后一条针对该键的上行 config 帧（没有则 None）。"""
+    frames = [m for m in sent_messages(page)
+              if m["type"] == "config" and m.get("key") == key]
+    return frames[-1] if frames else None
+
+
+class TestSettingsPanel:
+    """设置面板：一切用户手势 = 本地立即生效 + 上行一帧 config（PC 落盘为唯一真相源）。"""
+
+    def test_add_action_appends_and_sends(self, quick_bar_page):
+        _open_settings(quick_bar_page)
+        quick_bar_page.click('.st-chip[data-keys="ctrl+y"]')
+
+        cfg = _last_config(quick_bar_page, "mobile_quick_actions")
+        assert cfg["value"][-1] == {"keys": "ctrl+y"}
+        assert len(cfg["value"]) == 5
+        # 行内也跟着变成 5 个
+        assert quick_bar_page.locator("#quick-bar button").count() == 5
+
+    def test_pool_disables_when_full(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.evaluate(
+            "() => window.__mockWS.triggerMessage({type: 'config', mobile_quick_actions: "
+            "[{keys: 'enter'}, {keys: 'ctrl+z'}, {keys: 'ctrl+a, delete'}, "
+            "{keys: 'shift+enter'}, {keys: 'esc'}, {keys: 'ctrl+s'}]})"
+        )
+        assert mobile_page.locator(".st-chip:not(:disabled)").count() == 0
+        assert mobile_page.locator(".st-count").text_content() == "6/6"
+
+    def test_remove_action_sends(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.click('.st-item[data-index="0"] .st-mini[data-role="del"]')
+
+        cfg = _last_config(mobile_page, "mobile_quick_actions")
+        assert [a["keys"] for a in cfg["value"]] == ["ctrl+z", "shift+enter", "enter"]
+
+    def test_move_up_reorders(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.click('.st-item[data-index="1"] .st-mini[data-role="up"]')
+
+        cfg = _last_config(mobile_page, "mobile_quick_actions")
+        assert [a["keys"] for a in cfg["value"]] == [
+            "ctrl+z", "ctrl+a, delete", "shift+enter", "enter",
+        ]
+
+    def test_rename_label_sends(self, mobile_page):
+        _open_settings(mobile_page)
+        box = mobile_page.locator('.st-item[data-index="3"] input[data-role="label"]')
+        box.fill("发送")
+        # 直接派发 change：改完会重建列表，元素随即失效，不能再对它做 blur
+        mobile_page.evaluate(
+            "() => document.querySelector('.st-item[data-index=\"3\"] input[data-role=\"label\"]')"
+            ".dispatchEvent(new Event('change', {bubbles: true}))"
+        )
+
+        cfg = _last_config(mobile_page, "mobile_quick_actions")
+        assert cfg["value"][3] == {"keys": "enter", "label": "发送"}
+
+    def test_toggle_clear_button_sends(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.click('.st-switch[data-key="mobile_show_clear_btn"]')
+
+        cfg = _last_config(mobile_page, "mobile_show_clear_btn")
+        assert cfg["value"] is False
+        assert mobile_page.locator("#btn-clear").is_hidden()
+
+    def test_toggle_quick_bar_sends(self, quick_bar_page):
+        """默认关，打开后是用户自己选的 —— 这里从「已打开」出发验证能关掉"""
+        _open_settings(quick_bar_page)
+        quick_bar_page.click('.st-switch[data-key="mobile_show_quick_bar"]')
+
+        cfg = _last_config(quick_bar_page, "mobile_show_quick_bar")
+        assert cfg["value"] is False
+        assert quick_bar_page.locator("#quick-bar").is_hidden()
+
+    def test_send_mode_segment_writes_pc(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.click('.st-seg button[data-mode="manual"]')
+
+        assert _last_config(mobile_page, "mobile_send_mode")["value"] == "manual"
+        assert mobile_page.evaluate(
+            "() => document.body.classList.contains('auto-mode')"
+        ) is False
+
+    def test_max_records_range_sends(self, mobile_page):
+        _open_settings(mobile_page)
+        mobile_page.evaluate(
+            "() => { const r = document.querySelector('[data-maxrange]');"
+            " r.value = 20; r.dispatchEvent(new Event('input', {bubbles: true}));"
+            " r.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
+
+        assert _last_config(mobile_page, "mobile_max_records")["value"] == 20
+        assert mobile_page.evaluate("() => window.chatManagerInstance.maxHistory") == 20
+
+
 class TestDisconnect:
     """非选择器路径的断连（首连失败、前台掉线）的界面表现：立刻显示 + 输入禁用。
 
@@ -638,7 +823,8 @@ def test_transfer_lock_freezes_other_panels(mobile_page):
     assert page.evaluate("document.getElementById('btn-send').disabled") is True
     assert page.evaluate("document.getElementById('btn-clear').disabled") is True
     assert page.evaluate("document.getElementById('input-box').disabled") is True
-    assert page.evaluate("document.querySelectorAll('#panel-tabs .tab:disabled').length") == 4
+    # 5 个切换 tab（键盘 / 文件 / 触控板 / 鼠标 / 设置）全部禁用
+    assert page.evaluate("document.querySelectorAll('#panel-tabs .tab:disabled').length") == 5
     assert page.evaluate(
         "getComputedStyle(document.getElementById('view-keys')).pointerEvents"
     ) == "none"

@@ -457,3 +457,23 @@ def test_send_mode_cancel_does_not_save(qtbot, settings_manager, mock_languages)
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+def test_dialog_follows_phone_side_changes(qtbot, settings_manager):
+    """手机端「设置」改了发送方式 / 记录上限 → 打开着的对话框实时跟上。
+
+    不跟上的实际后果不是「显示旧值」这么轻：用户在手机改完再回来点「确定」，
+    `_save_settings` 会把对话框里的旧值整体写回，把手机刚改的覆盖掉。
+    """
+    dialog = SettingsDialog()
+    qtbot.addWidget(dialog)
+
+    settings_manager.set("mobile_send_mode", "manual")
+    settings_manager.set("mobile_max_records", 25)
+
+    assert dialog.send_mode_combo.currentData() == "manual"
+    assert dialog.max_records_spin.value() == 25
+
+    # 此时点确定不该把手机的改动覆盖回去
+    dialog.accept()
+    assert settings_manager.get("mobile_send_mode") == "manual"
+    assert settings_manager.get("mobile_max_records") == 25

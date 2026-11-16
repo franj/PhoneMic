@@ -28,6 +28,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import uvicorn
 
+from PySide6.QtCore import Qt
+
 from phonemic.bridge_interface import EventBridge
 from phonemic.gui.file import FileReceiver
 from phonemic.gui.photo import PhotoReceiver
@@ -39,7 +41,11 @@ from phonemic.tunnel.frame import decode as frame_decode
 from phonemic.tunnel.frame import encode as frame_encode
 from phonemic.utils.debug import is_debug_mode
 from phonemic.utils.paths import get_res_path, is_frozen
-from phonemic.utils.settings_manager import SettingsManager
+from phonemic.utils.settings_manager import (
+    SettingsManager,
+    MOBILE_UPLINK_KEYS,
+    normalize_uplink_config,
+)
 from phonemic.utils.i18n import I18n
 
 logger = logging.getLogger(__name__)
@@ -63,20 +69,27 @@ class ConnectionManager:
 
         # 配置热重载支持
         self.sm = SettingsManager.instance()
-        self.max_records = self.sm.get("mobile_max_records", 10)
-        self.send_mode = self.sm.get("mobile_send_mode", "") or ""
-        self.sm.connect_changed("mobile_max_records", self._on_max_records_changed)
-        self.sm.connect_changed("mobile_send_mode", self._on_send_mode_changed)
+        # 手机端配置：**同一个字典既用于首帧下发，也用于缓存热推后的值**。
+        # 键表见 settings_manager.MOBILE_UPLINK_KEYS —— 那张表定义「哪些键手机能写」，
+        # 这里按同一份表注册热推，新增一个键只改一处。
+        self.mobile_config = {k: self.sm.get(k) for k in MOBILE_UPLINK_KEYS}
+        # **必须显式 DirectConnection**：手机上行 config 由服务端的 asyncio 线程写盘，
+        # 而 setting_changed 的默认 AutoConnection 会把回调**排队到 GUI 线程**——
+        # GUI 线程一旦忙（或被测试环境里根本没有 Qt 事件循环），这一帧回声就永远发不出去，
+        # 手机端只能停在乐观更新的错误状态。这里直接在当前线程同步调用即可：
+        # 回调只做「缓存 + 推一帧给手机」，不碰任何 Qt 控件，跨线程是安全的。
+        # 注意只对本模块的订阅改连接方式，其它 connect_changed 的 GUI 订阅保持默认（排队）。
+        self.sm.setting_changed.connect(
+            self._on_setting_changed, Qt.ConnectionType.DirectConnection
+        )
 
-    def _on_max_records_changed(self, new_value: int) -> None:
-        self.max_records = new_value
-        logger.info(f"Mobile max records updated to {new_value}")
-        push_config("mobile_max_records", self.max_records)
-
-    def _on_send_mode_changed(self, new_value) -> None:
-        self.send_mode = new_value or ""
-        logger.info(f"Mobile send mode updated to {self.send_mode or 'default'}")
-        push_config("mobile_send_mode", self.send_mode)
+    def _on_setting_changed(self, key: str, new_value) -> None:
+        """PC 端改动（设置对话框 / 手机上行落盘）→ 热推给手机。"""
+        if key not in self.mobile_config:      # 与本类无关的键直接忽略
+            return
+        self.mobile_config[key] = new_value
+        logger.info(f"Mobile config updated: {key} = {new_value!r}")
+        push_config(key, new_value)
 
     async def connect(self, websocket, session) -> None:
         """
@@ -110,18 +123,15 @@ class ConnectionManager:
         )
 
         # 发送当前配置（加密传输）
+        # **首帧全量**：手机端换设备 / 清缓存后，就靠这一帧把全部设置带回来，
+        # 因此这里必须是 self.mobile_config 整体，而不是逐个键手写。
         try:
-            await _send_frame(websocket, {
-                "type": "config",
-                "mobile_max_records": self.max_records,
-                "mobile_send_mode": self.send_mode,
-                "max_frame_size": WS_MAX_FRAME_SIZE,
-            })
-            logger.debug(
-                f"Sent config to client: max_records={self.max_records}, "
-                f"send_mode={self.send_mode or 'default'}, "
-                f"max_frame_size={WS_MAX_FRAME_SIZE}"
-            )
+            frame = {"type": "config"}
+            frame.update(self.mobile_config)
+            frame["max_frame_size"] = WS_MAX_FRAME_SIZE
+            await _send_frame(websocket, frame)
+            logger.debug(f"Sent config to client: {self.mobile_config}, "
+                         f"max_frame_size={WS_MAX_FRAME_SIZE}")
         except Exception as e:
             logger.warning(f"Failed to send initial config: {e}")
 
@@ -838,6 +848,42 @@ async def _handle_auth(websocket, session) -> bool:
     return True
 
 
+async def _apply_uplink_config(websocket, msg: dict) -> None:
+    """处理手机端上行的 config 帧（wire-protocol.md §7）。
+
+    契约（手机端依赖它做「以 PC 为准」的自愈）：
+
+        无论落盘成功还是被拒绝，这条路径**恰好回一帧**该键的真实值。
+
+    实现上分两支，保证不会多推：
+
+    - 值合法且与磁盘不同 → 交给 ``sm.set()``，由 ``connect_changed`` 的热推回调发出
+      唯一一帧（回声）；这里直接返回，不再自己发。
+    - 值非法 / 与磁盘相同 → ``set()`` 不会发信号（它只在值真正变化时发），
+      所以在这里补一帧当前真实值。手机端据此把界面改回原样。
+
+    白名单外的键**只记日志、不回帧**：旧版手机页面（缓存）刷不出新键时不该被惩罚，
+    回一帧 malformed 只会让它误以为链路有问题。
+    """
+    key = msg.get("key")
+    if key not in MOBILE_UPLINK_KEYS:
+        logger.warning(f"Rejected uplink config, unknown key: {key!r}")
+        return
+
+    sm = SettingsManager.instance()
+    normalized = normalize_uplink_config(key, msg.get("value"))
+    if normalized is not None and sm.get(key) != normalized:
+        sm.set(key, normalized)   # → connect_changed → 热推一帧（唯一回声）
+        logger.info(f"Phone updated config: {key} = {normalized!r}")
+        return
+
+    if normalized is None:
+        logger.warning(f"Rejected uplink config value: {key} = {msg.get('value')!r}")
+    # 回帧形状与 push_config / 首帧一致：**扁平单键**（`{"type":"config", <key>: <value>}`），
+    # 手机端是按 `data.<key> !== undefined` 逐键解析的，这里不能写成 {key, value} 两字段。
+    await _send_frame(websocket, {"type": "config", key: sm.get(key)})
+
+
 async def _handle_client_message(websocket, session, raw: bytes) -> bool:
     """
     S1：处理认证后的单条 binary 消息。
@@ -901,6 +947,9 @@ async def _handle_client_message(websocket, session, raw: bytes) -> bool:
         # cancel（cancel 已入队，随后必被消费者处理）。
         await _send_frame(websocket, {"type": "hello", "t": inner.get("t")})
         logger.debug(f"Received hello (t={inner.get('t')})")
+    elif msg_type == "config":
+        # 手机端改设置（wire-protocol.md §7 config 上行）：PC 落盘为唯一真相源
+        await _apply_uplink_config(websocket, inner)
     else:
         logger.warning(f"Unknown inner message type: {msg_type}")
         await _send_frame(websocket, {

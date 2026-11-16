@@ -10,7 +10,7 @@ import logging
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout,
-    QGroupBox, QSpinBox, QComboBox, QCheckBox,
+    QGroupBox, QSpinBox, QComboBox, QCheckBox, QLabel,
     QDialogButtonBox, QScrollArea, QWidget, QMessageBox
 )
 
@@ -37,6 +37,8 @@ class SettingsDialog(QDialog):
 
         self._setup_ui()
         self._load_settings()
+        # 手机端「设置」里改了这两项 → 本对话框实时跟上（理由见 _sync_mobile_widgets）
+        self.sm.setting_changed.connect(self._sync_mobile_widgets)
         self.accepted.connect(self._save_settings)
 
     def _setup_ui(self):
@@ -113,7 +115,24 @@ class SettingsDialog(QDialog):
         self.send_mode_combo.setToolTip(self.i18n.tr("settings.send_mode_tooltip"))
         layout.addRow(self.i18n.tr("settings.send_mode") + ":", self.send_mode_combo)
 
+        # 说明：这两项在手机端「设置」tab 里也能改，那边的改动会实时反映到这里
+        hint = QLabel(self.i18n.tr("settings.mobile_phone_hint"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addRow(hint)
+
         return group
+
+    def _sync_mobile_widgets(self, key: str, value) -> None:
+        """手机端改了这两项配置时，让本对话框里的控件跟上（避免「打开着的对话框」显示旧值）。
+
+        不这样做会有一个真实的覆盖风险：对话框开着 → 手机改了发送方式 → 用户回来点「确定」，
+        `_save_settings` 会把对话框里的旧值整体写回，把手机刚改的覆盖掉。
+        """
+        if key == "mobile_max_records" and isinstance(value, int):
+            self.max_records_spin.setValue(value)
+        elif key == "mobile_send_mode":
+            self.set_combo_index(self.send_mode_combo, value or "")
 
     def _create_close_action_group(self):
         group = QGroupBox(self.i18n.tr("settings.close_group"))

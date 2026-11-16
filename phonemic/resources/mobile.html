@@ -145,12 +145,62 @@
             -webkit-backdrop-filter: blur(10px);
             border-top: 1px solid #e5e5e5;
             padding: 10px 12px;
+            /* 纵向两行：输入条 + 快捷按钮行（快捷行可在设置里关掉，或一个按钮都没有） */
             display: flex;
-            align-items: flex-end;
-            gap: 10px;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 6px;
             box-shadow: 0 -1px 10px rgba(0,0,0,0.03);
             flex-shrink: 0;
             position: relative;
+        }
+        /* 输入条本体：垃圾桶 / 输入框 / + / 发送 —— 保持原来的横排对齐 */
+        #bottom-bar .bar-main {
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+        }
+        /* 快捷按钮行：列数由 JS 按实际按钮数写入 grid-template-columns */
+        #quick-bar {
+            display: grid;
+            gap: 6px;
+        }
+        #quick-bar.hidden {
+            display: none;
+        }
+        #quick-bar button {
+            height: 34px;
+            min-width: 0;
+            padding: 0 4px;
+            border: 1px solid #e0e0e0;
+            border-radius: 9px;
+            background: #ffffff;
+            color: #555;
+            font-size: 13px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            touch-action: manipulation;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            transition: transform 0.06s, background-color 0.1s;
+        }
+        #quick-bar button:active {
+            transform: scale(0.95);
+            background-image: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07));
+        }
+        /* 语义色与键盘面板一致：主键实心绿 / 破坏性浅红 / 其余中性 */
+        #quick-bar button[data-tone="primary"] {
+            background: #07c160;
+            border-color: #07c160;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        #quick-bar button[data-tone="danger"] {
+            background: rgba(239, 68, 68, 0.10);
+            border-color: rgba(239, 68, 68, 0.35);
+            color: #e57373;
         }
         .input-wrapper {
             flex: 1;
@@ -374,9 +424,15 @@
             color: #999;
             box-shadow: inset 0 0 0 1px #ccc;
         }
-        #btn-send:disabled, #mode-toggle:disabled, #btn-plus:disabled {
+        #btn-send:disabled, #mode-toggle:disabled, #btn-plus:disabled,
+        #quick-bar button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+        }
+        /* 断线时整行失效：用 body 类而不是按钮 disabled，重绘后依然有效 */
+        body.link-down #quick-bar button {
+            opacity: 0.4;
+            pointer-events: none;
         }
         * {
             -webkit-user-select: none;
@@ -637,19 +693,24 @@
         <div id="chat-spacer" class="chat-spacer" data-page-node-id="9yOVA5lEKLYVOeKXwhkoQ8"></div>
     </div>
     <div id="bottom-bar" data-page-node-id="gHAkPVZHq2dGAEdhjMJvDG">
-        <button id="btn-clear" aria-label="清空输入框" data-page-node-id="Mp1u43hgDFQ8bQ1CC0uodU">🗑️</button>
-        <div class="input-wrapper" data-page-node-id="xE28wa2nk0Xl7jmR42Qmwc">
-            <textarea id="input-box" rows="1"></textarea>
-            <button id="mode-toggle" data-page-node-id="NQ0W5iXZWejDTUyEOEimOR">⚡</button>
+        <div class="bar-main">
+            <button id="btn-clear" aria-label="清空输入框" data-page-node-id="Mp1u43hgDFQ8bQ1CC0uodU">🗑️</button>
+            <div class="input-wrapper" data-page-node-id="xE28wa2nk0Xl7jmR42Qmwc">
+                <textarea id="input-box" rows="1"></textarea>
+                <button id="mode-toggle" data-page-node-id="NQ0W5iXZWejDTUyEOEimOR">⚡</button>
+            </div>
+            <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="plus-icon" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
+            <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
         </div>
-        <button id="btn-plus" data-page-node-id="a2xgZzVrS3MDshFgBm1Jja"><span class="plus-icon" data-page-node-id="5sSDsEmhK721fRH68hp2b2"></span></button>
-        <button id="btn-send" data-page-node-id="VtG4Z3V3IGwxnJUzNm3IK2"></button>
+        <!-- 快捷按钮行：内容与显隐由手机端设置决定（PC 的 settings.json 是唯一真相源） -->
+        <div id="quick-bar" class="hidden"></div>
         <!-- 子面板切换条：悬浮在输入条上方，不占面板空间；随汉堡/焦点显隐 -->
         <div id="panel-tabs" class="hidden">
             <button type="button" class="tab active" data-panel="keys" aria-label="键盘"><span class="ico">⌨️</span></button>
             <button type="button" class="tab" data-panel="file" aria-label="文件"><span class="ico">📁</span></button>
             <button type="button" class="tab" data-panel="touchpad" aria-label="触控板"><span class="ico">🖱️</span></button>
             <button type="button" class="tab" data-panel="mouse" aria-label="鼠标"><span class="ico">🕹️</span></button>
+            <button type="button" class="tab" data-panel="settings" aria-label="设置"><span class="ico">⚙️</span></button>
         </div>
     </div>
     <div id="accessory-panel">
@@ -662,6 +723,8 @@
             <section id="view-touchpad" class="panel-view"></section>
             <!-- 鼠标子面板：王者荣耀式虚拟摇杆（速度模型）+ 4×4 动作按钮网格 -->
             <section id="view-mouse" class="panel-view"></section>
+            <!-- 设置子面板：手机端唯一的配置入口，配置落盘在 PC 的 settings.json -->
+            <section id="view-settings" class="panel-view"></section>
         </div>
     </div>
 </div>
@@ -1328,7 +1391,20 @@
         on(key, callback, opts = null) { return this.hub.on(key, callback, opts); }
         _notify(key, newVal, oldVal) { this.hub.emit(key, newVal, oldVal); }
     }
-    const DEFAULT_CONFIG = { maxHistory: 50 };
+    // 默认值只在「首帧 config 到达之前」生效（握手后约几十毫秒），真正的出厂值在
+    // PC 的 settings.json 里 —— 这里保持一致只是为了不闪一下再变。
+    const DEFAULT_CONFIG = {
+        maxHistory: 50,
+        showClearBtn: true,
+        showQuickBar: false,
+        quickActions: [
+            { keys: 'ctrl+a, delete' },
+            { keys: 'ctrl+z' },
+            { keys: 'shift+enter' },
+            { keys: 'enter' },
+        ],
+        sendMode: 'auto',
+    };
     const appConfig = new ConfigManager(DEFAULT_CONFIG);
 
     // ========== 3. 聊天记录管理器 ==========
@@ -2562,10 +2638,8 @@
             this.modeToggle.addEventListener('click', (e) => {
                 e.stopPropagation();
                 if (!this.wsClient.getConnected()) return;
-                this.autoMode = !this.autoMode;
-                this.updateSendButtonUI();
+                this.setAutoMode(!this.autoMode);
                 if (navigator.vibrate) navigator.vibrate(30);
-                this.updateModeToggleVisibility();
                 this.inputBox.focus();
             });
             
@@ -2631,6 +2705,9 @@
             this.autoMode = next;
             this.updateSendButtonUI();
             this.updateModeToggleVisibility();
+            // 让设置面板的分段控件跟着走。⚡ 是「临时切换」：只改本地、不落盘；
+            // 真正写回 PC 的动作在设置面板里（见 SettingsPanel 的 data-seg 分支）。
+            this.config.set('sendMode', next ? 'auto' : 'manual');
         }
         updateModeToggleVisibility() {
             if (!this.wsClient.getConnected()) {
@@ -2675,6 +2752,7 @@
                 statusBar.classList.remove('loading');
                 statusBar.classList.remove('debug');
                 chatListDiv.classList.remove('offline');
+                document.body.classList.remove('link-down');
                 this.inputBox.disabled = false;
                 this.btnSend.disabled = false;
                 this.btnPlus.disabled = false;
@@ -2688,6 +2766,7 @@
                 statusBar.classList.toggle('loading', type === 'loading');
                 statusBar.classList.remove('debug');
                 chatListDiv.classList.add('offline');
+                document.body.classList.add('link-down');
                 this.inputBox.disabled = true;
                 this.btnSend.disabled = true;
                 this.btnPlus.disabled = true;
@@ -4484,7 +4563,8 @@
         body.file-transferring #panel-tabs .tab { opacity: .3; pointer-events: none; }
         body.file-transferring #btn-plus,
         body.file-transferring #btn-send,
-        body.file-transferring #btn-clear { opacity: .4; pointer-events: none; }
+        body.file-transferring #btn-clear,
+        body.file-transferring #quick-bar button { opacity: .4; pointer-events: none; }
         body.file-transferring #input-box { opacity: .4; }
         body.file-transferring #accessory-panel .panel-view:not(#view-file) { opacity: .3; pointer-events: none; }
         `;
@@ -5109,6 +5189,540 @@
         }
     }
 
+    // ========== 6.6 快捷按钮行 + 设置子面板 ==========
+    //
+    // 这一节解决的是「手机端唯一配置入口」：PC 的 settings.json 是**唯一真相源**，
+    // 手机端只做渲染 + 上行写入，本地不持久化。握手后的首帧 config 会把全部设置带回，
+    // 所以换手机 / 清缓存都不用重配（设计见 docs/wire-protocol.md §7 config）。
+    //
+    // 三条约定：
+    //   - 任何用户手势 → 先 appConfig.set() 本地立即生效，**再**发上行 config 帧；
+    //   - 任何下发 config 帧 → 一律覆盖 appConfig（以 PC 为准），值相同则不重绘；
+    //   - 只有「用户手势」会发帧，appConfig 变化本身不发 —— 回声因此不会被再放大一圈。
+
+    /** 内置按钮池：**只有这一处定义键名**。加候选往这里加一行，PC 端无需改动。 */
+    const QUICK_ACTION_POOL = [
+        { id: 'clear',     keys: 'ctrl+a, delete', i18n: 'qa_clear',     tone: 'danger' },
+        { id: 'undo',      keys: 'ctrl+z',         i18n: 'qa_undo' },
+        { id: 'redo',      keys: 'ctrl+y',         i18n: 'qa_redo' },
+        { id: 'newline',   keys: 'shift+enter',    i18n: 'qa_newline' },
+        { id: 'enter',     keys: 'enter',          i18n: 'qa_enter',     tone: 'primary' },
+        { id: 'backspace', keys: 'backspace',      i18n: 'qa_backspace' },
+        { id: 'esc',       keys: 'esc',            i18n: 'qa_esc' },
+        { id: 'selectall', keys: 'ctrl+a',         i18n: 'qa_selectall' },
+        { id: 'save',      keys: 'ctrl+s',         i18n: 'qa_save' },
+        { id: 'paste',     keys: 'ctrl+v',         i18n: 'qa_paste' }
+    ];
+    const QUICK_ACTION_MAX = 6;   // 与 settings_manager.QUICK_ACTION_MAX 保持一致
+
+    /** 按 keys 反查池子条目；配置里存的是 keys，池子负责给出默认名与配色。 */
+    function quickPoolEntry(keys) {
+        const k = String(keys || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        for (let i = 0; i < QUICK_ACTION_POOL.length; i++) {
+            if (QUICK_ACTION_POOL[i].keys === k) return QUICK_ACTION_POOL[i];
+        }
+        return null;
+    }
+    /** 按钮显示名：用户改过就用他的 `label`，没改过就从池子取语言包文案。 */
+    function quickLabel(entry) {
+        if (entry && typeof entry.label === 'string' && entry.label.trim() !== '') return entry.label;
+        const p = quickPoolEntry(entry && entry.keys);
+        return p ? t(p.i18n) : ((entry && entry.keys) || '');
+    }
+    /** 键名的人话版（设置页只读展示）：enter → Enter，ctrl+a → Ctrl+A */
+    function quickKeysText(keys) {
+        return String(keys || '')
+            .split(',')
+            .map(function (combo) {
+                return combo.trim().split('+').map(function (p) {
+                    return p === 'ctrl' ? 'Ctrl' : p === 'shift' ? 'Shift'
+                         : p === 'alt' ? 'Alt' : p === 'win' ? 'Win'
+                         : p.charAt(0).toUpperCase() + p.slice(1);
+                }).join('+');
+            })
+            .join(', ');
+    }
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    /**
+     * 输入框下方的快捷按钮行。
+     *
+     * 只是 appConfig 的一面镜子：内容与显隐全由 `quickActions` / `showQuickBar` 决定，
+     * 自己不发配置帧、也不碰设置面板。点击只发一帧 key（与 KeyboardPanel 同一出口语义）。
+     */
+    class QuickBar {
+        constructor(el, options) {
+            this.el = el;
+            this.onCommand = (options && options.onCommand) || function () {};
+            appConfig.on('quickActions', () => this.render());
+            appConfig.on('showQuickBar', () => this.render());
+            this.render();
+        }
+
+        render() {
+            const list = appConfig.get('quickActions') || [];
+            const visible = !!appConfig.get('showQuickBar') && list.length > 0;
+            this.el.classList.toggle('hidden', !visible);
+            if (!visible) {
+                this.el.innerHTML = '';
+                return;
+            }
+            this.el.style.gridTemplateColumns = 'repeat(' + list.length + ', minmax(0, 1fr))';
+            const self = this;
+            this.el.innerHTML = list.map(function (a) {
+                const p = quickPoolEntry(a.keys);
+                const tone = p && p.tone ? ' data-tone="' + p.tone + '"' : '';
+                return '<button type="button" data-keys="' + escapeHtml(a.keys) + '"' + tone + '>'
+                     + escapeHtml(quickLabel(a)) + '</button>';
+            }).join('');
+
+            this.el.querySelectorAll('button').forEach(function (btn) {
+                btn.addEventListener('pointerdown', function (e) {
+                    e.preventDefault();
+                    if (navigator.vibrate) navigator.vibrate(10);
+                    self.onCommand({ type: 'key', keys: btn.dataset.keys });
+                });
+            });
+        }
+    }
+
+    /**
+     * 设置子面板（`#view-settings`）。
+     *
+     * 与其它面板的差别：**它改的是 PC 上的配置文件**，所以除了 onCommand 口子，
+     * 还需要一个 transport 用来发上行 config 帧 —— 与 FilePanel 一样属于
+     * 「既要发也要收」的面板，因此不走 onCommand 注入。
+     *
+     * 控件与键的对应：
+     *   垃圾桶显隐   → mobile_show_clear_btn  (bool)
+     *   快捷行显隐   → mobile_show_quick_bar  (bool)
+     *   按钮池增删   → mobile_quick_actions   ([{keys, label?}], 顺序即显示顺序)
+     *   发送方式     → mobile_send_mode       ("auto" | "manual")
+     *   记录上限     → mobile_max_records     (5–50)
+     */
+    class SettingsPanel {
+        static get STYLES() {
+            return `
+        .settings-panel {
+            height: 100%;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            box-sizing: border-box;
+            padding: 2px 12px 12px;
+        }
+        .settings-panel .st-group {
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        }
+        .settings-panel .st-group:last-child {
+            border-bottom: none;
+        }
+        .settings-panel .st-title {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 500;
+            color: #8a8a8a;
+            margin-bottom: 8px;
+        }
+        .settings-panel .st-count, .settings-panel .st-val {
+            font-size: 11px;
+            font-weight: 400;
+            color: #aaa;
+        }
+        .settings-panel .st-hint {
+            font-size: 11px;
+            color: #aaa;
+            margin-top: 6px;
+        }
+        .settings-panel .st-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            min-height: 38px;
+            font-size: 14px;
+            color: #333;
+        }
+        .settings-panel .st-row-sub {
+            display: block;
+            font-size: 11px;
+            color: #aaa;
+            margin-top: 2px;
+        }
+        .settings-panel .st-switch {
+            appearance: none;
+            -webkit-appearance: none;
+            flex-shrink: 0;
+            width: 42px;
+            height: 24px;
+            border-radius: 12px;
+            background: #d8d8d8;
+            position: relative;
+            cursor: pointer;
+            transition: background-color 0.18s;
+        }
+        .settings-panel .st-switch::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            transition: transform 0.18s;
+        }
+        .settings-panel .st-switch:checked {
+            background: #07c160;
+        }
+        .settings-panel .st-switch:checked::after {
+            transform: translateX(18px);
+        }
+        .settings-panel .st-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+        .settings-panel .st-item input[type="text"] {
+            flex: 0 0 88px;
+            width: 88px;
+            box-sizing: border-box;
+            padding: 7px 8px;
+            font-size: 13px;
+            font-family: inherit;
+            color: #333;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            outline: none;
+        }
+        .settings-panel .st-item input[type="text"]:focus {
+            border-color: #07c160;
+        }
+        .settings-panel .st-keys {
+            flex: 1;
+            min-width: 0;
+            font-size: 11px;
+            color: #999;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .settings-panel .st-mini {
+            flex-shrink: 0;
+            width: 30px;
+            height: 30px;
+            padding: 0;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #fff;
+            color: #666;
+            font-size: 13px;
+            font-family: inherit;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .settings-panel .st-mini:active {
+            transform: scale(0.92);
+            background: #f2f2f2;
+        }
+        .settings-panel .st-mini[data-role="del"] {
+            color: #e57373;
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+        .settings-panel .st-mini:disabled {
+            opacity: 0.35;
+        }
+        .settings-panel .st-pool {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        .settings-panel .st-chip {
+            padding: 6px 11px;
+            font-size: 13px;
+            font-family: inherit;
+            color: #475569;
+            background: #f4f5f7;
+            border: 1px solid #e4e6ea;
+            border-radius: 14px;
+            cursor: pointer;
+        }
+        .settings-panel .st-chip:active {
+            transform: scale(0.95);
+            background: #e9ebef;
+        }
+        .settings-panel .st-chip:disabled {
+            opacity: 0.35;
+        }
+        .settings-panel .st-empty {
+            font-size: 12px;
+            color: #aaa;
+            padding: 4px 0;
+        }
+        .settings-panel .st-seg {
+            display: flex;
+            gap: 6px;
+        }
+        .settings-panel .st-seg button {
+            flex: 1;
+            height: 36px;
+            font-size: 13px;
+            font-family: inherit;
+            color: #555;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 9px;
+            cursor: pointer;
+        }
+        .settings-panel .st-seg button.active {
+            color: #fff;
+            background: #07c160;
+            border-color: #07c160;
+            font-weight: 500;
+        }
+        .settings-panel .st-range {
+            width: 100%;
+            margin: 2px 0 0;
+            accent-color: #07c160;
+        }
+        .settings-panel .st-footer {
+            font-size: 11px;
+            color: #aaa;
+            text-align: center;
+            padding: 10px 0 4px;
+        }
+        .settings-panel .st-footer.offline {
+            color: #e6a23c;
+        }
+        `;
+        }
+
+        constructor(root, options) {
+            this.transport = options.transport;      // WSClient：发上行 config 帧
+            this._injectStyles();
+            // 与其它面板一致：在 section 内建独立根容器，避免 display 规则盖过 .panel-view 显隐
+            root.innerHTML = '<div class="settings-panel"></div>';
+            this.root = root.querySelector('.settings-panel');
+            this._buildDOM();
+            this._bindEvents();
+
+            // appConfig 是唯一渲染输入：本地手势改它、PC 下发也改它，这里只管跟着重绘
+            const self = this;
+            ['showClearBtn', 'showQuickBar', 'quickActions', 'sendMode', 'maxHistory']
+                .forEach(function (key) { appConfig.on(key, function () { self._syncFromConfig(); }); });
+            this._syncFromConfig();
+        }
+
+        _injectStyles() {
+            if (document.getElementById('settings-panel-styles')) return;
+            const style = document.createElement('style');
+            style.id = 'settings-panel-styles';
+            style.textContent = SettingsPanel.STYLES;
+            document.head.appendChild(style);
+        }
+
+        _buildDOM() {
+            this.root.innerHTML =
+                '<div class="st-group">' +
+                    '<div class="st-title">' + escapeHtml(t('set_group_input')) + '</div>' +
+                    '<label class="st-row"><span>' + escapeHtml(t('set_show_clear')) + '</span>' +
+                        '<input type="checkbox" class="st-switch" data-key="mobile_show_clear_btn"></label>' +
+                    '<label class="st-row"><span>' + escapeHtml(t('set_show_quick')) + '</span>' +
+                        '<input type="checkbox" class="st-switch" data-key="mobile_show_quick_bar"></label>' +
+                '</div>' +
+                '<div class="st-group">' +
+                    '<div class="st-title"><span>' + escapeHtml(t('set_quick_title')) + '</span>' +
+                        '<span class="st-count" data-count></span></div>' +
+                    '<div data-list></div>' +
+                    '<div class="st-hint">' + escapeHtml(t('set_quick_add')) + '</div>' +
+                    '<div class="st-pool" data-pool></div>' +
+                    '<div class="st-hint">' + escapeHtml(t('set_quick_hint')) + '</div>' +
+                '</div>' +
+                '<div class="st-group">' +
+                    '<div class="st-title"><span>' + escapeHtml(t('set_send_mode')) + '</span></div>' +
+                    '<div class="st-seg" data-seg>' +
+                        '<button type="button" data-mode="auto">' + escapeHtml(t('set_send_auto')) + '</button>' +
+                        '<button type="button" data-mode="manual">' + escapeHtml(t('set_send_manual')) + '</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="st-group">' +
+                    '<div class="st-title"><span>' + escapeHtml(t('set_max_records')) + '</span>' +
+                        '<span class="st-val" data-maxval></span></div>' +
+                    '<input type="range" class="st-range" min="5" max="50" step="1" data-maxrange>' +
+                '</div>' +
+                '<div class="st-footer" data-footer></div>';
+        }
+
+        _bindEvents() {
+            const self = this;
+
+            // 两个开关：手势即写，本地先生效
+            this.root.querySelectorAll('.st-switch').forEach(function (el) {
+                el.addEventListener('change', function () {
+                    const key = el.dataset.key;
+                    const appKey = key === 'mobile_show_clear_btn' ? 'showClearBtn' : 'showQuickBar';
+                    appConfig.set(appKey, el.checked);
+                    self._send(key, el.checked);
+                });
+            });
+
+            // 按钮池：添加 → 追加到末尾
+            this.root.querySelector('[data-pool]').addEventListener('click', function (e) {
+                const chip = e.target.closest('.st-chip');
+                if (!chip) return;
+                const list = (appConfig.get('quickActions') || []).slice();
+                if (list.length >= QUICK_ACTION_MAX) return;
+                list.push({ keys: chip.dataset.keys });
+                self._commitActions(list);
+            });
+
+            // 已启用列表：改名 / 上移 / 下移 / 移除（事件委托，重绘后无需重绑）
+            const list = this.root.querySelector('[data-list]');
+            list.addEventListener('click', function (e) {
+                const btn = e.target.closest('.st-mini');
+                if (!btn) return;
+                const idx = Number(btn.closest('.st-item').dataset.index);
+                const items = (appConfig.get('quickActions') || []).slice();
+                const role = btn.dataset.role;
+                if (role === 'del') {
+                    items.splice(idx, 1);
+                } else if (role === 'up' && idx > 0) {
+                    const tmp = items[idx - 1]; items[idx - 1] = items[idx]; items[idx] = tmp;
+                } else if (role === 'down' && idx < items.length - 1) {
+                    const tmp = items[idx + 1]; items[idx + 1] = items[idx]; items[idx] = tmp;
+                } else {
+                    return;
+                }
+                self._commitActions(items);
+            });
+            list.addEventListener('change', function (e) {
+                const input = e.target.closest('input[data-role="label"]');
+                if (!input) return;
+                const idx = Number(input.closest('.st-item').dataset.index);
+                const items = (appConfig.get('quickActions') || []).map(function (x) {
+                    return { keys: x.keys, label: x.label };
+                });
+                const text = input.value.replace(/\s+/g, ' ').trim().slice(0, 8);
+                if (!text) return;
+                const pool = quickPoolEntry(items[idx].keys);
+                // 改回池子默认名 → 直接删掉 label，让它重新跟语言包走
+                if (pool && text === t(pool.i18n)) delete items[idx].label;
+                else items[idx].label = text;
+                self._commitActions(items);
+            });
+
+            // 发送方式
+            this.root.querySelector('[data-seg]').addEventListener('click', function (e) {
+                const btn = e.target.closest('button[data-mode]');
+                if (!btn) return;
+                const mode = btn.dataset.mode;
+                if (appConfig.get('sendMode') === mode) return;
+                appConfig.set('sendMode', mode);          // 立即生效（⚡ 按钮跟着变）
+                if (navigator.vibrate) navigator.vibrate(15);
+                self._send('mobile_send_mode', mode);
+            });
+
+            // 记录上限：拖动只更新读数，松手才落盘（避免拖一次发几十帧）
+            const range = this.root.querySelector('[data-maxrange]');
+            range.addEventListener('input', function () {
+                self.root.querySelector('[data-maxval]').textContent = range.value;
+            });
+            range.addEventListener('change', function () {
+                const val = Number(range.value);
+                appConfig.set('maxHistory', val);
+                self._send('mobile_max_records', val);
+            });
+
+            // 连接态：断开时提示「设置先存在本机，连上后再同步」
+            if (this.transport && this.transport.on) {
+                this.transport.on(WS_STATUS, function (st) { self._renderFooter(!!st.connected); });
+            }
+        }
+
+        /** 一切用户手势的出口：先本地生效，再上行一帧 config。 */
+        _commitActions(list) {
+            // 只留 keys / label 两个字段，避免把界面态的脏字段带上行
+            const clean = list.map(function (x) {
+                return x.label === undefined ? { keys: x.keys } : { keys: x.keys, label: x.label };
+            });
+            appConfig.set('quickActions', clean);      // → 本面板重绘 + QuickBar 重绘
+            this._send('mobile_quick_actions', clean);
+        }
+
+        _send(key, value) {
+            if (!this.transport) return;
+            this.transport.sendFrame({ type: 'config', key: key, value: value });
+        }
+
+        /** 从 appConfig 同步到 DOM（PC 下发与本地手势都走这里，保持单一渲染入口）。 */
+        _syncFromConfig() {
+            const q = this.root.querySelector.bind(this.root);
+
+            q('.st-switch[data-key="mobile_show_clear_btn"]').checked = !!appConfig.get('showClearBtn');
+            q('.st-switch[data-key="mobile_show_quick_bar"]').checked = !!appConfig.get('showQuickBar');
+
+            const list = appConfig.get('quickActions') || [];
+            q('[data-count]').textContent = list.length + '/' + QUICK_ACTION_MAX;
+            q('[data-list]').innerHTML = list.length === 0
+                ? '<div class="st-empty">' + escapeHtml(t('set_quick_empty')) + '</div>'
+                : list.map(function (a, i) {
+                    const pool = quickPoolEntry(a.keys);
+                    const title = pool ? t(pool.i18n) : '';
+                    return '<div class="st-item" data-index="' + i + '">' +
+                        '<input type="text" maxlength="8" data-role="label" value="' +
+                            escapeHtml(quickLabel(a)) + '" title="' + escapeHtml(title) + '">' +
+                        '<span class="st-keys">' + escapeHtml(quickKeysText(a.keys)) + '</span>' +
+                        '<button type="button" class="st-mini" data-role="up"' +
+                            (i === 0 ? ' disabled' : '') + ' aria-label="' + escapeHtml(t('set_move_up')) + '">↑</button>' +
+                        '<button type="button" class="st-mini" data-role="down"' +
+                            (i === list.length - 1 ? ' disabled' : '') + ' aria-label="' + escapeHtml(t('set_move_down')) + '">↓</button>' +
+                        '<button type="button" class="st-mini" data-role="del" aria-label="' +
+                            escapeHtml(t('set_remove')) + '">×</button>' +
+                        '</div>';
+                }).join('');
+
+            // 可添加：池子里还没用上的（按 keys 去重），满了就整排灰掉
+            const used = {};
+            list.forEach(function (a) { used[String(a.keys).toLowerCase()] = true; });
+            const full = list.length >= QUICK_ACTION_MAX;
+            q('[data-pool]').innerHTML = QUICK_ACTION_POOL.filter(function (p) {
+                return !used[p.keys];
+            }).map(function (p) {
+                return '<button type="button" class="st-chip" data-keys="' + escapeHtml(p.keys) + '"' +
+                    (full ? ' disabled' : '') + '>' + escapeHtml(t(p.i18n)) + '</button>';
+            }).join('');
+
+            // 发送方式（"manual" 以外一律按自动，与 UI 的 autoMode 语义对齐）
+            const mode = appConfig.get('sendMode') === 'manual' ? 'manual' : 'auto';
+            this.root.querySelectorAll('[data-seg] button').forEach(function (b) {
+                b.classList.toggle('active', b.dataset.mode === mode);
+            });
+
+            const max = appConfig.get('maxHistory');
+            q('[data-maxrange]').value = max;
+            q('[data-maxval]').textContent = max;
+
+            this._renderFooter(this.transport ? this.transport.getConnected() : false);
+        }
+
+        _renderFooter(connected) {
+            const el = this.root.querySelector('[data-footer]');
+            if (!el) return;
+            el.classList.toggle('offline', !connected);
+            el.textContent = connected ? t('set_synced_hint') : t('set_offline_hint');
+        }
+    }
+
     // ========== 7. 主程序入口 ==========
     window.onload = async () => {
         await loadI18n();   // 必须先加载语言包，再初始化各组件
@@ -5169,6 +5783,25 @@
             }
         });
 
+        // 快捷按钮行 + 设置子面板：两者都是 appConfig 的镜子，先建它们再连 WS，
+        // 这样首帧 config 到达时界面已经能接住（否则会先按默认值画一遍再跳变）。
+        window._quickBar = new QuickBar(document.getElementById('quick-bar'), {
+            onCommand: (frame) => wsClient.sendFrame(frame)
+        });
+        window._settingsPanel = new SettingsPanel(document.getElementById('view-settings'), {
+            transport: wsClient
+        });
+        // 清空（垃圾桶）按钮显隐：也归设置管，一处订阅即可
+        const applyClearBtnVisible = (v) => {
+            const el = document.getElementById('btn-clear');
+            if (el) el.style.display = v ? '' : 'none';
+        };
+        appConfig.on('showClearBtn', applyClearBtnVisible);
+        applyClearBtnVisible(appConfig.get('showClearBtn'));
+
+        // 发送方式：设置面板 / PC 下发都写这个键，效果统一落到 UIController
+        appConfig.on('sendMode', (mode) => uiController.setAutoMode(mode !== 'manual'));
+
         new MessageInteractionManager(chatContainer, uiController, wsClient);
 
         // 断线恢复的两条快路径：都把重连窗口从「1s 起」压到「立即」
@@ -5189,6 +5822,17 @@
             if (data.mobile_max_records !== undefined) {
                 appConfig.set('maxHistory', data.mobile_max_records);
                 console.debug(t('log_config_updated') + data.mobile_max_records);
+            }
+            // 手机端界面偏好：一律以 PC 下发的值为准（settings.json 是唯一真相源）。
+            // 值没变时 appConfig.set 会直接 return，所以不会重绘、也不会抖。
+            if (data.mobile_show_clear_btn !== undefined) {
+                appConfig.set('showClearBtn', !!data.mobile_show_clear_btn);
+            }
+            if (data.mobile_show_quick_bar !== undefined) {
+                appConfig.set('showQuickBar', !!data.mobile_show_quick_bar);
+            }
+            if (Array.isArray(data.mobile_quick_actions)) {
+                appConfig.set('quickActions', data.mobile_quick_actions);
             }
             // 发送方式：PC 端「手机端设置」下发。空值=默认，不干预手机端当前选择
             if (data.mobile_send_mode !== undefined && data.mobile_send_mode !== '') {
