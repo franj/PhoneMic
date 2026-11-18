@@ -192,7 +192,7 @@ Auto mode is the default, and it is built for dictation:
 
 If you would rather decide when to send (when typing, for instance), switch to manual:
 
-- **How to switch:** while the input box is empty, a lightning bolt (⚡) appears inside it on the right; tap it to toggle.
+- **How to switch:** while the input box is empty, a lightning bolt (⚡) appears inside it on the right; tap it to toggle. **The choice is saved on the PC**, so it survives a page reload and applies to any phone that connects later; the same switch is in **Settings** on the phone.
 - **What manual looks like:**
   - The button on the right reads **"Send"** and is green.
   - Recognised speech is not sent automatically; tap "Send" or press Enter.
@@ -217,14 +217,27 @@ If you would rather decide when to send (when typing, for instance), switch to m
 
 ### 3.8 Control panel (remote control)
 
-While the input box is empty, the "Send" button at the bottom right becomes a plus (**+**). Tap it to open the control panel. Four tabs sit at the top: **Trackpad, Joystick, Keyboard, Files**. Tap to switch; the default is Trackpad.
+While the input box is empty, the "Send" button at the bottom right becomes a plus (**+**). Tap it to open the control panel. Five tabs sit at the top: **Trackpad, Joystick, Keyboard, Files, Settings**. Tap to switch; the default is Trackpad.
 
 - **Trackpad:** like a laptop trackpad — point where you want the cursor, tap to click.
 - **Joystick:** push inside a circle to move the cursor, with left/right/middle click, double-click and scroll wheel.
-- **Keyboard:** one-tap shortcuts such as undo (Ctrl+Z) and redo (Ctrl+Y).
+- **Keyboard:** one-tap shortcuts such as clear, undo (Ctrl+Z) and redo (Ctrl+Y).
 - **Files:** pick a file on the phone and it is saved to the **Downloads → PhoneMic** folder on the PC; pick an image and it goes straight into the PC clipboard, ready to paste.
+- **Settings:** adjust how the phone page itself looks and behaves — see [3.9](#39-phone-settings).
 
 > The panel can be collapsed at any time, and it does not interfere with dictation.
+
+### 3.9 Phone settings
+
+The last tab of the control panel is **Settings**. Changes take effect at once and are **stored on the PC** — reload the page, or connect a different phone, and your settings are still there.
+
+- **Show "clear draft" button:** turn it off to hide the button left of the input box. On by default.
+- **Show quick button row:** adds a row of buttons below the input box, so you need not reach for the PC keyboard after speaking. **Off by default**; turn it on when you want it.
+- **Quick buttons:** tap to add from the built-in list, up to 6. Each one can be renamed, moved up or down, or removed with ×. Ships with clear, undo, newline and enter.
+- **Send mode:** auto / manual — the same switch as the ⚡ inside the input box.
+- **Chat history limit:** how many messages the phone keeps, 5–50.
+
+> Quick buttons act on the **PC's** active window, not on the text in the phone input box: "Enter" presses Enter on the PC, "Clear" selects all and deletes. They matter most when the phone keyboard is down and your hands are on the PC.
 
 ---
 
